@@ -6,7 +6,6 @@ sentry.web.frontend.teams
 :license: BSD, see LICENSE for more details.
 """
 from django.contrib import messages
-from django.contrib.auth.models import User
 from django.core.context_processors import csrf
 from django.core.urlresolvers import reverse
 from django.http import HttpResponseRedirect
@@ -14,10 +13,12 @@ from django.views.decorators.csrf import csrf_protect
 from django.utils.translation import ugettext as _
 
 from sentry.constants import MEMBER_USER, MEMBER_OWNER
-from sentry.models import PendingTeamMember, TeamMember, AccessGroup
+from sentry.models import PendingTeamMember, TeamMember, AccessGroup, User
 from sentry.permissions import (can_add_team_member, can_remove_team, can_create_projects,
-    can_create_teams, can_edit_team_member, can_remove_team_member)
+    can_create_teams, can_edit_team_member, can_remove_team_member,
+    Permissions)
 from sentry.plugins import plugins
+from sentry.utils.samples import create_sample_event
 from sentry.web.decorators import login_required, has_access
 from sentry.web.forms.teams import (NewTeamForm, NewTeamAdminForm,
     EditTeamForm, EditTeamAdminForm, EditTeamMemberForm, NewTeamMemberForm,
@@ -25,6 +26,7 @@ from sentry.web.forms.teams import (NewTeamForm, NewTeamAdminForm,
     EditAccessGroupForm, NewAccessGroupMemberForm, NewAccessGroupProjectForm,
     RemoveAccessGroupForm)
 from sentry.web.helpers import render_to_response
+from sentry.web.frontend.generic import missing_perm
 
 
 def render_with_team_context(team, template, context, request=None):
@@ -37,15 +39,10 @@ def render_with_team_context(team, template, context, request=None):
 
 
 @login_required
-def team_list(request):
-    return render_to_response('sentry/teams/list.html', {}, request)
-
-
-@login_required
 @csrf_protect
 def create_new_team(request):
     if not can_create_teams(request.user):
-        return HttpResponseRedirect(reverse('sentry'))
+        return missing_perm(request, Permissions.ADD_TEAM)
 
     if request.user.has_perm('sentry.can_add_team'):
         form_cls = NewTeamAdminForm
@@ -62,7 +59,7 @@ def create_new_team(request):
         if not team.owner_id:
             team.owner = request.user
         team.save()
-        return HttpResponseRedirect(reverse('sentry-new-team-project', args=[team.slug]))
+        return HttpResponseRedirect(reverse('sentry-new-project', args=[team.slug]))
 
     context = csrf(request)
     context.update({
@@ -129,7 +126,10 @@ def remove_team(request, team):
 
     if form.is_valid():
         team.delete()
-        return HttpResponseRedirect(reverse('sentry-team-list'))
+        messages.add_message(
+            request, messages.SUCCESS,
+            _(u'The team %r was permanently deleted.') % (team.name.encode('utf-8'),))
+        return HttpResponseRedirect(reverse('sentry'))
 
     context = csrf(request)
     context.update({
@@ -150,6 +150,8 @@ def manage_team_projects(request, team):
 
     project_list = list(team.project_set.all())
     project_list.sort(key=lambda o: o.slug)
+    for project in project_list:
+        project.team = team
 
     context = csrf(request)
     context.update({
@@ -241,10 +243,14 @@ def accept_invite(request, member_id, token):
 
     team = pending_member.team
 
+    project_list = list(team.project_set.filter(status=0))
+    for project in project_list:
+        project.team = team
+
     context = {
         'team': team,
         'team_owner': team.get_owner_name(),
-        'project_list': list(team.project_set.filter(status=0)),
+        'project_list': project_list,
     }
 
     if not request.user.is_authenticated():
@@ -343,52 +349,6 @@ def remove_team_member(request, team, member_id):
 
 @csrf_protect
 @has_access(MEMBER_OWNER)
-def suspend_team_member(request, team, member_id):
-    try:
-        member = team.member_set.get(pk=member_id)
-    except TeamMember.DoesNotExist:
-        return HttpResponseRedirect(reverse('sentry-manage-team', args=[team.slug]))
-
-    if member.user == team.owner:
-        return HttpResponseRedirect(reverse('sentry-manage-team', args=[team.slug]))
-
-    result = plugins.first('has_perm', request.user, 'suspend_team_member', member)
-    if result is False and not request.user.has_perm('sentry.can_change_teammember'):
-        return HttpResponseRedirect(reverse('sentry'))
-
-    member.update(is_active=False)
-
-    messages.add_message(request, messages.SUCCESS,
-        _('The team member was suspended.'))
-
-    return HttpResponseRedirect(reverse('sentry-manage-team', args=[team.slug]))
-
-
-@csrf_protect
-@has_access(MEMBER_OWNER)
-def restore_team_member(request, team, member_id):
-    try:
-        member = team.member_set.get(pk=member_id)
-    except TeamMember.DoesNotExist:
-        return HttpResponseRedirect(reverse('sentry-manage-team', args=[team.slug]))
-
-    if member.user == team.owner:
-        return HttpResponseRedirect(reverse('sentry-manage-team', args=[team.slug]))
-
-    result = plugins.first('has_perm', request.user, 'restore_team_member', member)
-    if result is False and not request.user.has_perm('sentry.can_change_teammember'):
-        return HttpResponseRedirect(reverse('sentry'))
-
-    member.update(is_active=True)
-
-    messages.add_message(request, messages.SUCCESS,
-        _('The team member was made active.'))
-
-    return HttpResponseRedirect(reverse('sentry-manage-team', args=[team.slug]))
-
-
-@csrf_protect
-@has_access(MEMBER_OWNER)
 def remove_pending_team_member(request, team, member_id):
     try:
         member = team.pending_member_set.get(pk=member_id)
@@ -433,7 +393,7 @@ def create_new_team_project(request, team):
     from sentry.web.forms.projects import NewProjectAdminForm, NewProjectForm
 
     if not can_create_projects(request.user, team):
-        return HttpResponseRedirect(reverse('sentry'))
+        return missing_perm(request, Permissions.ADD_PROJECT, team=team)
 
     if request.user.has_perm('sentry.can_add_project'):
         form_cls = NewProjectAdminForm
@@ -451,6 +411,8 @@ def create_new_team_project(request, team):
         if not project.owner:
             project.owner = request.user
         project.save()
+
+        create_sample_event(project)
 
         if project.platform not in (None, 'other'):
             return HttpResponseRedirect(reverse('sentry-docs-client', args=[project.team.slug, project.slug, project.platform]))
@@ -626,12 +588,16 @@ def access_group_projects(request, team, group_id):
 
         return HttpResponseRedirect(reverse('sentry-access-group-projects', args=[team.slug, group.id]))
 
+    group_list = list(AccessGroup.objects.filter(team=team))
+    for g_ in group_list:
+        g_.team = team
+
     context = csrf(request)
     context.update({
         'group': group,
         'form': form,
         'project_list': group.projects.all(),
-        'group_list': AccessGroup.objects.filter(team=team),
+        'group_list': group_list,
         'page': 'projects',
         'SUBSECTION': 'groups',
     })

@@ -7,8 +7,8 @@ progress and the API is not frozen.
 Bundled Plugins
 ---------------
 
-Sentry includes several plugins by default. To enable a plugin, it's as simple as adding it to
-your ``INSTALLED_APPS``::
+Sentry includes several plugins by default. Builtin plugins are controlled via the
+``INSTALLED_APPS`` Django setting::
 
     INSTALLED_APPS = [
       ...
@@ -54,14 +54,17 @@ The following extensions are available and maintained by members of the Sentry c
 * `sentry-irc <https://github.com/gisce/sentry-irc>`_
 * `sentry-irccat <https://github.com/russss/sentry-irccat>`_
 * `sentry-jira <https://github.com/thurloat/sentry-jira>`_
+* `sentry-lighthouse <https://github.com/gthb/sentry-lighthouse>`_
 * `sentry-notifico <https://github.com/lukegb/sentry-notifico>`_
 * `sentry-phabricator <https://github.com/getsentry/sentry-phabricator>`_
 * `sentry-pivotal <https://github.com/getsentry/sentry-pivotal>`_
 * `sentry-pushover <https://github.com/dz0ny/sentry-pushover>`_
 * `sentry-searchbutton <https://github.com/timmyomahony/sentry-searchbutton>`_
 * `sentry-sprintly <https://github.com/mattrobenolt/sentry-sprintly>`_
+* `sentry-statsd <https://github.com/dreadatour/sentry-statsd>`_
 * `sentry-trello <https://github.com/DamianZaremba/sentry-trello>`_
 * `sentry-webhooks <https://github.com/getsentry/sentry-webhooks>`_
+* `sentry-whatsapp <https://github.com/ecarreras/sentry-whatsapp>`_
 * `sentry-youtrack <https://github.com/bogdal/sentry-youtrack>`_
 
 Have an extension that should be listed here? Submit a `pull request <https://github.com/getsentry/sentry>`_ and we'll

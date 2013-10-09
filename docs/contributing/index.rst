@@ -5,6 +5,39 @@ Want to contribute back to Sentry? This page describes the general development f
 our philosophy, the test suite, and issue tracking.
 
 
+Documentation
+-------------
+
+If you're looking to help document Sentry, you can get set up with Sphinx, our documentation tool,
+but first you will want to make sure you have a few things on your local system:
+
+* python-dev (if you're on OS X, you already have this)
+* pip
+* virtualenvwrapper
+
+Once you've got all that, the rest is simple:
+
+::
+
+    # If you have a fork, you'll want to clone it instead
+    git clone git://github.com/getsentry/sentry.git
+
+    # Create a python virtualenv
+    mkvirtualenv sentry
+
+    # Make the magic happen
+    make dev-docs
+
+Running ``make dev-docs`` will install the basic requirements to get Sphinx running.
+
+
+Building Documentation
+~~~~~~~~~~~~~~~~~~~~~~
+
+Inside the ``docs`` directory, you can run ``make`` to build the documentation.  
+See ``make help`` for available options and the `Sphinx Documentation <http://sphinx-doc.org/contents.html>`_ for more information.
+
+
 Localization
 ------------
 
@@ -43,6 +76,10 @@ Running ``make`` will do several things, including:
 * Installing Python requirements
 * Installing NPM requirements
 
+.. note::
+    You will want to store your virtualenv out of the ``sentry`` directory you cloned above,
+    otherwise ``make`` will fail.
+
 Create a default Sentry configation just as if this were a production instance:
 
 ::
@@ -62,7 +99,7 @@ You'll likely want to make some changes to the default configuration (we recomme
 Coding Standards
 ----------------
 
-Sentry follows the guidelines layed out in `pep8 <http://www.python.org/dev/peps/pep-0008/>`_  with a little bit
+Sentry follows the guidelines laid out in `pep8 <http://www.python.org/dev/peps/pep-0008/>`_  with a little bit
 of flexibility on things like line length. We always give way for the `Zen of Python <http://www.python.org/dev/peps/pep-0020/>`_. We also use strict mode for JavaScript, enforced by jshint.
 
 You can run all linters with ``make lint``, or respectively ``lint-python`` or ``lint-js``.
@@ -104,7 +141,7 @@ Developing with Django
 
 Because Sentry is just Django, you can use all of the standard Django functionality. The only difference is you'll be accessing commands that would normally go through manage.py using the ``sentry`` CLI helper instead.
 
-For example, you probably don't want to use ``sentry start`` for development, as it doesnt support anything like
+For example, you probably don't want to use ``sentry start`` for development, as it doesn't support anything like
 automatic reloading on code changes. For that you'd want to use the standard builtin ``runserver`` command:
 
 ::

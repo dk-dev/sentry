@@ -144,6 +144,10 @@
             return app.config.urlPrefix + '/api/' + app.config.teamId + '/projects/search/';
         },
 
+        getSearchTagsUrl: function(){
+            return app.config.urlPrefix + '/api/' + app.config.teamId + '/' + app.config.projectId + '/tags/search/';
+        },
+
         makeSearchableInput: function(el, url, callback) {
             $(el).select2({
                 allowClear: true,
@@ -204,23 +208,73 @@
         },
 
         makeSearchableProjectsInput: function(el) {
-            this.makeSearchableInput(el, this.getSearchProjectsUrl(), _.bind(function(data){
+            this.makeSearchableInput(el, this.getSearchProjectsUrl(), function(data){
                 var results = [];
-                $(data.results).each(_.bind(function(_, val){
+                $(data.results).each(function(_, val){
                     results.push({
-                        id: this.escape(val.slug),
-                        text: this.escape(val.name) + '<br>' + this.escape(val.slug)
+                        id: val.slug,
+                        text: val.name + '<br>' + val.slug
                     });
-                }, this));
+                });
                 return results;
-            }, this));
+            });
+        },
+
+        makeSearchableTagsInput: function(el, options) {
+            var $el = $(el);
+            $el.select2({
+                multiple: true,
+                tokenSeperators: [","],
+                minimumInputLength: 3,
+                allowClear: true,
+                width: 'element',
+                initSelection: function (el, callback) {
+                    var $el = $(el);
+                    var values = $el.val().split(',');
+                    var results = [];
+                    $.each(values, function(_, val) {
+                        results.push({id: val, text: val});
+                    });
+                    callback(results);
+                },
+                ajax: {
+                    url: this.getSearchTagsUrl(),
+                    dataType: 'json',
+                    data: function (term, page) {
+                        return {
+                            query: term,
+                            quietMillis: 300,
+                            name: $el.data('tag'),
+                            limit: 10
+                        };
+                    },
+                    results: function(data, page) {
+                        var results = [];
+
+                        $(data.results).each(function(_, val){
+                            results.push({
+                                id: val,
+                                text: val
+                            });
+                        });
+
+                        if ($(results).filter(function(){
+                            return this.id.localeCompare(data.query) === 0;
+                        }).length === 0) {
+                            results.push({id:data.query, text:data.query});
+                        }
+
+                        return {results: results};
+                    }
+                }
+            });
         }
 
     };
 
     $(function(){
         // Change all select boxes to select2 elements.
-        $('.body select, .toolbar select, .project-controls select').each(function(){
+        $('.body select').each(function(){
             var $this = $(this),
                 options = {
                     width: 'element',

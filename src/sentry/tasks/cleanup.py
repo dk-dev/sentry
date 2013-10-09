@@ -9,12 +9,12 @@ sentry.tasks.cleanup
 from celery.task import task
 
 
-@task(ignore_result=True)
+@task(name='sentry.tasks.cleanup.cleanup', queue='cleanup')
 def cleanup(days=30, project=None, chunk_size=1000, **kwargs):
     """
     Deletes a portion of the trailing data in Sentry based on
     their creation dates. For example, if ``days`` is 30, this
-    would attempt to clean up all data thats older than 30 days.
+    would attempt to clean up all data that's older than 30 days.
 
     :param project: limit all deletion scopes to messages that are part
                     of the given project
@@ -23,10 +23,11 @@ def cleanup(days=30, project=None, chunk_size=1000, **kwargs):
 
     from django.utils import timezone
 
-    # TODO: FilterKey and GroupTagKey need cleaned up
-    from sentry.models import (Group, Event, GroupCountByMinute,
-        GroupTag, FilterValue, ProjectCountByMinute, Alert,
-        SearchDocument, Activity, AffectedUserByGroup, LostPasswordHash)
+    # TODO: TagKey and GroupTagKey need cleaned up
+    from sentry.models import (
+        Group, Event, GroupCountByMinute, EventMapping,
+        GroupTag, TagValue, ProjectCountByMinute, Alert,
+        SearchDocument, Activity, LostPasswordHash)
 
     GENERIC_DELETES = (
         (SearchDocument, 'date_changed'),
@@ -35,10 +36,9 @@ def cleanup(days=30, project=None, chunk_size=1000, **kwargs):
         (GroupTag, 'last_seen'),
         (Event, 'datetime'),
         (Activity, 'datetime'),
-        (AffectedUserByGroup, 'last_seen'),
-        (FilterValue, 'last_seen'),
+        (TagValue, 'last_seen'),
         (Alert, 'datetime'),
-
+        (EventMapping, 'date_added'),
         # Group should probably be last
         (Group, 'last_seen'),
     )

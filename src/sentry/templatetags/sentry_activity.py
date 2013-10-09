@@ -17,14 +17,14 @@ register = template.Library()
 
 
 ACTIVITY_ACTION_STRINGS = {
-    Activity.COMMENT: 'left a comment',
+    Activity.NOTE: 'left a comment',
     Activity.SET_RESOLVED: 'marked this event as resolved',
     Activity.SET_UNRESOLVED: 'marked this event as unresolved',
     Activity.SET_MUTED: 'marked this event as muted',
     Activity.SET_PUBLIC: 'made this event public',
     Activity.SET_PRIVATE: 'made this event private',
     Activity.SET_REGRESSION: 'marked this event as a regression',
-    Activity.CREATE_ISSUE: 'created an issue on {provider:s} titled <a href="{location:s}">{title:s}</a>',
+    Activity.CREATE_ISSUE: u'created an issue on {provider:s} titled <a href="{location:s}">{title:s}</a>',
 }
 
 
@@ -52,7 +52,7 @@ def render_activity(item):
 
     output += ' <span class="sep">&mdash;</span> <span class="time">%s</span>' % (timesince(item.datetime),)
 
-    if item.type == Activity.COMMENT:
+    if item.type == Activity.NOTE:
         output += linebreaks(item.data['body'])
 
     return mark_safe(output)

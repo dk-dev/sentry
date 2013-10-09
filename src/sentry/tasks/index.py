@@ -63,7 +63,7 @@ def document_for_event(event):
     return doc
 
 
-@task(ignore_result=True)
+@task(name='sentry.tasks.index.index_event', queue='search')
 def index_event(event, **kwargs):
     from sentry.app import app
 

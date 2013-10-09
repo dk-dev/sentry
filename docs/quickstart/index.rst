@@ -66,11 +66,38 @@ the same command you used to grab virtualenv::
 Don't be worried by the amount of dependencies Sentry has. We have a philosophy of using the right tools for
 the job, and not reinventing them if they already exist.
 
+Using MySQL or Postgres
+~~~~~~~~~~~~~~~~~~~~~~~
+
+We **highly** recommend using PostgreSQL for your database, or MySQL if you have no other choice. The default
+is sqlite and will handle very little load.
+
+These databases require additional packages, but Sentry provides a couple of meta packages to make things easier:
+
+::
+
+  # install sentry and its postgresql dependencies
+  easy_install -UZ sentry[postgres]
+
+  # or if you choose, mysql
+  easy_install -UZ sentry[mysql]
+
+
+Installing from Source
+~~~~~~~~~~~~~~~~~~~~~~
+
+If you're installing the Sentry source (e.g. from git), you'll simply need to run the ``make`` command to
+get all of the dependencies::
+
+  # all things should be this easy
+  make
+
 Once everything's installed, you should be able to execute the Sentry CLI, via ``sentry``, and get something
 like the following::
 
   $ sentry
   usage: sentry [--config=/path/to/settings.py] [command] [options]
+
 
 Initializing the Configuration
 ------------------------------
@@ -100,6 +127,9 @@ is not a fully supported database and should not be used in production**.
             'PASSWORD': '',
             'HOST': '',
             'PORT': '',
+            'OPTIONS': {
+                'autocommit': True,
+            }
         }
     }
 
@@ -168,7 +198,8 @@ thing you'll want to run when upgrading to future versions of Sentry.
 Starting the Web Service
 ------------------------
 
-Sentry provides a built-in webserver (powered by gunicorn and eventlet) to get you off the ground quickly.
+Sentry provides a built-in webserver (powered by gunicorn and eventlet) to get you off the ground quickly,
+also you can setup Sentry as WSGI application, in that case skip to section `Running Sentry as WSGI application`.
 
 To start the webserver, you simply use ``sentry start``. If you opted to use an alternative configuration path
 you can pass that via the --config option.
@@ -198,6 +229,8 @@ Apache requires the use of mod_proxy for forwarding requests::
     ProxyPreserveHost On
     RequestHeader set X-Forwarded-Proto "https" env=HTTPS
 
+You will need to enable ``headers``, ``proxy``, and ``proxy_http`` apache modules to use these settings.
+
 Proxying with Nginx
 ~~~~~~~~~~~~~~~~~~~
 
@@ -212,6 +245,19 @@ You'll use the builtin HttpProxyModule within Nginx to handle proxying::
       proxy_set_header   X-Forwarded-For   $proxy_add_x_forwarded_for;
       proxy_set_header   X-Forwarded-Proto $scheme;
     }
+
+See :doc:`nginx` for more details on using Nginx.
+
+Enabling SSL
+~~~~~~~~~~~~~
+
+If you are planning to use SSL, you will also need to ensure that you've
+enabled detection within the reverse proxy (see the instructions above), as
+well as within the Sentry configuration:
+
+::
+
+    SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
 
 Running Sentry as a Service
 ---------------------------
@@ -260,7 +306,7 @@ Enabling Social Auth
 
 Most of the time it doesnt really matter **how** someone authenticates to the service, so much as it that they do. In
 these cases, Sentry provides tight integrated with several large social services, including: Twitter, Facebook, Google,
-and GitHub. Enabling this is as simple as setting up an application with the respective services, and configuring a 
+and GitHub. Enabling this is as simple as setting up an application with the respective services, and configuring a
 couple values in your ``sentry.conf.py`` file.
 
 By default, users will be able to both signup (create a new account) as well as associate an existing account. If you
@@ -345,13 +391,7 @@ Configuring Memcache
 ~~~~~~~~~~~~~~~~~~~~
 
 You'll also want to consider configuring cache and buffer settings, which respectively require a cache server and a Redis
-server. You'll need to do two things, starting with installing the memcache dependencies:
-
-::
-
-  pip install python-memcached
-
-While the Django configuration covers caching in great detail, Sentry allows you to specify a backend for its
+server. While the Django configuration covers caching in great detail, Sentry allows you to specify a backend for its
 own internal purposes:
 
 ::

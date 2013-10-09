@@ -1,18 +1,11 @@
 {% extends "sentry/groups/group_list.html" %}
 
-{% load url from future %}
 {% load i18n %}
 {% load sentry_activity %}
 {% load sentry_helpers %}
 {% load sentry_plugins %}
 
 {% block title %}{% if event %}{{ event.error }}{% else %}{{ group.message }}{% endif %} | {{ block.super }}{% endblock %}
-
-{% block breadcrumb %}
-    {{ block.super }}
-    <li class="divider"></li>
-    <li><a href="{% url 'sentry-group' group.team.slug group.project.slug group.id %}">{{ group.message }}</a></li>
-{% endblock %}
 
 {% block main %}
     {% handle_before_events request group %}
@@ -36,7 +29,6 @@
                     </div>
                 {% endif %}
 
-
                 {% if activity %}
                     <ul class="activity">
                         {% for item in activity %}
@@ -53,11 +45,16 @@
                     <!-- We switch the ordering of events here as it makes more sense visually -->
                     <a class="btn pull-left prev {% if not next_event %} disabled{% endif %}"{% if next_event %} href="{% url 'sentry-group-event' group.team.slug group.project.slug group.id next_event.id %}"{% endif %}><span></span> {% trans "Newer Event" %}</a>
                     <a class="btn pull-right next {% if not prev_event %} disabled{% endif %}"{% if prev_event %} href="{% url 'sentry-group-event' group.team.slug group.project.slug group.id prev_event.id %}"{% endif %}>{% trans "Older Event" %} <span></span></a>
-                    <h4>Event at {{ event.datetime }} {{ event.datetime.tzinfo }}</h4>
+                    <h4>
+                    Event at {{ event.datetime }} {{ event.datetime.tzinfo }} [{{ event.size|filesizeformat }}]<br><small>ID: {{ event.event_id }}</small></h4>
                 </div>
 
                 {% include "sentry/partial/event_nav.html" %}
-            
+
+                {% if group.is_muted %}
+                    <div class="alert alert-info">This event has been muted. You will not be notified of any changes and it will not show up in the default feed.</div>
+                {% endif %}
+
                 {% if event.has_two_part_message %}
                     <pre id="full-message">{{ event.message }}</pre>
                 {% endif %}
@@ -98,6 +95,23 @@
         {% endif %}
     </dl>
 
+    {% if seen_by_faces %}
+        <h6>{% trans "Seen By" %}</h6>
+        <ul class="seen-by">
+            {% for s_user, s_last_seen in seen_by_faces %}
+                <li>
+                    <img src="{% gravatar_url s_user.email size 32 %}" class="tip" rel="tooltip" title="<strong>{{ s_user|user_display_name|force_escape }}</strong><br>{{ s_last_seen|timesince }}">
+                </li>
+            {% endfor %}
+            {% if seen_by_extra %}
+                <li class="tip" rel="tooltip" title="{% for s_user, _ in seen_by %}- {{ s_user|user_display_name|force_escape }}<br>{% endfor %}">
+                    &middot;&middot;&middot;
+                </li>
+            {% endif %}
+        </ul>
+    {% endif %}
+
+
     <!--- there is probably a less terrible way to do things like this -->
     <p id="public-status"><small>
         <span data-public="true"{% if not group.project.public and not group.is_public %} style="display: none;"{% endif %}>
@@ -122,6 +136,12 @@
     {% if can_admin_event %}
         <ul class="nav nav-list">
             <li class="nav-header">{% trans "Actions" %}</li>
+            {% if not group.is_muted %}
+                <li><a href="{% url 'sentry-api-set-group-mute' group.team.slug project.slug group.id %}">{% trans "Mute Event" %}</a></li>
+            {% elif not group.is_resolved %}
+                <li><a href="{% url 'sentry-api-set-group-unresolve' group.team.slug project.slug group.id %}">{% trans "Unmute Event" %}</a></li>
+            {% endif %}
+
             {% for label, link, is_active in group|get_actions:request %}
                 <li><a href="{{ link }}">{{ label }}</a></li>
             {% endfor %}
