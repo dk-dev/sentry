@@ -18,6 +18,7 @@ from sentry.search.base import SearchBackend
 # TODO: only index an event after a group is indexed??
 # TODO: confirm replication=async is a good idea
 # TODO: determine TTL
+# TODO: index.routing.allocation.include.tag = project_id?
 
 
 class ElasticSearchBackend(SearchBackend):
