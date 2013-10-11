@@ -25,10 +25,8 @@ class ElasticSearchBackend(SearchBackend):
     def __init__(self, **options):
         self.backend = ElasticSearch(**options)
 
-    def index(self, event):
+    def index(self, group, event):
         from sentry.app import app
-
-        group = event.group
 
         app.search.index(
             index='sentry',

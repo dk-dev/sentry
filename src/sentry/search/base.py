@@ -16,5 +16,8 @@ class SearchBackend(object):
     def index(self, event):
         pass
 
+    def remove(self, group):
+        pass
+
     def query(self, **kwargs):
         raise NotImplementedError

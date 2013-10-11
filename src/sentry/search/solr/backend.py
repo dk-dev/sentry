@@ -25,10 +25,13 @@ class SolrBackend(SearchBackend):
     def __init__(self, url, **options):
         self.backend = Solr(url, **options)
 
-    def index(self, event):
+    def index(self, group, event):
         self.backend.add([
             self._make_document(event),
         ])
+
+    def remove(self, group):
+        self.backend.delete(group.id)
 
     def _make_document(self, event):
         group = event.group

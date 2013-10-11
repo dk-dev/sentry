@@ -15,4 +15,4 @@ from celery.task import task
 def index_event(event, **kwargs):
     from sentry import app
 
-    app.search.index(event)
+    app.search.index(event.group, event)
