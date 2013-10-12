@@ -9,7 +9,7 @@ sentry.search.solr.backend
 from __future__ import absolute_import
 
 from collections import defaultdict
-from pysolr import Solr
+from nydus.db import create_cluster
 
 from sentry.search.base import SearchBackend
 
@@ -22,8 +22,12 @@ from sentry.search.base import SearchBackend
 
 
 class SolrBackend(SearchBackend):
-    def __init__(self, url, **options):
-        self.backend = Solr(url, **options)
+    def __init__(self, servers, **options):
+        self.backend = create_cluster({
+            'engine': 'sentry.search.solr.client.Solr',
+            'router': 'nydus.db.routers.base.RoundRobinRouter',
+            'hosts': [{'url': u} for u in servers],
+        })
 
     def index(self, group, event):
         self.backend.add([
@@ -60,8 +64,12 @@ class SolrBackend(SearchBackend):
             'datetime': group.last_seen,
             'project': group.project.id,
             'team': group.team.id,
-            'text': filter(bool, context['text']),
-            'tags': tags,
+            'text': {
+                'add': filter(bool, context['text']),
+            },
+            'tags': {
+                'add': tags,
+            },
         }
 
         return doc
