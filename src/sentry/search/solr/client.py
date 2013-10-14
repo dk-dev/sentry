@@ -94,7 +94,7 @@ class SolrClient(object):
                     'name': key,
                 }
                 if action:
-                    attrs['action'] = action
+                    attrs['update'] = action
                 field = ET.Element('field', **attrs)
                 field.text = self._from_python(bit)
                 doc.append(field)
