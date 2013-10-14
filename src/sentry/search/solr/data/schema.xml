@@ -114,6 +114,8 @@
     <field name="_version_" type="long" indexed="true" stored="true"/>
 
     <field name="id" type="string" indexed="true" stored="true" required="true" multiValued="false" />
+
+    <field name="group" type="string" indexed="true" stored="true" required="true" multiValued="false" />
     <field name="text" type="text" indexed="true" stored="false" required="true" multiValued="true" />
     <field name="project" type="int" indexed="true" stored="false" multiValued="false" />
     <field name="team" type="int" indexed="true" stored="false" multiValued="false" />

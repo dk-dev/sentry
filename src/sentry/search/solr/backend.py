@@ -60,17 +60,13 @@ class SolrBackend(SearchBackend):
             tags.extend('%s=%s' % (k, f_v) for f_v in v)
 
         doc = {
-            'id': group.id,
-            'last_seen': group.last_seen,
-            'first_seen': group.first_seen,
+            'id': '%s%s' % (event.project_id, event.event_id),
+            'group': group.id,
             'project': group.project.id,
             'team': group.team.id,
-            'text': {
-                'add': filter(bool, context['text']),
-            },
-            'tags': {
-                'add': tags,
-            },
+            'datetime': event.datetime,
+            'text': filter(bool, context['text']),
+            'tags': tags,
         }
 
         return doc
