@@ -62,6 +62,7 @@ class SolrBackend(SearchBackend):
         doc = {
             'id': group.id,
             'last_seen': group.last_seen,
+            'first_seen': group.first_seen,
             'project': group.project.id,
             'team': group.team.id,
             'text': {
