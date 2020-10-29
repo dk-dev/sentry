@@ -175,6 +175,8 @@ RESERVED_PROJECT_SLUGS = frozenset(
         "integrations",
         "developer-settings",
         "usage",
+        "trust",
+        "legal",
     )
 )
 
@@ -215,8 +217,9 @@ TAG_LABELS = {
 
 PROTECTED_TAG_KEYS = frozenset(["environment", "release", "sentry:release"])
 
-# TODO(dcramer): once this is more flushed out we want this to be extendable
-SENTRY_RULES = (
+# Don't use this variable directly. If you want a list of rules that are registered in
+# the system, access them via the `rules` registry in sentry/rules/__init__.py
+_SENTRY_RULES = (
     "sentry.mail.actions.NotifyEmailAction",
     "sentry.rules.actions.notify_event.NotifyEventAction",
     "sentry.rules.actions.notify_event_service.NotifyEventServiceAction",
@@ -244,6 +247,13 @@ MIGRATED_CONDITIONS = frozenset(
         "sentry.rules.conditions.tagged_event.TaggedEventCondition",
         "sentry.rules.conditions.event_attribute.EventAttributeCondition",
         "sentry.rules.conditions.level.LevelCondition",
+    ]
+)
+
+TICKET_ACTIONS = frozenset(
+    [
+        "sentry.integrations.jira.notify_action.JiraCreateTicketAction",
+        "sentry.integrations.vsts.notify_action.AzureDevopsCreateTicketAction",
     ]
 )
 
@@ -408,10 +418,10 @@ class ObjectStatus(object):
     @classmethod
     def as_choices(cls):
         return (
-            (cls.ACTIVE, "active"),
-            (cls.DISABLED, "disabled"),
-            (cls.PENDING_DELETION, "pending_deletion"),
-            (cls.DELETION_IN_PROGRESS, "deletion_in_progress"),
+            (cls.ACTIVE, u"active"),
+            (cls.DISABLED, u"disabled"),
+            (cls.PENDING_DELETION, u"pending_deletion"),
+            (cls.DELETION_IN_PROGRESS, u"deletion_in_progress"),
         )
 
 
@@ -426,9 +436,9 @@ class SentryAppStatus(object):
     @classmethod
     def as_choices(cls):
         return (
-            (cls.UNPUBLISHED, cls.UNPUBLISHED_STR),
-            (cls.PUBLISHED, cls.PUBLISHED_STR),
-            (cls.INTERNAL, cls.INTERNAL_STR),
+            (cls.UNPUBLISHED, six.text_type(cls.UNPUBLISHED_STR)),
+            (cls.PUBLISHED, six.text_type(cls.PUBLISHED_STR)),
+            (cls.INTERNAL, six.text_type(cls.INTERNAL_STR)),
         )
 
     @classmethod
@@ -449,7 +459,10 @@ class SentryAppInstallationStatus(object):
 
     @classmethod
     def as_choices(cls):
-        return ((cls.PENDING, cls.PENDING_STR), (cls.INSTALLED, cls.INSTALLED_STR))
+        return (
+            (cls.PENDING, six.text_type(cls.PENDING_STR)),
+            (cls.INSTALLED, six.text_type(cls.INSTALLED_STR)),
+        )
 
     @classmethod
     def as_str(cls, status):
@@ -524,6 +537,7 @@ REQUIRE_SCRUB_DEFAULTS_DEFAULT = False
 SENSITIVE_FIELDS_DEFAULT = None
 SAFE_FIELDS_DEFAULT = None
 ATTACHMENTS_ROLE_DEFAULT = settings.SENTRY_DEFAULT_ROLE
+DEBUG_FILES_ROLE_DEFAULT = "admin"
 EVENTS_ADMIN_ROLE_DEFAULT = settings.SENTRY_DEFAULT_ROLE
 REQUIRE_SCRUB_IP_ADDRESS_DEFAULT = False
 SCRAPE_JAVASCRIPT_DEFAULT = True

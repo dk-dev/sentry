@@ -509,7 +509,7 @@ class OrganizationEventsStatsEndpointTest(APITestCase, SnubaTestCase):
             data={
                 "event_id": "d" * 32,
                 "message": "not good",
-                "timestamp": iso_format(before_now(minutes=10)),
+                "timestamp": iso_format(self.day_ago - timedelta(minutes=10)),
                 "fingerprint": ["group3"],
             },
             project_id=self.project.id,
@@ -521,8 +521,8 @@ class OrganizationEventsStatsEndpointTest(APITestCase, SnubaTestCase):
                 format="json",
                 data={
                     "project": self.project.id,
-                    "end": iso_format(before_now()),
-                    "start": iso_format(before_now(hours=24)),
+                    "end": iso_format(self.day_ago),
+                    "start": iso_format(self.day_ago - timedelta(hours=24)),
                     "query": 'message:"not good"',
                     "interval": "1d",
                     "yAxis": "count()",
@@ -562,6 +562,21 @@ class OrganizationEventsStatsEndpointTest(APITestCase, SnubaTestCase):
                 },
             )
         assert response.status_code == 400
+
+        with self.feature("organizations:discover-basic"):
+            response = self.client.get(
+                self.url,
+                format="json",
+                data={
+                    "end": iso_format(before_now()),
+                    "start": iso_format(before_now(hours=24)),
+                    "query": "",
+                    "interval": "0d",
+                    "yAxis": "count()",
+                },
+            )
+        assert response.status_code == 400
+        assert "zero duration" in response.data["detail"]
 
     def test_out_of_retention(self):
         with self.options({"system.event-retention-days": 10}):
@@ -1015,6 +1030,36 @@ class OrganizationEventsStatsTopNEvents(APITestCase, SnubaTestCase):
             assert [{"count": self.event_data[index]["count"]}] in [
                 attrs for time, attrs in results["data"]
             ]
+
+    def test_top_events_with_error_unhandled(self):
+        self.login_as(user=self.user)
+        project = self.create_project()
+        prototype = load_data("android-ndk")
+        prototype["event_id"] = "f" * 32
+        prototype["message"] = "not handled"
+        prototype["exception"]["values"][0]["value"] = "not handled"
+        prototype["exception"]["values"][0]["mechanism"]["handled"] = False
+        prototype["timestamp"] = iso_format(self.day_ago + timedelta(minutes=2))
+        self.store_event(data=prototype, project_id=project.id)
+
+        with self.feature(self.enabled_features):
+            response = self.client.get(
+                self.url,
+                data={
+                    "start": iso_format(self.day_ago),
+                    "end": iso_format(self.day_ago + timedelta(hours=2)),
+                    "interval": "1h",
+                    "yAxis": "count()",
+                    "orderby": ["-count()"],
+                    "field": ["count()", "error.unhandled"],
+                    "topEvents": 5,
+                },
+                format="json",
+            )
+
+        data = response.data
+        assert response.status_code == 200, response.content
+        assert len(data) == 2
 
     def test_top_events_with_timestamp(self):
         with self.feature(self.enabled_features):

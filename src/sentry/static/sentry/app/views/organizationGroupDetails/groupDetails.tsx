@@ -17,6 +17,7 @@ import Projects from 'app/utils/projects';
 import SentryTypes from 'app/sentryTypes';
 import recreateRoute from 'app/utils/recreateRoute';
 import withApi from 'app/utils/withApi';
+import {getMessage, getTitle} from 'app/utils/events';
 
 import {ERROR_TYPES} from './constants';
 import {fetchGroupEventAndMarkSeen} from './utils';
@@ -193,14 +194,16 @@ class GroupDetails extends React.Component<Props, State> {
     }
   }
 
-  listener = GroupStore.listen(itemIds => this.onGroupChange(itemIds));
+  listener = GroupStore.listen(itemIds => this.onGroupChange(itemIds), undefined);
 
   onGroupChange(itemIds: Set<string>) {
     const id = this.props.params.groupId;
     if (itemIds.has(id)) {
       const group = GroupStore.get(id);
       if (group) {
-        if (group.stale) {
+        // TODO(ts) This needs a better approach. issueActions is splicing attributes onto
+        // group objects to cheat here.
+        if ((group as Group & {stale?: boolean}).stale) {
           this.fetchData();
           return;
         }
@@ -212,31 +215,22 @@ class GroupDetails extends React.Component<Props, State> {
   }
 
   getTitle() {
+    const {organization} = this.props;
     const {group} = this.state;
-
     const defaultTitle = 'Sentry';
 
     if (!group) {
       return defaultTitle;
     }
 
-    switch (group.type) {
-      case 'error':
-        if (group.metadata.type && group.metadata.value) {
-          return `${group.metadata.type}: ${group.metadata.value}`;
-        }
-        return group.metadata.type || group.metadata.value || defaultTitle;
-      case 'csp':
-        return group.metadata.message || defaultTitle;
-      case 'expectct':
-      case 'expectstaple':
-      case 'hpkp':
-        return group.metadata.message || defaultTitle;
-      case 'default':
-        return group.metadata.title || defaultTitle;
-      default:
-        return '';
+    const {title} = getTitle(group, organization);
+    const message = getMessage(group);
+
+    if (title && message) {
+      return `${title}: ${message}`;
     }
+
+    return title || message || defaultTitle;
   }
 
   renderError() {

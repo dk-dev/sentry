@@ -9,7 +9,7 @@ from pytz import UTC
 from django.core.cache import cache
 
 from sentry import options
-from sentry.api.event_search import PROJECT_ALIAS
+from sentry.api.event_search import FIELD_ALIASES, PROJECT_ALIAS, USER_DISPLAY_ALIAS
 from sentry.models import Project
 from sentry.api.utils import default_start_end_dates
 from sentry.snuba.dataset import Dataset
@@ -35,14 +35,7 @@ SEEN_COLUMN = "timestamp"
 BLACKLISTED_COLUMNS = frozenset(["project_id"])
 
 FUZZY_NUMERIC_KEYS = frozenset(
-    [
-        "error.handled",
-        "stack.colno",
-        "stack.in_app",
-        "stack.lineno",
-        "stack.stack_level",
-        "transaction.duration",
-    ]
+    ["stack.colno", "stack.in_app", "stack.lineno", "stack.stack_level", "transaction.duration"]
 )
 FUZZY_NUMERIC_DISTANCE = 50
 
@@ -706,8 +699,27 @@ class SnubaTagStorage(TagStorage):
         if snuba_key in {"event_id", "timestamp", "time"}:
             return SequencePaginator([])
 
-        conditions = []
+        # These columns have fixed values and we don't need to emit queries to find out the
+        # potential options.
+        if key in {"error.handled", "error.unhandled"}:
+            return SequencePaginator(
+                [
+                    (
+                        1,
+                        TagValue(
+                            key=key, value="true", times_seen=None, first_seen=None, last_seen=None
+                        ),
+                    ),
+                    (
+                        2,
+                        TagValue(
+                            key=key, value="false", times_seen=None, first_seen=None, last_seen=None
+                        ),
+                    ),
+                ]
+            )
 
+        conditions = []
         # transaction status needs a special case so that the user interacts with the names and not codes
         transaction_status = snuba_key == "transaction_status"
         if include_transactions and transaction_status:
@@ -745,13 +757,24 @@ class SnubaTagStorage(TagStorage):
             snuba_key = "project_id"
             dataset = Dataset.Discover
         else:
-            if snuba_key in BLACKLISTED_COLUMNS:
-                snuba_key = "tags[%s]" % (key,)
+            snuba_name = snuba_key
+
+            is_user_alias = include_transactions and key == USER_DISPLAY_ALIAS
+            if is_user_alias:
+                # user.alias is a pseudo column in discover. It is computed by coalescing
+                # together multiple user attributes. Here we get the coalese function used,
+                # and resolve it to the corresponding snuba query
+                dataset = Dataset.Discover
+                resolver = snuba.resolve_column(dataset)
+                snuba_name = FIELD_ALIASES[USER_DISPLAY_ALIAS].get_field()
+                snuba.resolve_complex_column(snuba_name, resolver)
+            elif snuba_name in BLACKLISTED_COLUMNS:
+                snuba_name = "tags[%s]" % (key,)
 
             if query:
-                conditions.append([snuba_key, "LIKE", u"%{}%".format(query)])
+                conditions.append([snuba_name, "LIKE", u"%{}%".format(query)])
             else:
-                conditions.append([snuba_key, "!=", ""])
+                conditions.append([snuba_name, "!=", ""])
 
         filters = {"project_id": projects}
         if environments:

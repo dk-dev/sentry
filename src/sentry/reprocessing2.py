@@ -4,16 +4,25 @@ import uuid
 import hashlib
 import logging
 import sentry_sdk
+import six
 
 from django.conf import settings
 
 from sentry import nodestore, features, eventstore
 from sentry.attachments import CachedAttachment, attachment_cache
-from sentry.models import EventAttachment
+from sentry import models
+from sentry.utils import snuba
 from sentry.utils.cache import cache_key_for_event
+from sentry.utils.redis import redis_clusters
 from sentry.eventstore.processing import event_processing_store
+from sentry.deletions.defaults.group import GROUP_RELATED_MODELS
 
 logger = logging.getLogger("sentry.reprocessing")
+
+_REDIS_SYNC_TTL = 3600
+
+
+GROUP_MODELS_TO_MIGRATE = GROUP_RELATED_MODELS + (models.Activity,)
 
 
 def _generate_unprocessed_event_node_id(project_id, event_id):
@@ -68,6 +77,8 @@ def reprocess_event(project_id, event_id, start_time):
 
     with sentry_sdk.start_span(op="reprocess_events.nodestore.get"):
         data = nodestore.get(node_id)
+    if data is None:
+        return
 
     from sentry.event_manager import set_tag
     from sentry.tasks.store import preprocess_event_from_reprocessing
@@ -89,15 +100,13 @@ def reprocess_event(project_id, event_id, start_time):
 
     set_tag(data, "original_group_id", event.group_id)
 
+    # XXX: reuse event IDs
     event_id = data["event_id"] = uuid.uuid4().hex
-
-    # XXX: Only reset received
-    data["timestamp"] = data["received"] = start_time
 
     cache_key = event_processing_store.store(data)
 
     # Step 2: Copy attachments into attachment cache
-    queryset = EventAttachment.objects.filter(
+    queryset = models.EventAttachment.objects.filter(
         project_id=project_id, event_id=orig_event_id
     ).select_related("file")
 
@@ -167,26 +176,99 @@ def is_reprocessed_event(data):
 def _get_original_event_id(data):
     from sentry.event_manager import get_tag
 
+    # XXX: Get rid of this tag once we reuse event IDs
     return get_tag(data, "original_event_id")
 
 
-def should_save_reprocessed_event(data):
-    if not data:
-        return False
+def _get_original_group_id(data):
+    from sentry.event_manager import get_tag
 
-    orig_id = _get_original_event_id(data)
+    # XXX: Have real snuba column
+    return get_tag(data, "original_group_id")
 
-    if not orig_id:
-        return True
 
-    orig_event = eventstore.get_event_by_id(project_id=data["project"], event_id=orig_id)
+def _get_sync_redis_client():
+    return redis_clusters.get(settings.SENTRY_REPROCESSING_SYNC_REDIS_CLUSTER)
 
-    if not orig_event:
-        return True
 
-    for prop in ("threads", "stacktrace", "exception", "debug_meta"):
-        old_data = orig_event.data.get(prop)
-        if old_data != data.get(prop):
-            return True
+def _get_sync_counter_key(group_id):
+    return "re2:count:{}".format(group_id)
 
-    return False
+
+def mark_event_reprocessed(data):
+    """
+    This function is supposed to be unconditionally called when an event has
+    finished reprocessing, regardless of whether it has been saved or not.
+    """
+    if not is_reprocessed_event(data):
+        return
+
+    key = _get_sync_counter_key(_get_original_group_id(data))
+    _get_sync_redis_client().decr(key)
+
+
+def start_group_reprocessing(project_id, group_id, max_events=None, acting_user_id=None):
+    from django.db import transaction
+
+    with transaction.atomic():
+        group = models.Group.objects.get(id=group_id)
+        original_status = group.status
+        original_short_id = group.short_id
+        group.status = models.GroupStatus.REPROCESSING
+        # satisfy unique constraint of (project_id, short_id)
+        # we manually tested that multiple groups with (project_id=1,
+        # short_id=null) can exist in postgres
+        group.short_id = None
+        group.save()
+
+        # Create a duplicate row that has the same attributes by nulling out
+        # the primary key and saving
+        group.pk = group.id = None
+        new_group = group  # rename variable just to avoid confusion
+        del group
+        new_group.status = original_status
+        new_group.short_id = original_short_id
+        # this will be incremented by the events that are reprocessed
+        new_group.times_seen = 0
+        new_group.save()
+
+        for model in GROUP_MODELS_TO_MIGRATE:
+            model.objects.filter(group_id=group_id).update(group_id=new_group.id)
+
+    models.GroupRedirect.objects.create(
+        organization_id=new_group.project.organization_id,
+        group_id=new_group.id,
+        previous_group_id=group_id,
+    )
+
+    models.Activity.objects.create(
+        type=models.Activity.REPROCESS,
+        project=new_group.project,
+        ident=six.text_type(group_id),
+        group=new_group,
+        user_id=acting_user_id,
+    )
+
+    # Get event counts of issue (for all environments etc). This was copypasted
+    # and simplified from groupserializer.
+    event_count = snuba.aliased_query(
+        aggregations=[["count()", "", "times_seen"]],  # select
+        dataset=snuba.Dataset.Events,  # from
+        conditions=[["group_id", "=", group_id], ["project_id", "=", project_id]],  # where
+        referrer="reprocessing2.start_group_reprocessing",
+    )["data"][0]["times_seen"]
+
+    if max_events is not None:
+        event_count = min(event_count, max_events)
+
+    key = _get_sync_counter_key(group_id)
+    _get_sync_redis_client().setex(key, _REDIS_SYNC_TTL, event_count)
+
+
+def is_group_finished(group_id):
+    """
+    Checks whether a group has finished reprocessing.
+    """
+
+    pending = int(_get_sync_redis_client().get(_get_sync_counter_key(group_id)))
+    return pending <= 0

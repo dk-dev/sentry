@@ -46,7 +46,7 @@
               "id": "4f9d73e63b7144ecb8944c41620a090b",
               "secret": "8fcac28aaa4c4f5fa572b61d40a8e084364db25fd37449c299e5a41c0504cbc2",
               "status": "active",
-              "url": "https://example.com/sentry-hook"
+              "url": "https://empowerplant.io/sentry-hook"
             }
           }
         }
@@ -66,7 +66,7 @@
   },
   "put": {
     "tags": ["Projects"],
-    "description": "Update a service hook",
+    "description": "Update a service hook.",
     "operationId": "Update a Service Hook",
     "parameters": [
       {
@@ -106,18 +106,20 @@
             "properties": {
               "url": {
                 "type": "string",
-                "description": "The URL for the webhook.",
-                "example": "https://example.com/sentry-hook"
+                "description": "The URL for the webhook."
               },
               "events": {
                 "type": "array",
                 "description": "The events to subscribe to.",
-                "example": ["event.alert", "event.created"],
                 "items": {
                   "type": "string"
                 }
               }
             }
+          },
+          "example": {
+            "url": "https://empowerplant.io/sentry-hook",
+            "events": ["event.alert", "event.created"]
           }
         }
       },
@@ -137,10 +139,13 @@
               "id": "4f9d73e63b7144ecb8944c41620a090b",
               "secret": "8fcac28aaa4c4f5fa572b61d40a8e084364db25fd37449c299e5a41c0504cbc2",
               "status": "active",
-              "url": "https://example.com/sentry-hook"
+              "url": "https://empowerplant.io/sentry-hook"
             }
           }
         }
+      },
+      "400": {
+        "description": "Bad Input"
       },
       "403": {
         "description": "Forbidden"
@@ -157,7 +162,7 @@
   },
   "delete": {
     "tags": ["Projects"],
-    "description": "Remove a service hook",
+    "description": "Remove a service hook.",
     "operationId": "Remove a Service Hook",
     "parameters": [
       {
