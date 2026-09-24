@@ -1,13 +1,11 @@
 ---
-created: '2021-03-29T22:02:38.317415Z'
-creator: sentry
-source: tests/sentry/grouping/test_categorization.py
+source: tests/sentry/grouping/test_categorization.py::test_categorization
 ---
 
 
 TimeoutException:android.app.LoadedApk$ServiceDispatcher$InnerConnection.finalize() timed out after 10 seconds (thread_id:_, crashed:_)
-                            java.lang.Thread  run category=threadbase
-           java.lang.Daemons$FinalizerDaemon  run category=std
+                            java.lang.Thread  run category=std
+           java.lang.Daemons$FinalizerDaemon  run category=internals
            java.lang.Daemons$FinalizerDaemon  doFinalize category=internals
                            android.os.Binder  finalize category=internals
                            android.os.Binder  destroy category=internals

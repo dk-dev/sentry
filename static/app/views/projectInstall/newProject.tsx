@@ -1,29 +1,45 @@
-import React from 'react';
-import DocumentTitle from 'react-document-title';
 import styled from '@emotion/styled';
 
-import space from 'app/styles/space';
-import CreateProject from 'app/views/projectInstall/createProject';
+import {Stack} from '@sentry/scraps/layout';
 
-const NewProject = () => (
-  <Container>
-    <div className="container">
-      <Content>
-        <DocumentTitle title="Sentry" />
-        <CreateProject />
-      </Content>
-    </div>
-  </Container>
-);
+import {SentryDocumentTitle} from 'sentry/components/sentryDocumentTitle';
+import {useOrganization} from 'sentry/utils/useOrganization';
+
+import {CreateProject} from './createProject';
+import {ScmCreateProject} from './scmCreateProject';
+
+function NewProject() {
+  const organization = useOrganization();
+  const hasScmProjectCreation = organization.features.includes(
+    'onboarding-scm-project-creation'
+  );
+
+  if (hasScmProjectCreation) {
+    return <ScmCreateProject />;
+  }
+
+  return (
+    <SentryDocumentTitle>
+      <Stack flex={1}>
+        <Container>
+          <div className="container">
+            <Content>
+              <CreateProject />
+            </Content>
+          </div>
+        </Container>
+      </Stack>
+    </SentryDocumentTitle>
+  );
+}
 
 const Container = styled('div')`
   flex: 1;
-  background: ${p => p.theme.background};
-  margin-bottom: -${space(3)}; /* cleans up a bg gap at bottom */
+  background: ${p => p.theme.tokens.background.primary};
 `;
 
 const Content = styled('div')`
-  margin-top: ${space(3)};
+  margin-top: ${p => p.theme.space['2xl']};
 `;
 
 export default NewProject;

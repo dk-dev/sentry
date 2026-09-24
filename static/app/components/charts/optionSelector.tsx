@@ -1,130 +1,130 @@
-import React from 'react';
-import styled from '@emotion/styled';
-import isEqual from 'lodash/isEqual';
+import {useMemo} from 'react';
+import type {DistributedOmit} from 'type-fest';
 
-import {InlineContainer, SectionHeading} from 'app/components/charts/styles';
-import DropdownBubble from 'app/components/dropdownBubble';
-import DropdownButton from 'app/components/dropdownButton';
-import {DropdownItem} from 'app/components/dropdownControl';
-import DropdownMenu from 'app/components/dropdownMenu';
-import Tooltip from 'app/components/tooltip';
-import space from 'app/styles/space';
-import {SelectValue} from 'app/types';
+import type {
+  MultipleSelectProps,
+  SelectOption,
+  SelectOptionWithKey,
+  SingleSelectProps,
+} from '@sentry/scraps/compactSelect';
+import {CompactSelect} from '@sentry/scraps/compactSelect';
+import {OverlayTrigger} from '@sentry/scraps/overlayTrigger';
 
-const defaultProps = {
-  menuWidth: 'auto',
-};
+import {Truncate} from 'sentry/components/truncate';
 
-type Props = {
-  options: SelectValue<string>[];
-  selected: string;
-  onChange: (value: string) => void;
+type BaseProps = {
   title: string;
-} & typeof defaultProps;
-
-type State = {
-  menuContainerWidth?: number;
 };
 
-class OptionSelector extends React.Component<Props, State> {
-  static defaultProps = defaultProps;
+type SingleUnClearableProps = DistributedOmit<
+  SingleSelectProps<string>,
+  'onChange' | 'multiple' | 'title' | 'value'
+> &
+  BaseProps & {
+    onChange: (value: string) => void;
+    selected: string;
+    clearable?: false;
+    multiple?: false;
+  };
 
-  state: State = {};
+type SingleClearableProps = DistributedOmit<
+  SingleSelectProps<string>,
+  'onChange' | 'multiple' | 'title' | 'value'
+> &
+  BaseProps & {
+    clearable: true;
+    onChange: (value: string | undefined) => void;
+    selected: string;
+    multiple?: false;
+  };
 
-  componentDidMount() {
-    this.setMenuContainerWidth();
-  }
+type SingleProps = SingleClearableProps | SingleUnClearableProps;
 
-  shouldComponentUpdate(nextProps: Props, nextState: State) {
-    return !isEqual(nextProps, this.props) || !isEqual(nextState, this.state);
-  }
+type MultipleProps = DistributedOmit<
+  MultipleSelectProps<string>,
+  'onChange' | 'multiple' | 'title' | 'value'
+> &
+  BaseProps & {
+    multiple: true;
+    onChange: (value: string[]) => void;
+    selected: string[];
+  };
 
-  componentDidUpdate(prevProps: Props) {
-    if (prevProps.selected !== this.props.selected) {
-      this.setMenuContainerWidth();
+export function OptionSelector({
+  options,
+  onChange,
+  selected,
+  title,
+  multiple,
+  closeOnSelect,
+  clearable,
+  ...rest
+}: SingleProps | MultipleProps) {
+  const mappedOptions = useMemo(() => {
+    return options.map(opt => ({
+      ...opt,
+      // eslint-disable-next-line @typescript-eslint/no-base-to-string
+      textValue: String(opt.label),
+      // eslint-disable-next-line @typescript-eslint/no-base-to-string
+      label: <Truncate value={String(opt.label)} maxLength={60} expandDirection="left" />,
+    }));
+  }, [options]);
+
+  const selectProps = useMemo(() => {
+    // Use an if statement to help TS separate MultipleProps and SingleProps
+    if (multiple) {
+      return {
+        multiple,
+        clearable,
+        value: selected,
+        onChange: (sel: Array<SelectOption<string>>) => {
+          onChange?.(sel.map(o => o.value));
+        },
+        closeOnSelect,
+      };
     }
-  }
 
-  setMenuContainerWidth() {
-    const menuContainerWidth = this.menuContainerRef?.current?.offsetWidth;
-    if (menuContainerWidth) {
-      this.setState({menuContainerWidth});
+    if (clearable) {
+      return {
+        multiple,
+        clearable,
+        value: selected,
+        onChange: (opt: SelectOption<string> | undefined) => onChange?.(opt?.value),
+        closeOnSelect,
+      };
     }
-  }
 
-  menuContainerRef = React.createRef<HTMLDivElement>();
+    return {
+      multiple,
+      clearable,
+      value: selected,
+      onChange: (opt: SelectOption<string>) => onChange?.(opt.value),
+      closeOnSelect,
+    };
+  }, [clearable, multiple, selected, onChange, closeOnSelect]);
 
-  render() {
-    const {menuContainerWidth} = this.state;
-    const {options, onChange, selected, title, menuWidth} = this.props;
-    const selectedOption = options.find(opt => selected === opt.value) || options[0];
-
-    return (
-      <InlineContainer>
-        <SectionHeading>{title}</SectionHeading>
-        <MenuContainer ref={this.menuContainerRef}>
-          <DropdownMenu alwaysRenderMenu={false}>
-            {({isOpen, getMenuProps, getActorProps}) => (
-              <React.Fragment>
-                <StyledDropdownButton {...getActorProps()} size="zero" isOpen={isOpen}>
-                  {selectedOption.label}
-                </StyledDropdownButton>
-                <StyledDropdownBubble
-                  {...getMenuProps()}
-                  alignMenu="right"
-                  width={menuWidth}
-                  minWidth={menuContainerWidth}
-                  isOpen={isOpen}
-                  blendWithActor={false}
-                  blendCorner
-                >
-                  {options.map(opt => (
-                    <StyledDropdownItem
-                      key={opt.value}
-                      onSelect={onChange}
-                      eventKey={opt.value}
-                      disabled={opt.disabled}
-                      isActive={selected === opt.value}
-                      data-test-id={`option-${opt.value}`}
-                    >
-                      <Tooltip title={opt.tooltip} containerDisplayMode="inline">
-                        {opt.label}
-                      </Tooltip>
-                    </StyledDropdownItem>
-                  ))}
-                </StyledDropdownBubble>
-              </React.Fragment>
-            )}
-          </DropdownMenu>
-        </MenuContainer>
-      </InlineContainer>
+  function isOptionDisabled(option: SelectOptionWithKey<string>) {
+    return Boolean(
+      // Option is explicitly marked as disabled
+      // The user has reached the maximum number of selections (3), and the option hasn't
+      // yet been selected. These options should be disabled to visually indicate that the
+      // user has reached the max.
+      option.disabled ||
+      (multiple && selected.length === 3 && !selected.includes(option.value))
     );
   }
+
+  return (
+    <CompactSelect
+      {...rest}
+      {...selectProps}
+      size="sm"
+      options={mappedOptions}
+      isOptionDisabled={isOptionDisabled}
+      position="bottom-end"
+      trigger={triggerProps => (
+        <OverlayTrigger.Button {...triggerProps} variant="transparent" prefix={title} />
+      )}
+    />
+  );
 }
-
-const MenuContainer = styled('div')`
-  display: inline-block;
-  position: relative;
-`;
-
-const StyledDropdownButton = styled(DropdownButton)`
-  padding: ${space(1)} ${space(2)};
-  font-weight: normal;
-  z-index: ${p => (p.isOpen ? p.theme.zIndex.dropdownAutocomplete.actor : 'auto')};
-`;
-
-const StyledDropdownBubble = styled(DropdownBubble)<{
-  isOpen: boolean;
-  minWidth?: number;
-}>`
-  display: ${p => (p.isOpen ? 'block' : 'none')};
-  ${p =>
-    p.minWidth && p.width === 'auto' && `min-width: calc(${p.minWidth}px + ${space(3)})`};
-`;
-
-const StyledDropdownItem = styled(DropdownItem)`
-  line-height: ${p => p.theme.text.lineHeightBody};
-  white-space: nowrap;
-`;
-
-export default OptionSelector;

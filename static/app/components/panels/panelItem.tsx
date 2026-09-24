@@ -1,27 +1,23 @@
 import styled from '@emotion/styled';
 
-import space from 'app/styles/space';
-
 type Props = {
-  /**
-   * Disables the default padding
-   */
-  noPadding?: boolean;
   /**
    * Align items vertical center (assuming flex-direction isn't changed).
    */
   center?: boolean;
+  /**
+   * Disables the default padding
+   */
+  noPadding?: boolean;
 };
 
-const PanelItem = styled('div')<Props>`
+export const PanelItem = styled('div')<Props>`
   display: flex;
-  border-bottom: 1px solid ${p => p.theme.innerBorder};
-  ${p => p.noPadding || `padding: ${space(2)}`};
+  border-bottom: 1px solid ${p => p.theme.tokens.border.secondary};
+  padding: ${p => (p.noPadding ? 0 : p.theme.space.xl)};
   ${p => p.center && 'align-items: center'};
 
   &:last-child {
     border: 0;
   }
 `;
-
-export default PanelItem;

@@ -1,4 +1,3 @@
-import React from 'react';
 import styled from '@emotion/styled';
 
 /**
@@ -9,23 +8,24 @@ import styled from '@emotion/styled';
 type Props = {
   shortId: string;
   avatar?: React.ReactNode;
+  className?: string;
 };
 
-const ShortId = ({shortId, avatar}: Props) => (
-  <Wrapper>
-    <AvatarWrapper>{avatar}</AvatarWrapper>
-    <IdWrapper>{shortId}</IdWrapper>
-  </Wrapper>
-);
-
-export default ShortId;
+export function ShortId({shortId, avatar, className}: Props) {
+  return (
+    <Wrapper className={className}>
+      <AvatarWrapper>{avatar}</AvatarWrapper>
+      <IdWrapper>{shortId}</IdWrapper>
+    </Wrapper>
+  );
+}
 
 const Wrapper = styled('div')`
   display: flex;
   align-items: center;
   white-space: nowrap;
   text-overflow: ellipsis;
-  font-size: ${p => p.theme.fontSizeExtraSmall};
+  font-size: ${p => p.theme.font.size.xs};
 `;
 const AvatarWrapper = styled('div')`
   margin-right: 3px;
@@ -36,5 +36,4 @@ const IdWrapper = styled('div')`
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  margin-top: 1px;
 `;

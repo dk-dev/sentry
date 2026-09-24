@@ -1,7 +1,9 @@
 import inspect
 import time
 
-from sentry.tsdb.base import BaseTSDB
+import sentry_sdk
+
+from sentry.tsdb.base import BaseTSDB, TSDBModel
 from sentry.tsdb.dummy import DummyTSDB
 from sentry.tsdb.redis import RedisTSDB
 from sentry.tsdb.snuba import SnubaTSDB
@@ -26,13 +28,10 @@ method_specifications = {
     # method: (type, function(callargs) -> set[model])
     "get_range": (READ, single_model_argument),
     "get_sums": (READ, single_model_argument),
+    "get_timeseries_sums": (READ, single_model_argument),
     "get_distinct_counts_series": (READ, single_model_argument),
     "get_distinct_counts_totals": (READ, single_model_argument),
-    "get_distinct_counts_union": (READ, single_model_argument),
-    "get_most_frequent": (READ, single_model_argument),
-    "get_most_frequent_series": (READ, single_model_argument),
     "get_frequency_series": (READ, single_model_argument),
-    "get_frequency_totals": (READ, single_model_argument),
     "incr": (WRITE, single_model_argument),
     "incr_multi": (WRITE, lambda callargs: {item[0] for item in callargs["items"]}),
     "merge": (WRITE, single_model_argument),
@@ -41,23 +40,17 @@ method_specifications = {
     "record_multi": (WRITE, lambda callargs: {model for model, key, values in callargs["items"]}),
     "merge_distinct_counts": (WRITE, single_model_argument),
     "delete_distinct_counts": (WRITE, multiple_model_argument),
-    "record_frequency_multi": (
-        WRITE,
-        lambda callargs: {model for model, data in callargs["requests"]},
-    ),
-    "merge_frequencies": (WRITE, single_model_argument),
-    "delete_frequencies": (WRITE, multiple_model_argument),
     "flush": (WRITE, dont_do_this),
 }
 
-assert (
-    set(method_specifications) == BaseTSDB.__read_methods__ | BaseTSDB.__write_methods__
-), "all read and write methods must have a specification defined"
+assert set(method_specifications) == BaseTSDB.__read_methods__ | BaseTSDB.__write_methods__, (
+    "all read and write methods must have a specification defined"
+)
 
 model_backends = {
     # model: (read, write)
     model: ("redis", "redis") if model not in SnubaTSDB.model_query_settings else ("snuba", "dummy")
-    for model in BaseTSDB.models
+    for model in TSDBModel
 }
 
 
@@ -80,6 +73,12 @@ def make_method(key):
     def method(self, *a, **kw):
         callargs = inspect.getcallargs(getattr(BaseTSDB, key), self, *a, **kw)
         backend = selector_func(key, callargs, self.switchover_timestamp)
+
+        sentry_sdk.set_tag("tsdb.backend", backend)
+        sentry_sdk.set_attribute("tsdb.backend", backend)
+        sentry_sdk.set_tag("tsdb.method", key)
+        sentry_sdk.set_attribute("tsdb.method", key)
+
         return getattr(self.backends[backend], key)(*a, **kw)
 
     return method

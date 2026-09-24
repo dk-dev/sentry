@@ -22,4 +22,4 @@ class Geo(Interface):
             "region": data.get("region"),
         }
 
-        return cls(**data)
+        return super().to_python(data)

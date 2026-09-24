@@ -1,9 +1,14 @@
 from sentry import options
 from sentry.identity.oauth2 import OAuth2CallbackView, OAuth2LoginView, OAuth2Provider
+from sentry.identity.pipeline import IdentityPipeline
+from sentry.integrations.types import IntegrationProviderSlug
+from sentry.pipeline.views.base import PipelineView
+
+PREFERRED_ORGANIZATION_ID_KEY = "preferred_organization_id"
 
 
 class SlackIdentityProvider(OAuth2Provider):
-    key = "slack"
+    key = IntegrationProviderSlug.SLACK.value
     name = "Slack"
 
     # This identity provider is used for authorizing the Slack application
@@ -15,14 +20,14 @@ class SlackIdentityProvider(OAuth2Provider):
     # user_scope, needed for unfurling.
     user_scopes = ()
 
-    def get_oauth_authorize_url(self):
+    def get_oauth_authorize_url(self) -> str:
         return "https://slack.com/oauth/v2/authorize"
 
     # XXX(epurkhiser): While workspace tokens _do_ support the oauth.access
     # endpoint, it will not include the authorizing_user, so we continue to use
     # the deprecated oauth.token endpoint until we are able to migrate to a bot
     # app which uses oauth.access.
-    def get_oauth_access_token_url(self):
+    def get_oauth_access_token_url(self) -> str:
         return "https://slack.com/api/oauth.v2.access"
 
     def get_oauth_client_id(self):
@@ -34,7 +39,7 @@ class SlackIdentityProvider(OAuth2Provider):
     def get_user_scopes(self):
         return self.config.get("user_scopes", self.user_scopes)
 
-    def get_pipeline_views(self):
+    def get_pipeline_views(self) -> list[PipelineView[IdentityPipeline]]:
         return [
             SlackOAuth2LoginView(
                 authorize_url=self.get_oauth_authorize_url(),
@@ -53,19 +58,35 @@ class SlackIdentityProvider(OAuth2Provider):
         # TODO(epurkhiser): This flow isn't actually used right now in sentry.
         # In slack-bot world we would need to make an API call to the 'me'
         # endpoint to get their user ID here.
-        return super().get_oauth_data(self, payload)
+        return super().get_oauth_data(payload)
 
     def build_identity(self, data):
         data = data["data"]
 
         return {
-            "type": "slack",
+            "type": IntegrationProviderSlug.SLACK.value,
             # TODO(epurkhiser): See note above
             "id": data["user"]["id"],
             "email": data["user"]["email"],
             "scopes": sorted(data["scope"].split(",")),
             "data": self.get_oauth_data(data),
         }
+
+
+class SlackStagingIdentityProvider(SlackIdentityProvider):
+    key = IntegrationProviderSlug.SLACK_STAGING.value
+    name = "Slack (Staging)"
+
+    def get_oauth_client_id(self):
+        return options.get("slack-staging.client-id")
+
+    def get_oauth_client_secret(self):
+        return options.get("slack-staging.client-secret")
+
+    def build_identity(self, data):
+        production_identity = super().build_identity(data)
+        production_identity["type"] = IntegrationProviderSlug.SLACK_STAGING.value
+        return production_identity
 
 
 class SlackOAuth2LoginView(OAuth2LoginView):
@@ -78,12 +99,8 @@ class SlackOAuth2LoginView(OAuth2LoginView):
 
     user_scope = ""
 
-    def __init__(
-        self, authorize_url=None, client_id=None, scope=None, user_scope=None, *args, **kwargs
-    ):
-        super().__init__(
-            authorize_url=authorize_url, client_id=client_id, scope=scope, *args, **kwargs
-        )
+    def __init__(self, authorize_url=None, client_id=None, scope=None, user_scope=None):
+        super().__init__(authorize_url=authorize_url, client_id=client_id, scope=scope)
         if user_scope is not None:
             self.user_scope = user_scope
 

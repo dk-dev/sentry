@@ -1,35 +1,69 @@
-import React from 'react';
+import {Fragment} from 'react';
 import {css} from '@emotion/react';
 
-import {ModalRenderProps} from 'app/actionCreators/modal';
-import IssueDiff from 'app/components/issueDiff';
+import type {ModalRenderProps} from 'sentry/actionCreators/modal';
+import {IssueDiff} from 'sentry/components/issueDiff';
+import {t} from 'sentry/locale';
+import type {Project} from 'sentry/types/project';
+import {useDetailedProject} from 'sentry/utils/project/useDetailedProject';
+import type {Theme} from 'sentry/utils/theme';
+import {useOrganization} from 'sentry/utils/useOrganization';
 
-type Props = ModalRenderProps & React.ComponentProps<typeof IssueDiff>;
+interface Props extends ModalRenderProps, React.ComponentProps<typeof IssueDiff> {
+  project: Project;
+}
 
-const DiffModal = ({className, Body, ...props}: Props) => (
-  <Body>
-    <IssueDiff className={className} {...props} />
-  </Body>
-);
+function DiffModal({
+  Body,
+  Header: Header,
+  Footer: _Footer,
+  closeModal: _closeModal,
+  modalContainerRef: _modalContainerRef,
+  project,
+  ...props
+}: Props) {
+  const organization = useOrganization();
+  const {data: projectData} = useDetailedProject({
+    orgSlug: organization.slug,
+    projectSlug: project.slug,
+  });
+  // similarity-embeddings feature is only available on project details
+  const similarityEmbeddingsProjectFeature = projectData?.features.includes(
+    'similarity-embeddings'
+  );
 
-const modalCss = css`
-  .modal-dialog {
+  return (
+    <Fragment>
+      <Header closeButton>
+        <h4>{t('Issue Diff')}</h4>
+      </Header>
+      <Body>
+        <IssueDiff
+          hasSimilarityEmbeddingsProjectFeature={similarityEmbeddingsProjectFeature}
+          {...props}
+        />
+      </Body>
+    </Fragment>
+  );
+}
+
+const modalCss = (theme: Theme) => css`
+  position: absolute;
+  padding: 0;
+  inset: ${theme.space['2xl']};
+  width: calc(100% - 2 * ${theme.space['2xl']});
+
+  [role='document'] {
+    height: 100%;
     display: flex;
-    margin: 0;
-    left: 10px;
-    right: 10px;
-    top: 10px;
-    bottom: 10px;
-    width: auto;
-  }
-  .modal-content {
-    display: flex;
-    flex: 1;
-  }
-  .modal-body {
-    display: flex;
+    flex-direction: column;
     overflow: hidden;
-    flex: 1;
+
+    > section {
+      flex: 1;
+      min-height: 0;
+      overflow: auto;
+    }
   }
 `;
 

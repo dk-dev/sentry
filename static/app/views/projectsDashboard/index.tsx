@@ -1,162 +1,288 @@
-import React from 'react';
-import LazyLoad from 'react-lazyload';
-import {Link, RouteComponentProps} from 'react-router';
-import styled from '@emotion/styled';
+import {Fragment, useEffect, useMemo, useState} from 'react';
+import LazyLoad, {forceCheck} from 'react-lazyload';
 import {withProfiler} from '@sentry/react';
-import flatten from 'lodash/flatten';
+import {useDebouncedValue} from '@tanstack/react-pacer';
 import uniqBy from 'lodash/uniqBy';
 
-import {Client} from 'app/api';
-import Button from 'app/components/button';
-import IdBadge from 'app/components/idBadge';
-import LoadingError from 'app/components/loadingError';
-import LoadingIndicator from 'app/components/loadingIndicator';
-import NoProjectMessage from 'app/components/noProjectMessage';
-import PageHeading from 'app/components/pageHeading';
-import SentryDocumentTitle from 'app/components/sentryDocumentTitle';
-import {IconAdd} from 'app/icons';
-import {t} from 'app/locale';
-import ProjectsStatsStore from 'app/stores/projectsStatsStore';
-import space from 'app/styles/space';
-import {Organization, TeamWithProjects} from 'app/types';
-import {sortProjects} from 'app/utils';
-import withApi from 'app/utils/withApi';
-import withOrganization from 'app/utils/withOrganization';
-import withTeamsForUser from 'app/utils/withTeamsForUser';
+import {LinkButton} from '@sentry/scraps/button';
+import {Container, Flex, Grid, Stack} from '@sentry/scraps/layout';
 
-import Resources from './resources';
-import TeamSection from './teamSection';
+import * as Layout from 'sentry/components/layouts/thirds';
+import {LoadingError} from 'sentry/components/loadingError';
+import {LoadingIndicator} from 'sentry/components/loadingIndicator';
+import {NoProjectMessage} from 'sentry/components/noProjectMessage';
+import {PageHeadingQuestionTooltip} from 'sentry/components/pageHeadingQuestionTooltip';
+import {SearchBar} from 'sentry/components/searchBar';
+import {SentryDocumentTitle} from 'sentry/components/sentryDocumentTitle';
+import {TeamFilter} from 'sentry/components/teamFilter';
+import {DEFAULT_DEBOUNCE_DURATION} from 'sentry/constants';
+import {IconAdd, IconUser} from 'sentry/icons';
+import {t} from 'sentry/locale';
+import type {Team} from 'sentry/types/organization';
+import type {Project, TeamWithProjects} from 'sentry/types/project';
+import {
+  onRenderCallback,
+  Profiler,
+  setGroupedEntityTag,
+} from 'sentry/utils/performanceForSentry';
+import {sortProjects} from 'sentry/utils/project/sortProjects';
+import {useCanCreateProject} from 'sentry/utils/useCanCreateProject';
+import {useLocation} from 'sentry/utils/useLocation';
+import {useNavigate} from 'sentry/utils/useNavigate';
+import {useOrganization} from 'sentry/utils/useOrganization';
+import {useProjects} from 'sentry/utils/useProjects';
+import {useTeamsById} from 'sentry/utils/useTeamsById';
+import {useUser} from 'sentry/utils/useUser';
+import {useUserTeams} from 'sentry/utils/useUserTeams';
+import {TopBar} from 'sentry/views/navigation/topBar';
+import {makeProjectsPathname} from 'sentry/views/projects/pathname';
 
-type Props = {
-  api: Client;
-  organization: Organization;
-  teams: TeamWithProjects[];
-  loadingTeams: boolean;
-  error: Error | null;
-} & RouteComponentProps<{orgId: string}, {}>;
+import {ProjectCard} from './projectCard';
+import {Resources} from './resources';
+import {getTeamParams} from './utils';
 
-class Dashboard extends React.Component<Props> {
-  componentWillUnmount() {
-    ProjectsStatsStore.reset();
-  }
+function ProjectCardList({projects}: {projects: Project[]}) {
+  const organization = useOrganization();
+  const hasProjectAccess = organization.access.includes('project:read');
 
-  render() {
-    const {teams, params, organization, loadingTeams, error} = this.props;
+  // By default react-lazyload will only check for intesecting components on scroll
+  // This forceCheck call is necessary to recalculate when filtering projects
+  useEffect(() => {
+    forceCheck();
+    // oxlint-disable-next-line react/exhaustive-effect-dependencies
+  }, [projects]);
 
-    if (loadingTeams) {
-      return <LoadingIndicator />;
-    }
-
-    if (error) {
-      return <LoadingError message="An error occurred while fetching your projects" />;
-    }
-
-    const filteredTeams = teams.filter(team => team.projects.length);
-    filteredTeams.sort((team1, team2) => team1.slug.localeCompare(team2.slug));
-
-    const projects = uniqBy(flatten(teams.map(teamObj => teamObj.projects)), 'id');
-    const favorites = projects.filter(project => project.isBookmarked);
-
-    const access = new Set(organization.access);
-    const canCreateProjects = access.has('project:admin');
-    const hasTeamAdminAccess = access.has('team:admin');
-
-    const showEmptyMessage = projects.length === 0 && favorites.length === 0;
-    const showResources = projects.length === 1 && !projects[0].firstEvent;
-
-    if (showEmptyMessage) {
-      return (
-        <NoProjectMessage
-          organization={organization}
-          projects={projects}
-          superuserNeedsToBeProjectMember
+  return (
+    <Grid
+      gap="2xl"
+      columns={{
+        zero: 'repeat(auto-fill, minmax(min(400px, 100%), 1fr))',
+        lg: 'repeat(auto-fill, minmax(350px, 1fr))',
+      }}
+    >
+      {sortProjects(projects).map(project => (
+        <LazyLoad
+          debounce={50}
+          height={330}
+          offset={400}
+          unmountIfInvisible
+          key={project.slug}
         >
-          {null}
-        </NoProjectMessage>
-      );
-    }
-
-    return (
-      <React.Fragment>
-        <SentryDocumentTitle
-          title={t('Projects Dashboard')}
-          orgSlug={organization.slug}
-        />
-        {projects.length > 0 && (
-          <ProjectsHeader>
-            <PageHeading>Projects</PageHeading>
-            <Button
-              size="small"
-              disabled={!canCreateProjects}
-              title={
-                !canCreateProjects
-                  ? t('You do not have permission to create projects')
-                  : undefined
-              }
-              to={`/organizations/${organization.slug}/projects/new/`}
-              icon={<IconAdd size="xs" isCircled />}
-              data-test-id="create-project"
-            >
-              {t('Create Project')}
-            </Button>
-          </ProjectsHeader>
-        )}
-
-        {filteredTeams.map((team, index) => {
-          const showBorder = index !== teams.length - 1;
-          return (
-            <LazyLoad key={team.slug} once debounce={50} height={300} offset={300}>
-              <TeamSection
-                orgId={params.orgId}
-                team={team}
-                showBorder={showBorder}
-                title={
-                  hasTeamAdminAccess ? (
-                    <TeamLink to={`/settings/${organization.slug}/teams/${team.slug}/`}>
-                      <IdBadge team={team} avatarSize={22} />
-                    </TeamLink>
-                  ) : (
-                    <IdBadge team={team} avatarSize={22} />
-                  )
-                }
-                projects={sortProjects(team.projects)}
-                access={access}
-              />
-            </LazyLoad>
-          );
-        })}
-
-        {showResources && <Resources organization={organization} />}
-      </React.Fragment>
-    );
-  }
+          <ProjectCard
+            data-test-id={project.slug}
+            project={project}
+            hasProjectAccess={hasProjectAccess}
+          />
+        </LazyLoad>
+      ))}
+    </Grid>
+  );
 }
 
-const OrganizationDashboard = (props: Props) => (
-  <OrganizationDashboardWrapper>
-    <Dashboard {...props} />
-  </OrganizationDashboardWrapper>
-);
+function addProjectsToTeams(teams: Team[], projects: Project[]): TeamWithProjects[] {
+  return teams.map(team => ({
+    ...team,
+    projects: projects.filter(project => project.teams.some(tm => tm.id === team.id)),
+  }));
+}
 
-const TeamLink = styled(Link)`
-  display: flex;
-  align-items: center;
-`;
+function getFilteredProjectsBasedOnTeams({
+  allTeams,
+  userTeams,
+  selectedTeams,
+  isAllTeams,
+  showNonMemberProjects,
+  projects,
+  projectQuery,
+}: {
+  allTeams: Team[];
+  isAllTeams: boolean;
+  projectQuery: string;
+  projects: Project[];
+  selectedTeams: string[];
+  showNonMemberProjects: boolean;
+  userTeams: Team[];
+}): Project[] {
+  const myTeamIds = new Set(userTeams.map(team => team.id));
+  const includeMyTeams = isAllTeams || selectedTeams.includes('myteams');
+  const selectedOtherTeamIds = new Set(
+    selectedTeams.filter(teamId => teamId !== 'myteams')
+  );
+  const myTeams = includeMyTeams ? allTeams.filter(team => myTeamIds.has(team.id)) : [];
+  const otherTeams = isAllTeams
+    ? allTeams
+    : allTeams.filter(team => selectedOtherTeamIds.has(String(team.id)));
 
-const ProjectsHeader = styled('div')`
-  padding: ${space(3)} ${space(4)} 0 ${space(4)};
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-`;
+  const visibleTeams = [...myTeams, ...otherTeams].filter(team => {
+    if (showNonMemberProjects) {
+      return true;
+    }
+    return team.isMember;
+  });
+  const teamsWithProjects = addProjectsToTeams(visibleTeams, projects);
+  const currentProjects = uniqBy(
+    teamsWithProjects.flatMap(team => team.projects),
+    'id'
+  );
+  const currentProjectIds = new Set(currentProjects.map(p => p.id));
+  const unassignedProjects =
+    isAllTeams && showNonMemberProjects
+      ? projects.filter(project => !currentProjectIds.has(project.id))
+      : [];
+  return [...currentProjects, ...unassignedProjects].filter(project =>
+    project.slug.includes(projectQuery)
+  );
+}
 
-const OrganizationDashboardWrapper = styled('div')`
-  display: flex;
-  flex: 1;
-  flex-direction: column;
-`;
+function Dashboard() {
+  const navigate = useNavigate();
+  const location = useLocation();
+  const organization = useOrganization();
 
-export {Dashboard};
-export default withApi(
-  withOrganization(withTeamsForUser(withProfiler(OrganizationDashboard)))
-);
+  const {teams: userTeams, isLoading: loadingTeams, isError} = useUserTeams();
+  const isAllTeams = location.query.team === '';
+  const selectedTeams = getTeamParams(location.query.team ?? 'myteams');
+  const {teams: allTeams} = useTeamsById({
+    ids: selectedTeams.filter(team => team !== 'myteams'),
+  });
+  const user = useUser();
+  const [projectQuery, setProjectQuery] = useState('');
+  const [debouncedProjectQuery] = useDebouncedValue(projectQuery, {
+    wait: DEFAULT_DEBOUNCE_DURATION,
+    leading: true,
+  });
+  const {projects, fetching, fetchError} = useProjects();
+  const canUserCreateProject = useCanCreateProject();
+
+  const showNonMemberProjects = useMemo(() => {
+    const isOrgAdminOrManager =
+      organization.orgRole === 'owner' || organization.orgRole === 'manager';
+    const isOpenMembership = organization.features.includes('open-membership');
+
+    return user.isSuperuser || isOrgAdminOrManager || isOpenMembership;
+  }, [user, organization.orgRole, organization.features]);
+
+  if (loadingTeams || fetching) {
+    return <LoadingIndicator />;
+  }
+
+  if (isError || fetchError) {
+    return <LoadingError message={t('An error occurred while fetching your projects')} />;
+  }
+
+  const filteredProjects = getFilteredProjectsBasedOnTeams({
+    allTeams,
+    userTeams,
+    selectedTeams,
+    isAllTeams,
+    showNonMemberProjects,
+    projects,
+    projectQuery: debouncedProjectQuery,
+  });
+
+  setGroupedEntityTag('projects.total', 1000, projects.length);
+
+  const showResources = projects.length === 1 && !projects[0]!.firstEvent;
+
+  const canJoinTeam = organization.access.includes('team:read');
+
+  function handleChangeFilter(activeFilters: string[]) {
+    navigate({
+      pathname: location.pathname,
+      query: {
+        ...location.query,
+        team: activeFilters.length > 0 ? activeFilters : '',
+      },
+    });
+  }
+
+  return (
+    <Fragment>
+      <SentryDocumentTitle title={t('Projects Dashboard')} orgSlug={organization.slug} />
+      <Layout.Title>
+        {t('All Projects')}
+        <PageHeadingQuestionTooltip
+          docsUrl="https://docs.sentry.io/product/projects/"
+          title={t(
+            "A high-level overview of errors, transactions, and deployments filtered by teams you're part of."
+          )}
+        />
+      </Layout.Title>
+      <TopBar.Slot name="actions">
+        <LinkButton
+          icon={<IconUser />}
+          tooltipProps={{
+            title: canJoinTeam
+              ? undefined
+              : t('You do not have permission to join a team.'),
+          }}
+          disabled={!canJoinTeam}
+          to={`/settings/${organization.slug}/teams/`}
+          data-test-id="join-team"
+        >
+          {t('Join a Team')}
+        </LinkButton>
+        <LinkButton
+          variant="primary"
+          disabled={!canUserCreateProject}
+          tooltipProps={{
+            title: canUserCreateProject
+              ? undefined
+              : t('You do not have permission to create projects'),
+          }}
+          to={makeProjectsPathname({
+            path: '/new/',
+            organization,
+          })}
+          icon={<IconAdd />}
+          data-test-id="create-project"
+        >
+          {t('Create Project')}
+        </LinkButton>
+      </TopBar.Slot>
+      <Layout.Body>
+        <Layout.Main width="full">
+          <Flex
+            direction={{zero: 'column', xl: 'row'}}
+            gap={{zero: 'md', xl: 'xl'}}
+            justify="end"
+            align={{zero: 'stretch', xl: 'end'}}
+            marginBottom="xl"
+          >
+            <TeamFilter
+              selectedTeams={selectedTeams}
+              handleChangeFilter={handleChangeFilter}
+              hideUnassigned
+              hideOtherTeams={!showNonMemberProjects}
+            />
+            <Container flexGrow={1}>
+              <SearchBar
+                placeholder={t('Search for projects by name')}
+                onChange={setProjectQuery}
+                query={projectQuery}
+              />
+            </Container>
+          </Flex>
+
+          <Profiler id="ProjectCardList" onRender={onRenderCallback}>
+            <ProjectCardList projects={filteredProjects} />
+          </Profiler>
+        </Layout.Main>
+      </Layout.Body>
+      {showResources && <Resources />}
+    </Fragment>
+  );
+}
+
+function OrganizationDashboard() {
+  const organization = useOrganization();
+  return (
+    <Stack flex={1}>
+      <NoProjectMessage organization={organization}>
+        <Dashboard />
+      </NoProjectMessage>
+    </Stack>
+  );
+}
+
+export default withProfiler(OrganizationDashboard);

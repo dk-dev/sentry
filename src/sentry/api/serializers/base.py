@@ -1,40 +1,98 @@
-from typing import (
-    Any,
-    Callable,
-    List,
-    Mapping,
-    MutableMapping,
-    Optional,
-    Sequence,
-    Type,
-    TypeVar,
-    Union,
-)
+from __future__ import annotations
 
-import sentry_sdk
+import logging
+from collections.abc import Callable, Mapping, MutableMapping, Sequence
+from typing import Any, Generic, TypeVar, overload
+
 from django.contrib.auth.models import AnonymousUser
 
-from sentry.utils.json import JSONData
+from sentry.users.models.user import User
+from sentry.users.services.user.model import RpcUser
+from sentry.utils.tracing import set_span_data, start_span
+
+logger = logging.getLogger(__name__)
 
 K = TypeVar("K")
+# Default `T` to `Any` (not `Mapping[str, Any]`) so unmigrated serializers
+# preserve the historical caller behavior: `serialize(obj, user, FooSerializer())`
+# returns `Any` when `FooSerializer` has no `[T]` parameter, and downstream
+# code can mutate the result (`data["key"] = ...`) without type errors. The
+# `Any` default opts callers out of the new type check until the serializer
+# is migrated.
+T = TypeVar("T", default=Any)
+
+_User = User | RpcUser | AnonymousUser | None
 
 registry: MutableMapping[Any, Any] = {}
 
 
-def register(type: Any) -> Callable[[Type[K]], Type[K]]:
-    """ A wrapper that adds the wrapped Serializer to the Serializer registry (see above) for the key `type`. """
+def register(type: Any) -> Callable[[type[K]], type[K]]:
+    """A wrapper that adds the wrapped Serializer to the Serializer registry (see above) for the key `type`."""
 
-    def wrapped(cls: Type[K]) -> Type[K]:
+    def wrapped(cls: type[K]) -> type[K]:
         registry[type] = cls()
         return cls
 
     return wrapped
 
 
+# Overload order matters: the no-serializer / `serializer=None` path comes
+# first so the registry-lookup case keeps returning `Any` (preserves the
+# historical behavior of every existing call site that doesn't pass a
+# serializer). The typed overloads only fire when an explicit `Serializer[T]`
+# instance is passed.
+#
+# Note: there is a known soundness gap when a falsy non-sequence value
+# (literal `None`, `0`, `False`, `""`) is passed alongside a typed
+# `Serializer[T]`. Runtime short-circuits and returns the input as-is
+# (documented contract — see `assert serialize(None) is None` in
+# `test_base.py`), but the typed `object → T` overload promises `T`. A
+# dedicated `objects: None → None` overload was tried and reverted: it
+# polluted real `X | None` call sites with `T | None` returns, breaking
+# 2+ files in the wider mypy run. No real Sentry caller passes literal
+# `None` to a typed serializer; callers that pass `X | None` narrow
+# before the call site.
+@overload
 def serialize(
-    objects: Union[Any, Sequence[Any]],
-    user: Optional[Any] = None,
-    serializer: Optional[Any] = None,
+    objects: Any,
+    user: _User = ...,
+    serializer: None = ...,
+    **kwargs: Any,
+) -> Any: ...
+@overload
+def serialize(
+    objects: Sequence[Any],
+    user: _User = ...,
+    *,
+    serializer: Serializer[T],
+    **kwargs: Any,
+) -> list[T]: ...
+@overload
+def serialize(
+    objects: Sequence[Any],
+    user: _User,
+    serializer: Serializer[T],
+    **kwargs: Any,
+) -> list[T]: ...
+@overload
+def serialize(
+    objects: object,
+    user: _User = ...,
+    *,
+    serializer: Serializer[T],
+    **kwargs: Any,
+) -> T: ...
+@overload
+def serialize(
+    objects: object,
+    user: _User,
+    serializer: Serializer[T],
+    **kwargs: Any,
+) -> T: ...
+def serialize(
+    objects: Any | Sequence[Any],
+    user: _User = None,
+    serializer: Any | None = None,
     **kwargs: Any,
 ) -> Any:
     """
@@ -42,7 +100,7 @@ def serialize(
 
     :param objects: A list of objects
     :param user: The user who will be viewing the objects. Omit to view as `AnonymousUser`.
-    :param serializer: The `Serializer` class who's logic we'll use to serialize
+    :param serializer: The `Serializer` class whose logic we'll use to serialize
         `objects` (see below.) Omit to just look up the Serializer in the
         registry by the `objects`'s type.
     :param kwargs Any
@@ -68,11 +126,10 @@ def serialize(
                 pass
         else:
             return objects
+    with start_span(op="serialize", name=type(serializer).__name__) as span:
+        set_span_data(span, "Object Count", len(objects))
 
-    with sentry_sdk.start_span(op="serialize", description=type(serializer).__name__) as span:
-        span.set_data("Object Count", len(objects))
-
-        with sentry_sdk.start_span(op="serialize.get_attrs", description=type(serializer).__name__):
+        with start_span(op="serialize.get_attrs", name=type(serializer).__name__):
             attrs = serializer.get_attrs(
                 # avoid passing NoneType's to the serializer as they're allowed and
                 # filtered out of serialize()
@@ -81,22 +138,42 @@ def serialize(
                 **kwargs,
             )
 
-        with sentry_sdk.start_span(op="serialize.iterate", description=type(serializer).__name__):
+        with start_span(op="serialize.iterate", name=type(serializer).__name__):
             return [serializer(o, attrs=attrs.get(o, {}), user=user, **kwargs) for o in objects]
 
 
-class Serializer:
-    """ A Serializer class contains the logic to serialize a specific type of object. """
+class Serializer(Generic[T]):
+    """A Serializer class contains the logic to serialize a specific type of object.
+
+    Subclasses declare the shape they emit by parameterizing the base, e.g.
+    ``class FooSerializer(Serializer[FooResponse]):``. Unparameterized
+    subclasses (``class FooSerializer(Serializer):``) keep ``T`` at its
+    default of ``Mapping[str, Any]`` — the historical return shape.
+
+    Mypy uses ``T`` to propagate the typed output through ``__call__`` /
+    ``serialize`` and the top-level ``serialize(...)`` helper's overloads.
+    Runtime behavior is unchanged: the base ``serialize`` is a no-op returning
+    ``{}``; ``__call__`` returns ``None`` when ``obj is None`` and on
+    ``_serialize`` exceptions. Those ``None`` / ``{}`` returns are widened
+    from ``T`` via ``# type: ignore[return-value]`` — concrete subclasses
+    override ``serialize`` with a real body that genuinely returns ``T``.
+    """
 
     def __call__(
-        self, obj: Any, attrs: Mapping[Any, Any], user: Any, **kwargs: Any
-    ) -> Optional[MutableMapping[str, Any]]:
-        """ See documentation for `serialize`. """
+        self,
+        obj: Any,
+        attrs: Mapping[Any, Any],
+        user: User | RpcUser | AnonymousUser,
+        **kwargs: Any,
+    ) -> T:
+        """See documentation for `serialize`."""
         if obj is None:
-            return None
-        return self.serialize(obj, attrs, user, **kwargs)
+            return None  # type: ignore[return-value]
+        return self._serialize(obj, attrs, user, **kwargs)
 
-    def get_attrs(self, item_list: List[Any], user: Any, **kwargs: Any) -> MutableMapping[Any, Any]:
+    def get_attrs(
+        self, item_list: Sequence[Any], user: User | RpcUser | AnonymousUser, **kwargs: Any
+    ) -> MutableMapping[Any, Any]:
         """
         Fetch all of the associated data needed to serialize the objects in `item_list`.
 
@@ -107,16 +184,33 @@ class Serializer:
         """
         return {}
 
+    def _serialize(
+        self,
+        obj: Any,
+        attrs: Mapping[Any, Any],
+        user: User | RpcUser | AnonymousUser,
+        **kwargs: Any,
+    ) -> T:
+        try:
+            return self.serialize(obj, attrs, user, **kwargs)
+        except Exception:
+            logger.exception("Failed to serialize", extra={"instance": obj})
+            return None  # type: ignore[return-value]
+
     def serialize(
-        self, obj: Any, attrs: Mapping[Any, Any], user: Any, **kwargs: Any
-    ) -> MutableMapping[str, JSONData]:
+        self,
+        obj: Any,
+        attrs: Mapping[Any, Any],
+        user: User | RpcUser | AnonymousUser,
+        **kwargs: Any,
+    ) -> T:
         """
         Convert an arbitrary python object `obj` to an object that only contains primitives.
 
-        :param obj: An item from `item_list` that was passes to `get_attrs`.
+        :param obj: An item from `item_list` that was passed to `get_attrs`.
         :param attrs: The object in `get_attrs` that corresponds to `obj`.
         :param user: The user who will be viewing the objects.
         :param kwargs: Any
         :returns A serialized version of `obj`.
         """
-        return {}
+        return {}  # type: ignore[return-value]

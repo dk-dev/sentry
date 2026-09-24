@@ -1,0 +1,698 @@
+import {parse} from 'query-string';
+
+import {loadFixtures} from 'sentry-test/loadFixtures';
+
+import type {
+  ParseResult,
+  SearchConfig,
+  TokenResult,
+} from 'sentry/components/searchSyntax/parser';
+import {
+  BooleanOperator,
+  FilterType,
+  InvalidReason,
+  parseSearch,
+  TermOperator,
+  Token,
+} from 'sentry/components/searchSyntax/parser';
+import {
+  getKeyLabel,
+  getKeyName,
+  stringifyToken,
+} from 'sentry/components/searchSyntax/utils';
+
+type TestCase = {
+  /**
+   * Additional parser configuration
+   */
+  additionalConfig: Parameters<typeof parseSearch>[1];
+  /**
+   * The search query string under parsing test
+   */
+  query: string;
+  /**
+   * The expected result for the query
+   */
+  result: ParseResult;
+  /**
+   * This is set when the query is expected to completely fail to parse.
+   */
+  raisesError?: boolean;
+};
+
+type TreeTransformerOpts = {
+  /**
+   * The function used to transform each node
+   */
+  transform: (token: TokenResult<Token>) => any;
+  /**
+   * The tree to transform
+   */
+  tree: Array<TokenResult<Token>>;
+};
+
+/**
+ * Utility function to visit every Token node within an AST tree and apply
+ * a transform to those nodes.
+ */
+function treeTransformer({tree, transform}: TreeTransformerOpts) {
+  const nodeVisitor = (token: TokenResult<Token> | null): any => {
+    if (token === null) {
+      return null;
+    }
+
+    switch (token.type) {
+      case Token.FILTER:
+        return transform({
+          ...token,
+          key: nodeVisitor(token.key),
+          value: nodeVisitor(token.value),
+        });
+      case Token.KEY_EXPLICIT_TAG:
+        return transform({
+          ...token,
+          key: nodeVisitor(token.key),
+        });
+      case Token.KEY_AGGREGATE:
+        return transform({
+          ...token,
+          name: nodeVisitor(token.name),
+          args: token.args ? nodeVisitor(token.args) : token.args,
+          argsSpaceBefore: nodeVisitor(token.argsSpaceBefore),
+          argsSpaceAfter: nodeVisitor(token.argsSpaceAfter),
+        });
+      case Token.KEY_EXPLICIT_BOOLEAN_TAG:
+        return transform({
+          ...token,
+          key: nodeVisitor(token.key),
+        });
+      case Token.KEY_EXPLICIT_NUMBER_TAG:
+        return transform({
+          ...token,
+          key: nodeVisitor(token.key),
+        });
+      case Token.KEY_EXPLICIT_STRING_TAG:
+        return transform({
+          ...token,
+          key: nodeVisitor(token.key),
+        });
+      case Token.KEY_EXPLICIT_ARRAY_TAG:
+        return transform({
+          ...token,
+          key: nodeVisitor(token.key),
+        });
+      case Token.KEY_ARRAY_INCLUDES:
+        return transform({
+          ...token,
+          key: nodeVisitor(token.key),
+        });
+      case Token.LOGIC_GROUP:
+        return transform({
+          ...token,
+          inner: token.inner.map(nodeVisitor),
+        });
+      case Token.KEY_AGGREGATE_ARGS:
+        return transform({
+          ...token,
+          args: token.args.map(v => ({...v, value: nodeVisitor(v.value)})),
+        });
+      case Token.VALUE_NUMBER_LIST:
+      case Token.VALUE_TEXT_LIST:
+        return transform({
+          ...token,
+          items: token.items.map(v => ({...v, value: nodeVisitor(v.value)})),
+        });
+
+      default:
+        return transform(token);
+    }
+  };
+
+  return tree.map(nodeVisitor);
+}
+
+/**
+ * Normalize results to match the json test cases
+ */
+const normalizeResult = (tokens: Array<TokenResult<Token>>) =>
+  treeTransformer({
+    tree: tokens,
+    transform: token => {
+      // XXX: This attempts to keep the test data simple, only including keys
+      // that are really needed to validate functionality.
+
+      // @ts-expect-error keep test data simple
+      delete token.location;
+      // @ts-expect-error keep test data simple
+      delete token.text;
+      // @ts-expect-error keep test data simple
+      delete token.config;
+
+      if (!parse) {
+        // @ts-expect-error keep test data simple
+        delete token.parsed;
+      }
+
+      // @ts-expect-error token warnings only exist in the FE atm
+      delete token.warning;
+
+      if (token.type === Token.FILTER && token.invalid === null) {
+        // @ts-expect-error keep test data simple
+        delete token.invalid;
+      }
+
+      if (
+        token.type === Token.VALUE_ISO_8601_DATE ||
+        token.type === Token.VALUE_RELATIVE_DATE
+      ) {
+        if (token.parsed?.value instanceof Date) {
+          // @ts-expect-error we cannot have dates in JSON
+          token.parsed.value = token.parsed.value.toISOString();
+        }
+      }
+
+      return token;
+    },
+  });
+
+describe('searchSyntax/parser', () => {
+  const testData = loadFixtures('search-syntax') as unknown as Record<string, TestCase[]>;
+
+  const registerTestCase = (
+    testCase: TestCase,
+    additionalConfig: Partial<SearchConfig> = {}
+  ) =>
+    it(`handles ${testCase.query}`, () => {
+      const result = parseSearch(testCase.query, {
+        ...testCase.additionalConfig,
+        ...additionalConfig,
+      });
+      // Handle errors
+      if (testCase.raisesError) {
+        expect(result).toBeNull();
+        return;
+      }
+
+      if (result === null) {
+        throw new Error('Parsed result as null without raiseError true');
+      }
+
+      expect(normalizeResult(result)).toEqual(testCase.result);
+    });
+
+  Object.entries(testData).map(([name, cases]) =>
+    // https://github.com/jest-community/eslint-plugin-jest/issues/1940
+    // eslint-disable-next-line jest/valid-title
+    describe(name, () => {
+      cases.map(c => registerTestCase(c, {parse: true}));
+    })
+  );
+
+  it('handles no-argument aggregate filters after free text', () => {
+    const result = parseSearch('TypeError count():>10');
+
+    if (result === null) {
+      throw new Error('Parsed result as null');
+    }
+
+    expect(result.map(token => token.type)).toEqual([
+      Token.SPACES,
+      Token.FREE_TEXT,
+      Token.SPACES,
+      Token.FILTER,
+      Token.SPACES,
+    ]);
+
+    expect(result[1]).toMatchObject({
+      type: Token.FREE_TEXT,
+      value: 'TypeError ',
+    });
+
+    const filter = result[3] as TokenResult<Token.FILTER>;
+    expect(filter).toMatchObject({
+      type: Token.FILTER,
+      filter: 'aggregateNumeric',
+      operator: '>',
+      key: {
+        type: Token.KEY_AGGREGATE,
+        name: {type: Token.KEY_SIMPLE, value: 'count'},
+        args: null,
+      },
+      value: {
+        type: Token.VALUE_NUMBER,
+        value: '10',
+      },
+    });
+  });
+
+  it('returns token warnings', () => {
+    const result = parseSearch('foo:bar bar:baz tags[foo]:bar tags[bar]:baz', {
+      getFilterTokenWarning: key => (key === 'foo' ? 'foo warning' : null),
+    });
+
+    // check with error to satisfy type checker
+    if (result === null) {
+      throw new Error('Parsed result as null');
+    }
+    expect(result).toHaveLength(9);
+
+    const foo = result[1] as TokenResult<Token.FILTER>;
+    const bar = result[3] as TokenResult<Token.FILTER>;
+    const fooTag = result[5] as TokenResult<Token.FILTER>;
+    const barTag = result[7] as TokenResult<Token.FILTER>;
+
+    expect(foo.warning).toBe('foo warning');
+    expect(bar.warning).toBeNull();
+    expect(fooTag.warning).toBe('foo warning');
+    expect(barTag.warning).toBeNull();
+  });
+
+  it('applies disallowFreeText', () => {
+    const result = parseSearch('foo:bar test', {
+      disallowFreeText: true,
+      invalidMessages: {
+        [InvalidReason.FREE_TEXT_NOT_ALLOWED]: 'Custom message',
+      },
+    });
+
+    // check with error to satisfy type checker
+    if (result === null) {
+      throw new Error('Parsed result as null');
+    }
+    expect(result).toHaveLength(5);
+
+    const foo = result[1] as TokenResult<Token.FILTER>;
+    const test = result[3] as TokenResult<Token.FREE_TEXT>;
+
+    expect(foo.invalid).toBeNull();
+    expect(test.invalid).toEqual({
+      type: InvalidReason.FREE_TEXT_NOT_ALLOWED,
+      reason: 'Custom message',
+    });
+  });
+
+  it('applies disallowLogicalOperators (OR)', () => {
+    const result = parseSearch('foo:bar OR AND', {
+      disallowedLogicalOperators: new Set([BooleanOperator.OR]),
+      invalidMessages: {
+        [InvalidReason.LOGICAL_OR_NOT_ALLOWED]: 'Custom message',
+      },
+    });
+
+    // check with error to satisfy type checker
+    if (result === null) {
+      throw new Error('Parsed result as null');
+    }
+    expect(result).toHaveLength(7);
+
+    const foo = result[1] as TokenResult<Token.FILTER>;
+    const or = result[3] as TokenResult<Token.LOGIC_BOOLEAN>;
+    const and = result[5] as TokenResult<Token.LOGIC_BOOLEAN>;
+
+    expect(foo.invalid).toBeNull();
+    expect(or.invalid).toEqual({
+      type: InvalidReason.LOGICAL_OR_NOT_ALLOWED,
+      reason: 'Custom message',
+    });
+    expect(and.invalid).toBeNull();
+  });
+
+  it('applies disallowLogicalOperators (AND)', () => {
+    const result = parseSearch('foo:bar OR AND', {
+      disallowedLogicalOperators: new Set([BooleanOperator.AND]),
+      invalidMessages: {
+        [InvalidReason.LOGICAL_AND_NOT_ALLOWED]: 'Custom message',
+      },
+    });
+
+    // check with error to satisfy type checker
+    if (result === null) {
+      throw new Error('Parsed result as null');
+    }
+    expect(result).toHaveLength(7);
+
+    const foo = result[1] as TokenResult<Token.FILTER>;
+    const or = result[3] as TokenResult<Token.LOGIC_BOOLEAN>;
+    const and = result[5] as TokenResult<Token.LOGIC_BOOLEAN>;
+
+    expect(foo.invalid).toBeNull();
+    expect(or.invalid).toBeNull();
+    expect(and.invalid).toEqual({
+      type: InvalidReason.LOGICAL_AND_NOT_ALLOWED,
+      reason: 'Custom message',
+    });
+  });
+
+  it('applies disallowNegation', () => {
+    const result = parseSearch('!foo:bar', {
+      disallowNegation: true,
+      invalidMessages: {
+        [InvalidReason.NEGATION_NOT_ALLOWED]: 'Custom message',
+      },
+    });
+
+    // check with error to satisfy type checker
+    if (result === null) {
+      throw new Error('Parsed result as null');
+    }
+    expect(result).toHaveLength(3);
+
+    const foo = result[1] as TokenResult<Token.FILTER>;
+
+    expect(foo.negated).toBe(true);
+    expect(foo.invalid).toEqual({
+      type: InvalidReason.NEGATION_NOT_ALLOWED,
+      reason: 'Custom message',
+    });
+  });
+
+  describe('flattenParenGroups', () => {
+    it('tokenizes mismatched parens with flattenParenGroups=true', () => {
+      const result = parseSearch('foo(', {
+        flattenParenGroups: true,
+      });
+
+      if (result === null) {
+        throw new Error('Parsed result as null');
+      }
+
+      // foo( is parsed as free text a single paren
+      expect(result).toEqual([
+        expect.objectContaining({type: Token.SPACES}),
+        expect.objectContaining({type: Token.FREE_TEXT}),
+        expect.objectContaining({type: Token.SPACES}),
+        expect.objectContaining({
+          type: Token.L_PAREN,
+          value: '(',
+        }),
+        expect.objectContaining({type: Token.SPACES}),
+      ]);
+    });
+
+    it('tokenizes matching parens with flattenParenGroups=true', () => {
+      const result = parseSearch('(foo)', {
+        flattenParenGroups: true,
+      });
+
+      if (result === null) {
+        throw new Error('Parsed result as null');
+      }
+
+      // (foo) is parsed as free text and two parens
+      expect(result).toEqual([
+        expect.objectContaining({type: Token.SPACES}),
+        expect.objectContaining({
+          type: Token.L_PAREN,
+          value: '(',
+        }),
+        expect.objectContaining({type: Token.SPACES}),
+        expect.objectContaining({type: Token.FREE_TEXT}),
+        expect.objectContaining({type: Token.SPACES}),
+        expect.objectContaining({
+          type: Token.R_PAREN,
+          value: ')',
+        }),
+        expect.objectContaining({type: Token.SPACES}),
+      ]);
+    });
+
+    it('tokenizes mismatched left paren with flattenParenGroups=false', () => {
+      const result = parseSearch('foo(', {
+        flattenParenGroups: false,
+      });
+
+      if (result === null) {
+        throw new Error('Parsed result as null');
+      }
+
+      // foo( is parsed as free text and a paren
+      expect(result).toEqual([
+        expect.objectContaining({type: Token.SPACES}),
+        expect.objectContaining({type: Token.FREE_TEXT}),
+        expect.objectContaining({type: Token.SPACES}),
+        expect.objectContaining({
+          type: Token.L_PAREN,
+          value: '(',
+        }),
+        expect.objectContaining({type: Token.SPACES}),
+      ]);
+    });
+
+    it('tokenizes mismatched right paren with flattenParenGroups=false', () => {
+      const result = parseSearch('foo)', {
+        flattenParenGroups: false,
+      });
+
+      if (result === null) {
+        throw new Error('Parsed result as null');
+      }
+
+      // foo( is parsed as free text and a paren
+      expect(result).toEqual([
+        expect.objectContaining({type: Token.SPACES}),
+        expect.objectContaining({type: Token.FREE_TEXT}),
+        expect.objectContaining({type: Token.SPACES}),
+        expect.objectContaining({
+          type: Token.R_PAREN,
+          value: ')',
+        }),
+        expect.objectContaining({type: Token.SPACES}),
+      ]);
+    });
+
+    it('parses matching parens as logic group with flattenParenGroups=false', () => {
+      const result = parseSearch('(foo)', {
+        flattenParenGroups: false,
+      });
+
+      if (result === null) {
+        throw new Error('Parsed result as null');
+      }
+
+      // (foo) is parsed as a logic group
+      expect(result).toEqual([
+        expect.objectContaining({type: Token.SPACES}),
+        expect.objectContaining({type: Token.LOGIC_GROUP}),
+        expect.objectContaining({type: Token.SPACES}),
+      ]);
+    });
+
+    it('tokenizes empty matched parens and flattenParenGroups=false', () => {
+      const result = parseSearch('()', {
+        flattenParenGroups: false,
+      });
+
+      if (result === null) {
+        throw new Error('Parsed result as null');
+      }
+
+      expect(result).toEqual([
+        expect.objectContaining({type: Token.SPACES}),
+        expect.objectContaining({
+          type: Token.LOGIC_GROUP,
+          inner: [expect.objectContaining({type: Token.SPACES})],
+        }),
+        expect.objectContaining({type: Token.SPACES}),
+      ]);
+    });
+  });
+
+  describe('array membership filters', () => {
+    it('parses an explicit array typed tag with the [*] membership suffix', () => {
+      const result = parseSearch('tags[csv_headers,array][*]:foo');
+
+      if (result === null) {
+        throw new Error('Parsed result as null');
+      }
+
+      const filter = result.find(token => token.type === Token.FILTER);
+      if (filter?.type !== Token.FILTER) {
+        throw new Error('Expected a filter token');
+      }
+
+      expect(filter).toEqual(
+        expect.objectContaining({
+          type: Token.FILTER,
+          filter: FilterType.ARRAY_INCLUDES,
+          negated: false,
+          operator: TermOperator.DEFAULT,
+          key: expect.objectContaining({
+            type: Token.KEY_ARRAY_INCLUDES,
+            index: '*',
+            key: expect.objectContaining({
+              type: Token.KEY_EXPLICIT_ARRAY_TAG,
+              text: 'tags[csv_headers,array]',
+              key: expect.objectContaining({
+                type: Token.KEY_SIMPLE,
+                value: 'csv_headers',
+              }),
+            }),
+          }),
+          value: expect.objectContaining({type: Token.VALUE_TEXT, value: 'foo'}),
+        })
+      );
+
+      // Identity keeps the backend tag form (so the query stays annotated); the
+      // label prettifies to the root name; the query text carries the `[*]`.
+      expect(getKeyName(filter.key)).toBe('tags[csv_headers,array]');
+      expect(getKeyLabel(filter.key)).toBe('csv_headers');
+      expect(stringifyToken(filter.key)).toBe('tags[csv_headers,array][*]');
+      // The whole filter round-trips without an operator sentinel.
+      expect(stringifyToken(filter)).toBe('tags[csv_headers,array][*]:foo');
+    });
+
+    it('does not treat the tags[...,array] form without [*] as membership', () => {
+      // `[*]` is the required membership operator; without it the key is not an
+      // array-includes filter (it falls through to an ordinary text filter).
+      const result = parseSearch('tags[csv_headers,array]:foo');
+
+      const filter = result?.find(token => token.type === Token.FILTER);
+
+      expect(filter?.filter).not.toBe(FilterType.ARRAY_INCLUDES);
+    });
+
+    it('parses a plain attribute key with the [*] membership suffix', () => {
+      const result = parseSearch('csv_headers[*]:foo');
+
+      if (result === null) {
+        throw new Error('Parsed result as null');
+      }
+
+      const filter = result.find(token => token.type === Token.FILTER);
+      if (filter?.type !== Token.FILTER) {
+        throw new Error('Expected a filter token');
+      }
+
+      expect(filter).toEqual(
+        expect.objectContaining({
+          type: Token.FILTER,
+          filter: FilterType.ARRAY_INCLUDES,
+          operator: TermOperator.DEFAULT,
+          key: expect.objectContaining({
+            type: Token.KEY_ARRAY_INCLUDES,
+            index: '*',
+            key: expect.objectContaining({type: Token.KEY_SIMPLE, value: 'csv_headers'}),
+          }),
+          value: expect.objectContaining({type: Token.VALUE_TEXT, value: 'foo'}),
+        })
+      );
+
+      expect(getKeyName(filter.key)).toBe('csv_headers');
+      expect(getKeyLabel(filter.key)).toBe('csv_headers');
+      expect(stringifyToken(filter.key)).toBe('csv_headers[*]');
+      expect(stringifyToken(filter)).toBe('csv_headers[*]:foo');
+    });
+
+    it('marks a negated membership filter as does-not-include', () => {
+      const result = parseSearch('!csv_headers[*]:foo');
+
+      if (result === null) {
+        throw new Error('Parsed result as null');
+      }
+
+      const filter = result.find(token => token.type === Token.FILTER);
+      if (filter?.type !== Token.FILTER) {
+        throw new Error('Expected a filter token');
+      }
+
+      expect(filter).toEqual(
+        expect.objectContaining({
+          type: Token.FILTER,
+          filter: FilterType.ARRAY_INCLUDES,
+          negated: true,
+          operator: TermOperator.DEFAULT,
+        })
+      );
+
+      // Negation round-trips as `!…[*]`, not a DoesNotInclude sentinel.
+      expect(stringifyToken(filter)).toBe('!csv_headers[*]:foo');
+    });
+  });
+
+  describe('regex filters', () => {
+    const parseRegexFilter = (query: string, config: Partial<SearchConfig> = {}) => {
+      const filter = parseSearch(query, {allowRegex: true, ...config})?.find(
+        token => token.type === Token.FILTER
+      );
+      if (filter?.type !== Token.FILTER) {
+        throw new Error('Expected a filter token');
+      }
+      return filter;
+    };
+
+    it('parses a pattern with spaces and parens as a regex filter when allowRegex is set', () => {
+      const result = parseSearch('message://GET (api) v2// level:error', {
+        allowRegex: true,
+      });
+
+      expect(result?.filter(token => token.type === Token.FILTER)).toEqual([
+        expect.objectContaining({
+          filter: FilterType.TEXT,
+          negated: false,
+          operator: TermOperator.MATCHES,
+          value: expect.objectContaining({
+            type: Token.VALUE_TEXT,
+            value: 'GET (api) v2',
+            location: expect.objectContaining({
+              start: expect.objectContaining({offset: 10}),
+              end: expect.objectContaining({offset: 22}),
+            }),
+          }),
+        }),
+        expect.objectContaining({
+          key: expect.objectContaining({value: 'level'}),
+          value: expect.objectContaining({value: 'error'}),
+        }),
+      ]);
+    });
+
+    it('stringifies a negated regex filter back to its query', () => {
+      const filter = parseRegexFilter('!message://^a.*b//');
+
+      expect(filter).toEqual(
+        expect.objectContaining({negated: true, operator: TermOperator.MATCHES})
+      );
+      expect(stringifyToken(filter)).toBe('!message://^a.*b//');
+    });
+
+    it('parses a regex filter on an array membership key', () => {
+      const filter = parseRegexFilter('tags[csv_headers,array][*]://^a b//');
+
+      expect(filter).toEqual(
+        expect.objectContaining({
+          filter: FilterType.ARRAY_INCLUDES,
+          operator: TermOperator.MATCHES,
+          value: expect.objectContaining({value: '^a b'}),
+        })
+      );
+    });
+
+    it('does not flag asterisks or quotes in a pattern when wildcards are disallowed', () => {
+      const filter = parseRegexFilter('message://a*"b//', {disallowWildcard: true});
+
+      expect(filter.invalid).toBeNull();
+    });
+
+    it('flags an empty pattern as missing a value', () => {
+      const filter = parseRegexFilter('message:////');
+
+      expect(filter.invalid).toEqual(
+        expect.objectContaining({type: InvalidReason.FILTER_MUST_HAVE_VALUE})
+      );
+    });
+
+    it('flags an empty pattern on an array membership key as missing a value', () => {
+      const filter = parseRegexFilter('tags[csv_headers,array][*]:////');
+
+      expect(filter.invalid).toEqual(
+        expect.objectContaining({type: InvalidReason.FILTER_MUST_HAVE_VALUE})
+      );
+    });
+
+    it('does not flag a pattern on an array membership key when it has a value', () => {
+      const filter = parseRegexFilter('tags[csv_headers,array][*]://^a b//');
+
+      expect(filter.invalid).toBeNull();
+    });
+  });
+});

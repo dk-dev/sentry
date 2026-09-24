@@ -1,200 +1,151 @@
-import React from 'react';
-import {css} from '@emotion/react';
 import styled from '@emotion/styled';
 
-import Button from 'app/components/button';
-import ButtonBar from 'app/components/buttonBar';
-import {DataSection} from 'app/components/events/styles';
-import {IconAnchor} from 'app/icons/iconAnchor';
-import {t} from 'app/locale';
-import space from 'app/styles/space';
-import {callIfFunction} from 'app/utils/callIfFunction';
+import {Container} from '@sentry/scraps/layout';
+import {ExternalLink} from '@sentry/scraps/link';
 
-const defaultProps = {
-  wrapTitle: true,
-  raw: false,
-  isCentered: false,
-  showPermalink: true,
-};
+import {DataSection} from 'sentry/components/events/styles';
+import {IconLink} from 'sentry/icons';
 
-type DefaultProps = Readonly<typeof defaultProps>;
-
-type Props = {
-  className?: string;
+interface EventDataSectionProps {
+  children: React.ReactNode;
+  /**
+   * The title of the section
+   */
   title: React.ReactNode;
+  /**
+   * Used as the `id` of the section. This powers the permalink
+   */
   type: string;
-  toggleRaw?: (enable: boolean) => void;
+  /**
+   * Actions that appear to the far right of the title
+   */
   actions?: React.ReactNode;
-} & DefaultProps;
+  className?: string;
+  ref?: React.Ref<HTMLDivElement>;
+}
 
-class EventDataSection extends React.Component<Props> {
-  static defaultProps = defaultProps;
+function scrollToSection(element: HTMLDivElement) {
+  if (window.location.hash && element) {
+    const [, hash] = window.location.hash.split('#');
 
-  componentDidMount() {
-    if (location.hash) {
-      const [, hash] = location.hash.split('#');
-
-      try {
-        const anchorElement = hash && document.querySelector('div#' + hash);
-        if (anchorElement) {
-          anchorElement.scrollIntoView();
-        }
-      } catch {
-        // Since we're blindly taking the hash from the url and shoving
-        // it into a querySelector, it's possible that this may
-        // raise an exception if the input is invalid. So let's just ignore
-        // this instead of blowing up.
-        // e.g. `document.querySelector('div#=')`
-        // > Uncaught DOMException: Failed to execute 'querySelector' on 'Document': 'div#=' is not a valid selector.
+    try {
+      const anchorElement = hash && element.querySelector('div#' + hash);
+      if (anchorElement) {
+        anchorElement.scrollIntoView();
       }
+    } catch {
+      // Since we're blindly taking the hash from the url and shoving
+      // it into a querySelector, it's possible that this may
+      // raise an exception if the input is invalid. So let's just ignore
+      // this instead of blowing up.
+      // e.g. `document.querySelector('div#=')`
+      // > Uncaught DOMException: Failed to execute 'querySelector' on 'Document': 'div#=' is not a valid selector.
     }
-  }
-
-  render() {
-    const {
-      children,
-      className,
-      type,
-      title,
-      toggleRaw,
-      raw,
-      wrapTitle,
-      actions,
-      isCentered,
-      showPermalink,
-    } = this.props;
-
-    const titleNode = wrapTitle ? <h3>{title}</h3> : title;
-
-    return (
-      <DataSection className={className || ''}>
-        {title && (
-          <SectionHeader id={type} isCentered={isCentered}>
-            <Title>
-              {showPermalink ? (
-                <Permalink href={'#' + type} className="permalink">
-                  <StyledIconAnchor />
-                  {titleNode}
-                </Permalink>
-              ) : (
-                <div>{titleNode}</div>
-              )}
-            </Title>
-            {type === 'extra' && (
-              <ButtonBar merged active={raw ? 'raw' : 'formatted'}>
-                <Button
-                  barId="formatted"
-                  size="xsmall"
-                  onClick={() => callIfFunction(toggleRaw, false)}
-                >
-                  {t('Formatted')}
-                </Button>
-                <Button
-                  barId="raw"
-                  size="xsmall"
-                  onClick={() => callIfFunction(toggleRaw, true)}
-                >
-                  {t('Raw')}
-                </Button>
-              </ButtonBar>
-            )}
-            {actions && <ActionContainer>{actions}</ActionContainer>}
-          </SectionHeader>
-        )}
-        <SectionContents>{children}</SectionContents>
-      </DataSection>
-    );
   }
 }
 
+export function EventDataSection({
+  children,
+  className,
+  type,
+  title,
+  actions,
+  ...props
+}: EventDataSectionProps) {
+  const titleNode = <h3>{title}</h3>;
+
+  return (
+    <DataSection ref={scrollToSection} className={className || ''} {...props}>
+      <SectionHeader id={type} data-test-id={`event-section-${type}`}>
+        {title && (
+          <Title>
+            <Container as="span" width="100%" position="relative" className="permalink">
+              <PermalinkAnchor href={`#${type}`} openInNewTab={false}>
+                <StyledIconLink size="xs" variant="muted" />
+              </PermalinkAnchor>
+              {titleNode}
+            </Container>
+          </Title>
+        )}
+        {actions && (
+          <Container flexShrink={0} maxWidth="100%">
+            {actions}
+          </Container>
+        )}
+      </SectionHeader>
+      <Container position="relative">{children}</Container>
+    </DataSection>
+  );
+}
+
 const Title = styled('div')`
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  align-items: center;
+  gap: ${p => p.theme.space.xs};
+`;
+
+const StyledIconLink = styled(IconLink)`
+  opacity: 0;
+  transform: translateY(-1px);
+  transition: opacity 100ms;
+`;
+
+const PermalinkAnchor = styled(ExternalLink)`
   display: flex;
-`;
-
-const StyledIconAnchor = styled(IconAnchor)`
-  display: none;
+  align-items: center;
   position: absolute;
-  top: 4px;
-  left: -22px;
-`;
+  top: 0;
+  left: 0;
+  width: calc(100% + ${p => p.theme.space['2xl']});
+  height: 100%;
+  padding-left: ${p => p.theme.space.xs};
+  transform: translateX(-${p => p.theme.space['2xl']});
 
-const Permalink = styled('a')`
-  :hover ${StyledIconAnchor} {
-    display: block;
-    color: ${p => p.theme.gray300};
+  :hover ${StyledIconLink}, :focus ${StyledIconLink} {
+    opacity: 1;
   }
 `;
 
-const SectionHeader = styled('div')<{isCentered?: boolean}>`
+const SectionHeader = styled('div')`
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  margin-bottom: ${space(2)};
-
-  > * {
-    margin-bottom: ${space(0.5)};
-  }
+  gap: ${p => p.theme.space.xs};
+  margin-bottom: ${p => p.theme.space.md};
 
   & h3,
   & h3 a {
-    font-size: 14px;
-    font-weight: 600;
-    line-height: 1.2;
-    color: ${p => p.theme.gray300};
+    color: ${p => p.theme.tokens.content.secondary};
+    font-size: ${p => p.theme.font.size.md};
+    font-weight: ${p => p.theme.font.weight.sans.medium};
   }
 
   & h3 {
-    font-size: 14px;
-    font-weight: 600;
-    line-height: 1.2;
-    padding: ${space(0.75)} 0;
+    padding: ${p => p.theme.space.sm} 0;
     margin-bottom: 0;
-    text-transform: uppercase;
   }
 
   & small {
-    color: ${p => p.theme.textColor};
-    font-size: ${p => p.theme.fontSizeMedium};
-    margin-right: ${space(0.5)};
-    margin-left: ${space(0.5)};
-
-    text-transform: none;
+    color: ${p => p.theme.tokens.content.primary};
+    font-size: ${p => p.theme.font.size.md};
+    margin-right: ${p => p.theme.space.xs};
+    margin-left: ${p => p.theme.space.xs};
   }
   & small > span {
-    color: ${p => p.theme.textColor};
-    border-bottom: 1px dotted ${p => p.theme.border};
-    font-weight: normal;
+    color: ${p => p.theme.tokens.content.primary};
+    font-weight: ${p => p.theme.font.weight.sans.regular};
   }
 
-  @media (min-width: ${props => props.theme.breakpoints[2]}) {
+  @media (min-width: ${p => p.theme.breakpoints.lg}) {
     & > small {
-      margin-left: ${space(1)};
+      margin-left: ${p => p.theme.space.md};
       display: inline-block;
     }
   }
 
-  ${p =>
-    p.isCentered &&
-    css`
-      align-items: center;
-      @media (max-width: ${p.theme.breakpoints[0]}) {
-        display: block;
-      }
-    `}
-
-  >*:first-child {
+  > *:first-child {
     position: relative;
     flex-grow: 1;
   }
 `;
-
-const SectionContents = styled('div')`
-  position: relative;
-`;
-
-const ActionContainer = styled('div')`
-  flex-shrink: 0;
-  max-width: 100%;
-`;
-
-export default EventDataSection;

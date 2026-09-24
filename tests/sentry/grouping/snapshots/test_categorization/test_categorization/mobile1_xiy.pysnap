@@ -1,7 +1,5 @@
 ---
-created: '2021-03-29T22:02:40.213719Z'
-creator: sentry
-source: tests/sentry/grouping/test_categorization.py
+source: tests/sentry/grouping/test_categorization.py::test_categorization
 ---
 
 
@@ -10,8 +8,8 @@ NullPointerException:Attempt to invoke virtual method 'android.view.View android
   com.android.internal.os.RuntimeInit$Method  run category=internals
                     java.lang.reflect.Method  invoke category=indirection
                   android.app.ActivityThread  main category=threadbase
-                           android.os.Looper  loop category=system
-                          android.os.Handler  dispatchMessage category=internals
+                           android.os.Looper  loop category=threadbase
+                          android.os.Handler  dispatchMessage category=threadbase
    android.view.ViewRootImpl$ViewRootHandler  handleMessage category=indirection
                    android.view.ViewRootImpl  access$1100 category=ui
                    android.view.ViewRootImpl  handleWindowFocusChanged category=internals

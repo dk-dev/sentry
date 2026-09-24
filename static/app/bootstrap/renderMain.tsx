@@ -1,16 +1,13 @@
-import React from 'react';
-import ReactDOM from 'react-dom';
+import {ROOT_ELEMENT} from 'sentry/constants';
+import {Main} from 'sentry/main';
 
-import {ROOT_ELEMENT} from 'app/constants';
-import Main from 'app/main';
+import {renderDom} from './renderDom';
 
 export function renderMain() {
-  const rootEl = document.getElementById(ROOT_ELEMENT);
-
   try {
-    ReactDOM.render(<Main />, rootEl);
+    renderDom(Main, `#${ROOT_ELEMENT}`, {});
   } catch (err) {
-    if (err.message === 'URI malformed') {
+    if (err instanceof URIError) {
       // eslint-disable-next-line no-console
       console.error(
         new Error(

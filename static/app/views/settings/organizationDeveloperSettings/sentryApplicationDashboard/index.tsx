@@ -1,261 +1,391 @@
-import React from 'react';
-import {RouteComponentProps} from 'react-router';
-import styled from '@emotion/styled';
+import {Fragment, useState} from 'react';
+import {useTheme} from '@emotion/react';
+import {useQuery} from '@tanstack/react-query';
 
-import BarChart from 'app/components/charts/barChart';
-import LineChart from 'app/components/charts/lineChart';
-import DateTime from 'app/components/dateTime';
-import Link from 'app/components/links/link';
-import {Panel, PanelBody, PanelFooter, PanelHeader} from 'app/components/panels';
-import {t} from 'app/locale';
-import space from 'app/styles/space';
-import {SentryApp} from 'app/types';
-import AsyncView from 'app/views/asyncView';
-import SettingsPageHeader from 'app/views/settings/components/settingsPageHeader';
+import {Container, Flex, Stack} from '@sentry/scraps/layout';
+import {Link} from '@sentry/scraps/link';
+import {Heading, Text} from '@sentry/scraps/text';
 
-import RequestLog from './requestLog';
+import {sentryAppApiOptions} from 'sentry/actionCreators/sentryApps';
+import {BarChart} from 'sentry/components/charts/barChart';
+import type {LineChartSeries} from 'sentry/components/charts/lineChart';
+import {LineChart} from 'sentry/components/charts/lineChart';
+import {DateTime} from 'sentry/components/dateTime';
+import {LoadingError} from 'sentry/components/loadingError';
+import {LoadingIndicator} from 'sentry/components/loadingIndicator';
+import {Panel} from 'sentry/components/panels/panel';
+import {PanelBody} from 'sentry/components/panels/panelBody';
+import {PanelFooter} from 'sentry/components/panels/panelFooter';
+import {PanelHeader} from 'sentry/components/panels/panelHeader';
+import {SentryDocumentTitle} from 'sentry/components/sentryDocumentTitle';
+import {t, tct} from 'sentry/locale';
+import type {SentryApp} from 'sentry/types/integrations';
+import {apiOptions} from 'sentry/utils/api/apiOptions';
+import {isActiveSuperuser} from 'sentry/utils/isActiveSuperuser';
+import {useOrganization} from 'sentry/utils/useOrganization';
+import {useParams} from 'sentry/utils/useParams';
+import {SettingsPageHeader} from 'sentry/views/settings/components/settingsPageHeader';
+import {OrganizationPermissionAlert} from 'sentry/views/settings/organization/organizationPermissionAlert';
 
-type Props = RouteComponentProps<{appSlug: string; orgId: string}, {}>;
+import {RequestLog} from './requestLog';
 
-type State = AsyncView['state'] & {
-  stats: {
-    totalUninstalls: number;
-    totalInstalls: number;
-    installStats: [number, number][];
-    uninstallStats: [number, number][];
-  };
-  interactions: {
-    componentInteractions: {
-      [key: string]: [number, number][];
-    };
-    views: [number, number][];
-  };
-  app: SentryApp;
+type Interactions = {
+  componentInteractions: Record<string, Array<[number, number]>>;
+  views: Array<[number, number]>;
 };
 
-export default class SentryApplicationDashboard extends AsyncView<Props, State> {
-  getEndpoints(): ReturnType<AsyncView['getEndpoints']> {
-    const {appSlug} = this.props.params;
+type Stats = {
+  installStats: Array<[number, number]>;
+  totalInstalls: number;
+  totalUninstalls: number;
+  uninstallStats: Array<[number, number]>;
+};
 
-    // Default time range for now: 90 days ago to now
-    const now = Math.floor(new Date().getTime() / 1000);
-    const ninety_days_ago = 3600 * 24 * 90;
+type TimeRange = {
+  since: number;
+  until: number;
+};
 
-    return [
-      [
-        'stats',
-        `/sentry-apps/${appSlug}/stats/`,
-        {query: {since: now - ninety_days_ago, until: now}},
-      ],
+function sentryAppInteractionsApiOptions({
+  appSlug,
+  timeRange,
+}: {
+  appSlug: string;
+  timeRange: TimeRange;
+}) {
+  return apiOptions.as<Interactions>()('/sentry-apps/$sentryAppIdOrSlug/interaction/', {
+    path: {sentryAppIdOrSlug: appSlug},
+    query: timeRange,
+    staleTime: 0,
+  });
+}
 
-      [
-        'interactions',
-        `/sentry-apps/${appSlug}/interaction/`,
-        {query: {since: now - ninety_days_ago, until: now}},
-      ],
-      ['app', `/sentry-apps/${appSlug}/`],
-    ];
+function sentryAppStatsApiOptions({
+  appSlug,
+  timeRange,
+}: {
+  appSlug: string;
+  timeRange: TimeRange;
+}) {
+  return apiOptions.as<Stats>()('/sentry-apps/$sentryAppIdOrSlug/stats/', {
+    path: {sentryAppIdOrSlug: appSlug},
+    query: timeRange,
+    staleTime: 0,
+  });
+}
+
+function SentryApplicationDashboard() {
+  const organization = useOrganization();
+  const {appSlug} = useParams<{appSlug: string}>();
+
+  // Default time range for now: 90 days ago to now
+  const [timeRange] = useState<TimeRange>(() => {
+    const now = Math.floor(Date.now() / 1000);
+    return {since: now - 3600 * 24 * 90, until: now};
+  });
+
+  const {
+    data: app,
+    isPending: isAppPending,
+    isError: isAppError,
+  } = useQuery(sentryAppApiOptions({appSlug}));
+
+  if (isAppPending) {
+    return <LoadingIndicator />;
   }
 
-  getTitle() {
-    return t('Integration Dashboard');
+  if (isAppError || !app) {
+    return <LoadingError />;
   }
+  const showInstallData = app.status === 'published';
+  const showComponentInteractions = Boolean(app.schema?.elements);
+  const canViewRequestLogs =
+    app.status === 'internal' ||
+    organization.access.includes('org:admin') ||
+    organization.access.includes('org:integrations') ||
+    isActiveSuperuser();
 
-  renderInstallData() {
-    const {app, stats} = this.state;
-    const {totalUninstalls, totalInstalls} = stats;
-    return (
-      <React.Fragment>
-        <h5>{t('Installation & Interaction Data')}</h5>
-        <Row>
-          {app.datePublished ? (
-            <StatsSection>
-              <StatsHeader>{t('Date published')}</StatsHeader>
-              <DateTime dateOnly date={app.datePublished} />
-            </StatsSection>
-          ) : null}
-          <StatsSection>
-            <StatsHeader>{t('Total installs')}</StatsHeader>
-            <p>{totalInstalls}</p>
-          </StatsSection>
-          <StatsSection>
-            <StatsHeader>{t('Total uninstalls')}</StatsHeader>
-            <p>{totalUninstalls}</p>
-          </StatsSection>
-        </Row>
-        {this.renderInstallCharts()}
-      </React.Fragment>
-    );
-  }
-
-  renderInstallCharts() {
-    const {installStats, uninstallStats} = this.state.stats;
-
-    const installSeries = {
-      data: installStats.map(point => ({
-        name: point[0] * 1000,
-        value: point[1],
-      })),
-      seriesName: t('installed'),
-    };
-    const uninstallSeries = {
-      data: uninstallStats.map(point => ({
-        name: point[0] * 1000,
-        value: point[1],
-      })),
-      seriesName: t('uninstalled'),
-    };
-
-    return (
-      <Panel>
-        <PanelHeader>{t('Installations/Uninstallations over Last 90 Days')}</PanelHeader>
-        <ChartWrapper>
-          <BarChart
-            series={[installSeries, uninstallSeries]}
-            height={150}
-            stacked
-            isGroupedByDate
-            legend={{
-              show: true,
-              orient: 'horizontal',
-              data: ['installed', 'uninstalled'],
-              itemWidth: 15,
-            }}
-            yAxis={{type: 'value', minInterval: 1, max: 'dataMax'}}
-            xAxis={{type: 'time'}}
-            grid={{left: space(4), right: space(4)}}
+  return (
+    <div>
+      <SentryDocumentTitle title={t('Integration Dashboard')} />
+      <SettingsPageHeader title={`${t('Integration Dashboard')} - ${app.name}`} />
+      {showInstallData ? (
+        <Fragment>
+          <InstallDataSection app={app} appSlug={appSlug} timeRange={timeRange} />
+          <IntegrationViewsSection
+            appSlug={appSlug}
+            organizationSlug={organization.slug}
+            timeRange={timeRange}
           />
-        </ChartWrapper>
-      </Panel>
-    );
-  }
-
-  renderIntegrationViews() {
-    const {views} = this.state.interactions;
-    const {appSlug, orgId} = this.props.params;
-
-    return (
-      <Panel>
-        <PanelHeader>{t('Integration Views')}</PanelHeader>
-        <PanelBody>
-          <InteractionsChart data={{Views: views}} />
-        </PanelBody>
-
-        <PanelFooter>
-          <StyledFooter>
-            {t('Integration views are measured through views on the ')}
-            <Link to={`/sentry-apps/${appSlug}/external-install/`}>
-              {t('external installation page')}
-            </Link>
-            {t(' and views on the Learn More/Install modal on the ')}
-            <Link to={`/settings/${orgId}/integrations/`}>{t('integrations page')}</Link>
-          </StyledFooter>
-        </PanelFooter>
-      </Panel>
-    );
-  }
-
-  renderComponentInteractions() {
-    const {componentInteractions} = this.state.interactions;
-    const componentInteractionsDetails = {
-      'stacktrace-link': t(
-        'Each link click or context menu open counts as one interaction'
-      ),
-      'issue-link': t('Each open of the issue link modal counts as one interaction'),
-    };
-
-    return (
-      <Panel>
-        <PanelHeader>{t('Component Interactions')}</PanelHeader>
-
-        <PanelBody>
-          <InteractionsChart data={componentInteractions} />
-        </PanelBody>
-
-        <PanelFooter>
-          <StyledFooter>
-            {Object.keys(componentInteractions).map(
-              (component, idx) =>
-                componentInteractionsDetails[component] && (
-                  <React.Fragment key={idx}>
-                    <strong>{`${component}: `}</strong>
-                    {componentInteractionsDetails[component]}
-                    <br />
-                  </React.Fragment>
-                )
-            )}
-          </StyledFooter>
-        </PanelFooter>
-      </Panel>
-    );
-  }
-
-  renderBody() {
-    const {app} = this.state;
-
-    return (
-      <div>
-        <SettingsPageHeader title={`${t('Integration Dashboard')} - ${app.name}`} />
-        {app.status === 'published' && this.renderInstallData()}
-        {app.status === 'published' && this.renderIntegrationViews()}
-        {app.schema.elements && this.renderComponentInteractions()}
+        </Fragment>
+      ) : null}
+      {showComponentInteractions ? (
+        <ComponentInteractionsSection appSlug={appSlug} timeRange={timeRange} />
+      ) : null}
+      {canViewRequestLogs ? (
         <RequestLog app={app} />
-      </div>
-    );
+      ) : (
+        <Stack gap="md">
+          <Heading as="h5">{t('Request Log')}</Heading>
+          <OrganizationPermissionAlert
+            access={['org:integrations']}
+            message={t(
+              'Only organization admins and members with integration management access can view the request log.'
+            )}
+          />
+        </Stack>
+      )}
+    </div>
+  );
+}
+
+export default SentryApplicationDashboard;
+
+type InstallDataSectionProps = {
+  app: SentryApp;
+  appSlug: string;
+  timeRange: TimeRange;
+};
+
+function InstallDataSection({app, appSlug, timeRange}: InstallDataSectionProps) {
+  const {
+    data: stats,
+    isPending,
+    isError,
+  } = useQuery(sentryAppStatsApiOptions({appSlug, timeRange}));
+
+  if (isPending) {
+    return <LoadingIndicator />;
   }
+
+  if (isError || !stats) {
+    return <LoadingError />;
+  }
+
+  const {installStats, uninstallStats, totalUninstalls, totalInstalls} = stats;
+
+  return (
+    <Fragment>
+      <h5>{t('Installation & Interaction Data')}</h5>
+      <Flex gap="3xl">
+        {app.datePublished ? (
+          <Container>
+            <StatsHeader>{t('Date published')}</StatsHeader>
+            <DateTime dateOnly date={app.datePublished} />
+          </Container>
+        ) : null}
+        <Container data-test-id="installs">
+          <StatsHeader>{t('Total installs')}</StatsHeader>
+          <p>{totalInstalls}</p>
+        </Container>
+        <Container data-test-id="uninstalls">
+          <StatsHeader>{t('Total uninstalls')}</StatsHeader>
+          <p>{totalUninstalls}</p>
+        </Container>
+      </Flex>
+      <InstallCharts installStats={installStats} uninstallStats={uninstallStats} />
+    </Fragment>
+  );
+}
+
+type InstallChartsProps = {
+  installStats: Array<[number, number]>;
+  uninstallStats: Array<[number, number]>;
+};
+
+function InstallCharts({installStats, uninstallStats}: InstallChartsProps) {
+  const theme = useTheme();
+
+  const installSeries = {
+    data: installStats.map(point => ({
+      name: point[0] * 1000,
+      value: point[1],
+    })),
+    seriesName: t('installed'),
+  };
+  const uninstallSeries = {
+    data: uninstallStats.map(point => ({
+      name: point[0] * 1000,
+      value: point[1],
+    })),
+    seriesName: t('uninstalled'),
+  };
+
+  return (
+    <Panel>
+      <PanelHeader>{t('Installations/Uninstallations over Last 90 Days')}</PanelHeader>
+      <Container paddingTop="2xl">
+        <BarChart
+          series={[installSeries, uninstallSeries]}
+          height={150}
+          stacked
+          isGroupedByDate
+          legend={{
+            show: true,
+            orient: 'horizontal',
+            data: ['installed', 'uninstalled'],
+            itemWidth: 15,
+          }}
+          yAxis={{type: 'value', minInterval: 1, max: 'dataMax'}}
+          xAxis={{type: 'time'}}
+          grid={{left: theme.space['3xl'], right: theme.space['3xl']}}
+        />
+      </Container>
+    </Panel>
+  );
+}
+
+type IntegrationViewsSectionProps = {
+  appSlug: string;
+  organizationSlug: string;
+  timeRange: TimeRange;
+};
+
+function IntegrationViewsSection({
+  appSlug,
+  organizationSlug,
+  timeRange,
+}: IntegrationViewsSectionProps) {
+  const {
+    data: interactions,
+    isPending,
+    isError,
+  } = useQuery(sentryAppInteractionsApiOptions({appSlug, timeRange}));
+
+  if (isPending) {
+    return <LoadingIndicator />;
+  }
+
+  if (isError || !interactions) {
+    return <LoadingError />;
+  }
+
+  return (
+    <Panel>
+      <PanelHeader>{t('Integration Views')}</PanelHeader>
+      <PanelBody>
+        <InteractionsChart data={{Views: interactions.views}} />
+      </PanelBody>
+      <PanelFooter>
+        <Container padding="lg">
+          {tct(
+            'Integration views are measured through views on the [externalInstallPage:external installation page] and views on the Learn More/Install modal on the [integrationsPage:integrations page]',
+            {
+              externalInstallPage: (
+                <Link to={`/sentry-apps/${appSlug}/external-install/`} />
+              ),
+              integrationsPage: (
+                <Link to={`/settings/${organizationSlug}/integrations/`} />
+              ),
+            }
+          )}
+        </Container>
+      </PanelFooter>
+    </Panel>
+  );
+}
+
+type ComponentInteractionsSectionProps = {
+  appSlug: string;
+  timeRange: TimeRange;
+};
+
+function ComponentInteractionsSection({
+  appSlug,
+  timeRange,
+}: ComponentInteractionsSectionProps) {
+  const {
+    data: interactions,
+    isPending,
+    isError,
+  } = useQuery(sentryAppInteractionsApiOptions({appSlug, timeRange}));
+
+  if (isPending) {
+    return <LoadingIndicator />;
+  }
+
+  if (isError || !interactions) {
+    return <LoadingError />;
+  }
+
+  const componentInteractions = interactions.componentInteractions;
+  const componentInteractionsDetails = {
+    'stacktrace-link': t(
+      'Each link click or context menu open counts as one interaction'
+    ),
+    'issue-link': t('Each open of the issue link modal counts as one interaction'),
+  };
+
+  return (
+    <Panel>
+      <PanelHeader>{t('Component Interactions')}</PanelHeader>
+      <PanelBody>
+        <InteractionsChart data={componentInteractions} />
+      </PanelBody>
+      <PanelFooter>
+        <Container padding="lg">
+          {Object.keys(componentInteractions).map(
+            (component, idx) =>
+              componentInteractionsDetails[
+                component as keyof typeof componentInteractionsDetails
+              ] && (
+                <Fragment key={idx}>
+                  <strong>{`${component}: `}</strong>
+                  {
+                    componentInteractionsDetails[
+                      component as keyof typeof componentInteractionsDetails
+                    ]
+                  }
+                  <br />
+                </Fragment>
+              )
+          )}
+        </Container>
+      </PanelFooter>
+    </Panel>
+  );
 }
 
 type InteractionsChartProps = {
-  data: {
-    [key: string]: [number, number][];
-  };
+  data: Record<string, Array<[number, number]>>;
 };
-const InteractionsChart = ({data}: InteractionsChartProps) => {
-  const elementInteractionsSeries = Object.keys(data).map((key: string) => {
-    const seriesData = data[key].map(point => ({
-      value: point[1],
-      name: point[0] * 1000,
-    }));
-    return {
-      seriesName: key,
-      data: seriesData,
-    };
-  });
+function InteractionsChart({data}: InteractionsChartProps) {
+  const theme = useTheme();
+  const elementInteractionsSeries: LineChartSeries[] = Object.keys(data).map(
+    (key: string) => {
+      const seriesData = data[key]!.map(point => ({
+        value: point[1],
+        name: point[0] * 1000,
+      }));
+      return {
+        seriesName: key,
+        data: seriesData,
+      };
+    }
+  );
 
   return (
-    <ChartWrapper>
+    <Container paddingTop="2xl">
       <LineChart
         isGroupedByDate
         series={elementInteractionsSeries}
-        grid={{left: space(4), right: space(4)}}
+        grid={{left: theme.space['3xl'], right: theme.space['3xl']}}
         legend={{
           show: true,
           orient: 'horizontal',
           data: Object.keys(data),
         }}
       />
-    </ChartWrapper>
+    </Container>
   );
-};
+}
 
-const Row = styled('div')`
-  display: flex;
-`;
-
-const StatsSection = styled('div')`
-  margin-right: ${space(4)};
-`;
-const StatsHeader = styled('h6')`
-  margin-bottom: ${space(1)};
-  font-size: 12px;
-  text-transform: uppercase;
-  color: ${p => p.theme.subText};
-`;
-
-const StyledFooter = styled('div')`
-  padding: ${space(1.5)};
-`;
-
-const ChartWrapper = styled('div')`
-  padding-top: ${space(3)};
-`;
+function StatsHeader({children}: {children: React.ReactNode}) {
+  return (
+    <Container paddingBottom="md">
+      <Text size="xs" variant="muted" uppercase bold>
+        {children}
+      </Text>
+    </Container>
+  );
+}

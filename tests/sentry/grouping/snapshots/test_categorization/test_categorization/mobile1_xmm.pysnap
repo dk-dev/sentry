@@ -1,15 +1,13 @@
 ---
-created: '2021-03-30T09:16:36.826597Z'
-creator: sentry
-source: tests/sentry/grouping/test_categorization.py
+source: tests/sentry/grouping/test_categorization.py::test_categorization
 ---
 
 
 SIGABRT:_ (thread_id:_, crashed:_)
                                               stripped_application_code
                                               stripped_application_code
-                                   UIKitCore  UIApplicationMain category=ui
-                                   UIKitCore  -[UIApplication _run] category=internals
+                                   UIKitCore  UIApplicationMain category=threadbase
+                                   UIKitCore  -[UIApplication _run] category=ui
                                               stripped_application_code
                               CoreFoundation  CFRunLoopRunSpecific category=indirection
                               CoreFoundation  __CFRunLoopRun category=internals
@@ -57,7 +55,7 @@ SIGABRT:_ (thread_id:_, crashed:_)
                                               stripped_application_code
                                               stripped_application_code
                                               stripped_application_code
-                      libsystem_malloc.dylib  malloc_vreport category=oom
+                      libsystem_malloc.dylib  malloc_vreport category=malloc
                            libsystem_c.dylib  abort category=throw
                                               stripped_application_code
                                               stripped_application_code

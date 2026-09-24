@@ -1,60 +1,117 @@
-import React from 'react';
-import styled from '@emotion/styled';
+import {IssueStreamHeaderLabel} from 'sentry/components/IssueStreamHeaderLabel';
+import {PanelHeader} from 'sentry/components/panels/panelHeader';
+import {t} from 'sentry/locale';
+import {COLUMN_BREAKPOINTS} from 'sentry/views/issueList/actions/utils';
 
-import {PanelHeader} from 'app/components/panels';
-import {t} from 'app/locale';
-import space from 'app/styles/space';
+import type {GroupListColumn} from './groupList';
 
 type Props = {
   withChart: boolean;
+  withColumns?: GroupListColumn[];
 };
 
-const GroupListHeader = ({withChart = true}: Props) => (
-  <PanelHeader disablePadding>
-    <IssueWrapper>{t('Issue')}</IssueWrapper>
-    {withChart && (
-      <ChartWrapper className="hidden-xs hidden-sm">{t('Graph')}</ChartWrapper>
-    )}
-    <EventUserWrapper>{t('events')}</EventUserWrapper>
-    <EventUserWrapper>{t('users')}</EventUserWrapper>
-    <AssigneeWrapper className="hidden-xs hidden-sm toolbar-header">
-      {t('Assignee')}
-    </AssigneeWrapper>
-  </PanelHeader>
-);
-
-export default GroupListHeader;
-
-const Heading = styled('div')`
-  display: flex;
-  align-self: center;
-  margin: 0 ${space(2)};
-`;
-
-const IssueWrapper = styled(Heading)`
-  flex: 1;
-  width: 66.66%;
-
-  @media (min-width: ${p => p.theme.breakpoints[1]}) {
-    width: 50%;
-  }
-`;
-
-const EventUserWrapper = styled(Heading)`
-  justify-content: flex-end;
-  width: 60px;
-
-  @media (min-width: ${p => p.theme.breakpoints[3]}) {
-    width: 80px;
-  }
-`;
-
-const ChartWrapper = styled(Heading)`
-  justify-content: space-between;
-  width: 160px;
-`;
-
-const AssigneeWrapper = styled(Heading)`
-  justify-content: flex-end;
-  width: 80px;
-`;
+export function GroupListHeader({
+  withChart,
+  withColumns = ['graph', 'event', 'users', 'assignee', 'lastTriggered'],
+}: Props) {
+  return (
+    <PanelHeader disablePadding>
+      <IssueStreamHeaderLabel
+        hideDivider
+        flex="1"
+        paddingLeft="xl"
+        style={{textTransform: 'capitalize'}}
+      >
+        {t('Issue')}
+      </IssueStreamHeaderLabel>
+      {withColumns.includes('lastSeen') && (
+        <IssueStreamHeaderLabel
+          display={{zero: 'none', [COLUMN_BREAKPOINTS.LAST_SEEN]: 'inline-block'}}
+          align="right"
+          width="80px"
+          style={{textTransform: 'capitalize'}}
+        >
+          {t('Last Seen')}
+        </IssueStreamHeaderLabel>
+      )}
+      {withColumns.includes('firstSeen') && (
+        <IssueStreamHeaderLabel
+          display={{zero: 'none', [COLUMN_BREAKPOINTS.FIRST_SEEN]: 'inline-block'}}
+          align="right"
+          width="50px"
+          style={{textTransform: 'capitalize'}}
+        >
+          {t('Age')}
+        </IssueStreamHeaderLabel>
+      )}
+      {withColumns.includes('lastTriggered') && (
+        <IssueStreamHeaderLabel
+          align="right"
+          width="100px"
+          style={{textTransform: 'capitalize'}}
+        >
+          {t('Last Triggered')}
+        </IssueStreamHeaderLabel>
+      )}
+      {withChart && (
+        <IssueStreamHeaderLabel
+          display={{zero: 'none', [COLUMN_BREAKPOINTS.TREND]: 'inline-block'}}
+          width="175px"
+          style={{textTransform: 'capitalize'}}
+        >
+          {t('Graph')}
+        </IssueStreamHeaderLabel>
+      )}
+      {withColumns.includes('event') && (
+        <IssueStreamHeaderLabel
+          display={{zero: 'none', [COLUMN_BREAKPOINTS.EVENTS]: 'inline-block'}}
+          align="right"
+          width="60px"
+          style={{textTransform: 'capitalize'}}
+        >
+          {t('Events')}
+        </IssueStreamHeaderLabel>
+      )}
+      {withColumns.includes('users') && (
+        <IssueStreamHeaderLabel
+          display={{zero: 'none', [COLUMN_BREAKPOINTS.USERS]: 'inline-block'}}
+          align="right"
+          width="60px"
+          style={{textTransform: 'capitalize'}}
+        >
+          {t('Users')}
+        </IssueStreamHeaderLabel>
+      )}
+      {withColumns.includes('priority') && (
+        <IssueStreamHeaderLabel
+          display={{zero: 'none', [COLUMN_BREAKPOINTS.PRIORITY]: 'inline-block'}}
+          align="right"
+          width="70px"
+          style={{textTransform: 'capitalize'}}
+        >
+          {t('Priority')}
+        </IssueStreamHeaderLabel>
+      )}
+      {withColumns.includes('progress') && (
+        <IssueStreamHeaderLabel
+          display={{zero: 'none', [COLUMN_BREAKPOINTS.PROGRESS]: 'inline-block'}}
+          align="right"
+          width="90px"
+          style={{textTransform: 'capitalize'}}
+        >
+          {t('Progress')}
+        </IssueStreamHeaderLabel>
+      )}
+      {(withColumns.includes('assignee') || withColumns.includes('assigneeAvatar')) && (
+        <IssueStreamHeaderLabel
+          display={{zero: 'none', [COLUMN_BREAKPOINTS.ASSIGNEE]: 'inline-block'}}
+          align="right"
+          width="66px"
+          style={{textTransform: 'capitalize'}}
+        >
+          {t('Assignee')}
+        </IssueStreamHeaderLabel>
+      )}
+    </PanelHeader>
+  );
+}

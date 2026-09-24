@@ -1,21 +1,27 @@
-import {browserHistory} from 'react-router';
+import type {NavigateFunction} from 'react-router-dom';
 
-import {resetGlobalSelection} from 'app/actionCreators/globalSelection';
-import {addErrorMessage, addSuccessMessage} from 'app/actionCreators/indicator';
-import OrganizationActions from 'app/actions/organizationActions';
-import OrganizationsActions from 'app/actions/organizationsActions';
-import {Client} from 'app/api';
-import OrganizationsStore from 'app/stores/organizationsStore';
-import ProjectsStore from 'app/stores/projectsStore';
-import TeamStore from 'app/stores/teamStore';
-import {LightWeightOrganization, Organization} from 'app/types';
+import {addErrorMessage, addSuccessMessage} from 'sentry/actionCreators/indicator';
+import type {Client} from 'sentry/api';
+import {resetPageFilters} from 'sentry/components/pageFilters/actions';
+import {USING_CUSTOMER_DOMAIN} from 'sentry/constants';
+import {ConfigStore} from 'sentry/stores/configStore';
+import {GuideStore} from 'sentry/stores/guideStore';
+import {OrganizationsStore} from 'sentry/stores/organizationsStore';
+import {OrganizationStore} from 'sentry/stores/organizationStore';
+import {ProjectsStore} from 'sentry/stores/projectsStore';
+import type {Organization} from 'sentry/types/organization';
+import {getApiUrl} from 'sentry/utils/api/getApiUrl';
+import {normalizeUrl} from 'sentry/utils/url/normalizeUrl';
 
 type RedirectRemainingOrganizationParams = {
+  /**
+   * navigate function from useNavigate
+   */
+  navigate: NavigateFunction;
   /**
    * The organization slug
    */
   orgId: string;
-
   /**
    * Should remove org?
    */
@@ -29,6 +35,7 @@ type RedirectRemainingOrganizationParams = {
  * Can optionally remove organization from organizations store.
  */
 export function redirectToRemainingOrganization({
+  navigate,
   orgId,
   removeOrg,
 }: RedirectRemainingOrganizationParams) {
@@ -37,13 +44,21 @@ export function redirectToRemainingOrganization({
     org => org.status.id === 'active' && org.slug !== orgId
   );
   if (!allOrgs.length) {
-    browserHistory.push('/organizations/new/');
+    navigate('/organizations/new/');
     return;
   }
 
   // Let's be smart and select the best org to redirect to
-  const firstRemainingOrg = allOrgs[0];
-  browserHistory.push(`/${firstRemainingOrg.slug}/`);
+  const firstRemainingOrg = allOrgs[0]!;
+
+  const route = `/organizations/${firstRemainingOrg.slug}/issues/`;
+  if (USING_CUSTOMER_DOMAIN) {
+    const {organizationUrl} = firstRemainingOrg.links;
+    window.location.assign(`${organizationUrl}${normalizeUrl(route)}`);
+    return;
+  }
+
+  navigate(route);
 
   // Remove org from SidebarDropdown
   if (removeOrg) {
@@ -68,22 +83,20 @@ type RemoveParams = {
   successMessage?: string;
 };
 
-export function remove(api: Client, {successMessage, errorMessage, orgId}: RemoveParams) {
+function remove(api: Client, {successMessage, errorMessage, orgId}: RemoveParams) {
   const endpoint = `/organizations/${orgId}/`;
   return api
     .requestPromise(endpoint, {
       method: 'DELETE',
     })
     .then(() => {
-      OrganizationsActions.removeSuccess(orgId);
+      OrganizationsStore.onRemoveSuccess(orgId);
 
       if (successMessage) {
         addSuccessMessage(successMessage);
       }
     })
     .catch(() => {
-      OrganizationsActions.removeError();
-
       if (errorMessage) {
         addErrorMessage(errorMessage);
       }
@@ -91,7 +104,7 @@ export function remove(api: Client, {successMessage, errorMessage, orgId}: Remov
 }
 
 export function switchOrganization() {
-  resetGlobalSelection();
+  resetPageFilters();
 }
 
 export function removeAndRedirectToRemainingOrganization(
@@ -104,15 +117,15 @@ export function removeAndRedirectToRemainingOrganization(
 /**
  * Set active organization
  */
-export function setActiveOrganization(org: LightWeightOrganization) {
-  OrganizationsActions.setActive(org);
+export function setActiveOrganization(org: Organization) {
+  GuideStore.setActiveOrganization(org);
 }
 
 export function changeOrganizationSlug(
   prev: Organization,
   next: Partial<Organization> & Pick<Organization, 'slug'>
 ) {
-  OrganizationsActions.changeSlug(prev, next);
+  OrganizationsStore.onChangeSlug(prev, next);
 }
 
 /**
@@ -120,9 +133,9 @@ export function changeOrganizationSlug(
  *
  * Accepts a partial organization as it will merge will existing organization
  */
-export function updateOrganization(org: Partial<LightWeightOrganization>) {
-  OrganizationsActions.update(org);
-  OrganizationActions.update(org);
+export function updateOrganization(org: Partial<Organization>) {
+  OrganizationsStore.onUpdate(org);
+  OrganizationStore.onUpdate(org);
 }
 
 type FetchOrganizationByMemberParams = {
@@ -131,11 +144,13 @@ type FetchOrganizationByMemberParams = {
 };
 
 export async function fetchOrganizationByMember(
+  api: Client,
   memberId: string,
   {addOrg, fetchOrgDetails}: FetchOrganizationByMemberParams
 ) {
-  const api = new Client();
-  const data = await api.requestPromise(`/organizations/?query=member_id:${memberId}`);
+  const data = await api.requestPromise(
+    `${getApiUrl('/organizations/')}?query=member_id:${memberId}`
+  );
 
   if (!data.length) {
     return null;
@@ -145,12 +160,12 @@ export async function fetchOrganizationByMember(
 
   if (addOrg) {
     // add org to SwitchOrganization dropdown
-    OrganizationsStore.add(org);
+    OrganizationsStore.addOrReplace(org);
   }
 
   if (fetchOrgDetails) {
     // load SidebarDropdown with org details including `access`
-    await fetchOrganizationDetails(org.slug, {setActive: true, loadProjects: true});
+    await fetchOrganizationDetails(api, org.slug, {setActive: true, loadProjects: true});
   }
 
   return org;
@@ -158,33 +173,33 @@ export async function fetchOrganizationByMember(
 
 type FetchOrganizationDetailsParams = {
   /**
-   * Should set as active organization?
-   */
-  setActive?: boolean;
-
-  /**
-   * Should load teams in TeamStore?
-   */
-  loadTeam?: boolean;
-
-  /**
    * Should load projects in ProjectsStore
    */
   loadProjects?: boolean;
+
+  /**
+   * Should set as active organization?
+   */
+  setActive?: boolean;
 };
 export async function fetchOrganizationDetails(
+  api: Client,
   orgId: string,
-  {setActive, loadProjects, loadTeam}: FetchOrganizationDetailsParams
+  {setActive, loadProjects}: FetchOrganizationDetailsParams
 ) {
-  const api = new Client();
-  const data = await api.requestPromise(`/organizations/${orgId}/`);
+  const data = await api.requestPromise(
+    getApiUrl('/organizations/$organizationIdOrSlug/', {
+      path: {organizationIdOrSlug: orgId},
+    }),
+    {
+      query: {
+        include_feature_flags: 1,
+      },
+    }
+  );
 
   if (setActive) {
     setActiveOrganization(data);
-  }
-
-  if (loadTeam) {
-    TeamStore.loadInitialData(data.teams);
   }
 
   if (loadProjects) {
@@ -192,4 +207,19 @@ export async function fetchOrganizationDetails(
   }
 
   return data;
+}
+
+/**
+ * Get all organizations for the current user.
+ *
+ * The control silo endpoint returns the full cross-cell list in one call.
+ *
+ * This function is challenging to type as the structure of the response
+ * from /organizations can vary based on query parameters
+ */
+export async function fetchOrganizations(api: Client, query?: Record<string, any>) {
+  return api.requestPromise('/organizations/', {
+    host: ConfigStore.get('links').sentryUrl,
+    query,
+  });
 }

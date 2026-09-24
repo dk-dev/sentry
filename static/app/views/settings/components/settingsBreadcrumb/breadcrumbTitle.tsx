@@ -1,21 +1,19 @@
-import React from 'react';
-import {PlainRoute} from 'react-router/lib/Route';
+import {useMemo} from 'react';
+import {useMatches} from 'react-router-dom';
 
-import SettingsBreadcrumbActions from 'app/actions/settingsBreadcrumbActions';
+import {useBreadcrumbTitleEffect} from './context';
 
 type Props = {
-  routes: Array<PlainRoute>;
   title: string;
 };
 
-class BreadcrumbTitle extends React.Component<Props> {
-  componentDidMount() {
-    SettingsBreadcrumbActions.mapTitle(this.props);
-  }
+/**
+ * Breadcrumb title sets the breadcrumb label for the provided route match
+ */
+export function BreadcrumbTitle({title}: Props) {
+  const matches = useMatches();
+  const props = useMemo(() => ({matches, title}), [matches, title]);
+  useBreadcrumbTitleEffect(props);
 
-  render() {
-    return null;
-  }
+  return null;
 }
-
-export default BreadcrumbTitle;

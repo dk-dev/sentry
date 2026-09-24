@@ -1,0 +1,54 @@
+import moment from 'moment-timezone';
+
+import {Tag} from '@sentry/scraps/badge';
+import {Link} from '@sentry/scraps/link';
+
+import {ResultGrid} from 'sentry/components/resultGrid';
+
+type Props = Partial<React.ComponentProps<typeof ResultGrid>> & {
+  orgId: string;
+  // TODO(cells) region here is actually a cell
+  region: string;
+};
+
+const getRow = (region: string, row: any) => [
+  <td key="name">
+    <Link to={`/_admin/invoices/${region}/${row.id}/`}>
+      {moment(row.dateCreated).format('ll')}
+    </Link>
+  </td>,
+  <td key="status" style={{textAlign: 'center'}}>
+    <Tag variant={row.isPaid ? 'success' : row.isClosed ? 'danger' : 'warning'}>
+      {row.isPaid ? 'Paid' : row.isClosed ? 'Closed' : 'Pending'}
+    </Tag>
+  </td>,
+  <td key="amount" style={{textAlign: 'right'}}>
+    ${(row.amount / 100).toLocaleString()}
+    <br />
+    {row.isRefunded && (
+      <small>(${(row.amountRefunded / 100).toLocaleString()} refunded)</small>
+    )}
+  </td>,
+];
+
+export function CustomerInvoices({orgId, region, ...props}: Props) {
+  return (
+    <ResultGrid
+      path={`/_admin/customers/${orgId}/`}
+      endpoint={`/customers/${orgId}/invoices/`}
+      method="GET"
+      defaultParams={{per_page: 10}}
+      columns={[
+        <th key="name">Invoice</th>,
+        <th key="status" style={{width: 100, textAlign: 'center'}}>
+          Status
+        </th>,
+        <th key="amount" style={{width: 150, textAlign: 'right'}}>
+          Amount
+        </th>,
+      ]}
+      columnsForRow={row => getRow(region, row)}
+      {...props}
+    />
+  );
+}

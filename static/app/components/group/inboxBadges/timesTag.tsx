@@ -1,9 +1,8 @@
-import React from 'react';
 import styled from '@emotion/styled';
 
-import TimeSince from 'app/components/timeSince';
-import {IconClock} from 'app/icons';
-import {t} from 'app/locale';
+import {TimeSince} from 'sentry/components/timeSince';
+import {IconClock} from 'sentry/icons';
+import {t} from 'sentry/locale';
 
 /**
  * Used in new inbox
@@ -12,50 +11,48 @@ import {t} from 'app/locale';
  */
 
 type Props = {
-  lastSeen: string;
   firstSeen: string;
+  lastSeen: string;
 };
 
-const TimesTag = ({lastSeen, firstSeen}: Props) => {
+export function TimesTag({lastSeen, firstSeen}: Props) {
   return (
     <Wrapper>
-      <StyledIconClock size="xs" color="gray300" />
+      <StyledIconClock size="xs" variant="muted" />
       {lastSeen && (
         <TimeSince
-          tooltipTitle={t('Last Seen')}
+          tooltipPrefix={t('Last Seen')}
           date={lastSeen}
           suffix={t('ago')}
-          shorten
+          unitStyle="short"
         />
       )}
       {firstSeen && lastSeen && (
-        <Seperator className="hidden-xs hidden-sm">&nbsp;|&nbsp;</Seperator>
+        <Separator className="hidden-xs hidden-sm">&nbsp;|&nbsp;</Separator>
       )}
       {firstSeen && (
         <TimeSince
-          tooltipTitle={t('First Seen')}
+          tooltipPrefix={t('First Seen')}
           date={firstSeen}
           suffix={t('old')}
           className="hidden-xs hidden-sm"
-          shorten
+          unitStyle="short"
         />
       )}
     </Wrapper>
   );
-};
+}
 
 const Wrapper = styled('div')`
   display: flex;
   align-items: center;
-  font-size: ${p => p.theme.fontSizeSmall};
+  font-size: ${p => p.theme.font.size.sm};
 `;
 
-const Seperator = styled('span')`
-  color: ${p => p.theme.subText};
+const Separator = styled('span')`
+  color: ${p => p.theme.tokens.content.secondary};
 `;
 
 const StyledIconClock = styled(IconClock)`
-  margin-right: 2px;
+  margin-right: ${p => p.theme.space.xs};
 `;
-
-export default TimesTag;

@@ -1,148 +1,83 @@
-import React from 'react';
-import {ClassNames} from '@emotion/react';
 import styled from '@emotion/styled';
 
-import GuideAnchor from 'app/components/assistant/guideAnchor';
-import PageHeading from 'app/components/pageHeading';
-import QueryCount from 'app/components/queryCount';
-import {t} from 'app/locale';
-import {PageHeader} from 'app/styles/organization';
-import space from 'app/styles/space';
-import {Organization, SavedSearch} from 'app/types';
-import {trackAnalyticsEvent} from 'app/utils/analytics';
+import {Flex, Grid} from '@sentry/scraps/layout';
 
-import SavedSearchSelector from './savedSearchSelector';
-import IssueListSearchBar from './searchBar';
-import IssueListSortOptions from './sortOptions';
-import {TagValueLoader} from './types';
+import {DatePageFilter} from 'sentry/components/pageFilters/date/datePageFilter';
+import {EnvironmentPageFilter} from 'sentry/components/pageFilters/environment/environmentPageFilter';
+import {PageFilterBar} from 'sentry/components/pageFilters/pageFilterBar';
+import {ProjectPageFilter} from 'sentry/components/pageFilters/project/projectPageFilter';
+import {IssueListSortOptions} from 'sentry/views/issueList/actions/sortOptions';
+import {IssueSearch} from 'sentry/views/issueList/issueSearch';
+import {IssueViewSaveButton} from 'sentry/views/issueList/issueViews/issueViewSaveButton';
+import type {IssueSortOptions} from 'sentry/views/issueList/utils';
 
-type IssueListSearchBarProps = React.ComponentProps<typeof IssueListSearchBar>;
-
-type Props = {
-  organization: Organization;
-  savedSearchList: SavedSearch[];
-  savedSearch: SavedSearch;
-  sort: string;
-  query: string;
-  isSearchDisabled: boolean;
-  queryCount: number;
-  queryMaxCount: number;
-
-  onSortChange: (sort: string) => void;
+interface Props {
   onSearch: (query: string) => void;
-  onSidebarToggle: (event: React.MouseEvent) => void;
-  onSavedSearchSelect: (search: SavedSearch) => void;
-  onSavedSearchDelete: (search: SavedSearch) => void;
-  tagValueLoader: TagValueLoader;
-  tags: NonNullable<IssueListSearchBarProps['supportedTags']>;
-  isInbox?: boolean;
-};
-
-class IssueListFilters extends React.Component<Props> {
-  handleSavedSearchSelect = (savedSearch: SavedSearch) => {
-    trackAnalyticsEvent({
-      eventKey: 'organization_saved_search.selected',
-      eventName: 'Organization Saved Search: Selected saved search',
-      organization_id: this.props.organization.id,
-      query: savedSearch.query,
-      search_type: 'issues',
-      id: savedSearch.id ? parseInt(savedSearch.id, 10) : -1,
-    });
-
-    if (this.props.onSavedSearchSelect) {
-      this.props.onSavedSearchSelect(savedSearch);
-    }
-  };
-
-  render() {
-    const {
-      organization,
-      savedSearch,
-      queryCount,
-      queryMaxCount,
-      query,
-      savedSearchList,
-      isSearchDisabled,
-      sort,
-
-      onSidebarToggle,
-      onSearch,
-      onSavedSearchDelete,
-      onSortChange,
-      tagValueLoader,
-      tags,
-      isInbox,
-    } = this.props;
-    const isAssignedQuery = /\bassigned:/.test(query);
-
-    return (
-      <PageHeader>
-        {!isInbox && (
-          <PageHeading>
-            {t('Issues')} <QueryCount count={queryCount} max={queryMaxCount} />
-          </PageHeading>
-        )}
-
-        <SearchContainer isInbox={isInbox}>
-          <IssueListSortOptions sort={sort} query={query} onSelect={onSortChange} />
-
-          <SearchSelectorContainer isInbox={isInbox}>
-            {!isInbox && (
-              <SavedSearchSelector
-                key={query}
-                organization={organization}
-                savedSearchList={savedSearchList}
-                onSavedSearchSelect={this.handleSavedSearchSelect}
-                onSavedSearchDelete={onSavedSearchDelete}
-                query={query}
-                sort={sort}
-              />
-            )}
-
-            <ClassNames>
-              {({css}) => (
-                <GuideAnchor
-                  target="assigned_or_suggested_query"
-                  disabled={!isAssignedQuery}
-                  containerClassName={css`
-                    width: 100%;
-                  `}
-                >
-                  <IssueListSearchBar
-                    organization={organization}
-                    query={query || ''}
-                    sort={sort}
-                    onSearch={onSearch}
-                    disabled={isSearchDisabled}
-                    excludeEnvironment
-                    supportedTags={tags}
-                    tagValueLoader={tagValueLoader}
-                    savedSearch={savedSearch}
-                    onSidebarToggle={onSidebarToggle}
-                    isInbox={isInbox}
-                  />
-                </GuideAnchor>
-              )}
-            </ClassNames>
-          </SearchSelectorContainer>
-        </SearchContainer>
-      </PageHeader>
-    );
-  }
+  onSortChange: (sort: string) => void;
+  query: string;
+  sort: IssueSortOptions;
 }
 
-const SearchContainer = styled('div')<{isInbox?: boolean}>`
-  display: flex;
-  width: ${p => (p.isInbox ? '100%' : '70%')};
-  flex-direction: ${p => (p.isInbox ? 'row-reverse' : 'row')};
+const RESET_PARAMS_ON_CHANGE = ['page', 'cursor'];
+
+export function IssueListFilters({query, sort, onSortChange, onSearch}: Props) {
+  return (
+    <Grid
+      columns={{
+        zero: '100%',
+        xl: '1fr auto',
+        '4xl': 'auto 1fr auto',
+      }}
+      areas={{
+        zero: `
+          "page-filters"
+          "search"
+          "sort-save"
+        `,
+        xl: `
+          "page-filters sort-save"
+          "search search"
+        `,
+        '4xl': '"page-filters search sort-save"',
+      }}
+      gap="md"
+      marginBottom="xl"
+      width="100%"
+    >
+      <StyledPageFilterBar>
+        <ProjectPageFilter resetParamsOnChange={RESET_PARAMS_ON_CHANGE} />
+        <EnvironmentPageFilter resetParamsOnChange={RESET_PARAMS_ON_CHANGE} />
+        <DatePageFilter resetParamsOnChange={RESET_PARAMS_ON_CHANGE} />
+      </StyledPageFilterBar>
+
+      <Search {...{query, onSearch}} />
+
+      <Flex justifySelf="end" gap="md" area="sort-save" align="start">
+        <IssueListSortOptions
+          query={query}
+          sort={sort}
+          onSelect={onSortChange}
+          triggerSize="md"
+        />
+
+        <IssueViewSaveButton query={query} sort={sort} />
+      </Flex>
+    </Grid>
+  );
+}
+
+const Search = styled(IssueSearch)`
+  grid-area: search;
 `;
 
-const SearchSelectorContainer = styled('div')<{isInbox?: boolean}>`
+const StyledPageFilterBar = styled(PageFilterBar)`
+  grid-area: page-filters;
   display: flex;
-  flex-grow: 1;
+  flex-basis: content;
+  max-width: 100%;
+  justify-self: start;
 
-  margin-right: ${p => (p.isInbox ? space(1) : 0)};
-  margin-left: ${p => (p.isInbox ? 0 : space(1))};
+  > div > button {
+    width: 100%;
+  }
 `;
-
-export default IssueListFilters;

@@ -1,30 +1,24 @@
-import React from 'react';
-import {RouteComponentProps} from 'react-router';
-import {PlainRoute} from 'react-router/lib/Route';
-import styled from '@emotion/styled';
+import {AlertLink} from '@sentry/scraps/alert';
+import {Button} from '@sentry/scraps/button';
+import {ExternalLink, Link} from '@sentry/scraps/link';
+import type {TableColumnConfig} from '@sentry/scraps/table';
 
-import AlertLink from 'app/components/alertLink';
-import AutoSelectText from 'app/components/autoSelectText';
-import Button from 'app/components/button';
-import ExternalLink from 'app/components/links/externalLink';
-import Link from 'app/components/links/link';
-import LinkWithConfirmation from 'app/components/links/linkWithConfirmation';
-import {PanelTable} from 'app/components/panels';
-import {IconAdd, IconDelete} from 'app/icons';
-import {t, tct} from 'app/locale';
-import {inputStyles} from 'app/styles/input';
-import recreateRoute from 'app/utils/recreateRoute';
-import SettingsPageHeader from 'app/views/settings/components/settingsPageHeader';
-import TextBlock from 'app/views/settings/components/text/textBlock';
+import {Confirm} from 'sentry/components/confirm';
+import {SimpleTable} from 'sentry/components/tables/simpleTable';
+import {TextCopyInput} from 'sentry/components/textCopyInput';
+import {IconAdd, IconDelete} from 'sentry/icons';
+import {t, tct} from 'sentry/locale';
+import type {Organization} from 'sentry/types/organization';
+import {SettingsPageHeader} from 'sentry/views/settings/components/settingsPageHeader';
+import {TextBlock} from 'sentry/views/settings/components/text/textBlock';
 
-import {DeprecatedApiKey} from './types';
+import type {DeprecatedApiKey} from './types';
 
-type RouteParams = {
-  orgId: string;
-};
-
-type Props = RouteComponentProps<RouteParams, {}> & {
-  routes: PlainRoute[];
+type Props = {
+  /**
+   * Busy differs from loading in that busy is a result of an action like removing
+   */
+  busy: boolean;
   keys: DeprecatedApiKey[];
 
   /**
@@ -32,42 +26,45 @@ type Props = RouteComponentProps<RouteParams, {}> & {
    */
   loading: boolean;
 
-  /**
-   * Busy differs from loading in that busy is a result of an action like removing
-   */
-  busy: boolean;
+  onAddApiKey: () => void;
 
-  onRemove: (id: DeprecatedApiKey['id']) => {};
-  onAddApiKey: () => {};
+  onRemove: (id: DeprecatedApiKey['id']) => void;
+  organization: Organization;
 };
 
-function OrganizationApiKeysList({
-  params,
-  routes,
+const API_KEY_COLUMNS: TableColumnConfig[] = [
+  {key: 'name', width: 'auto'},
+  {key: 'key', width: 'auto'},
+  {key: 'actions', width: 'auto'},
+];
+
+export function OrganizationApiKeysList({
+  organization,
   keys,
   busy,
   loading,
   onAddApiKey,
   onRemove,
 }: Props) {
-  const hasKeys = keys && keys.length;
-
-  const action = (
-    <Button
-      priority="primary"
-      size="small"
-      icon={<IconAdd size="xs" isCircled />}
-      busy={busy}
-      disabled={busy}
-      onClick={onAddApiKey}
-    >
-      {t('New API Key')}
-    </Button>
-  );
+  const hasKeys = Boolean(keys?.length);
 
   return (
     <div>
-      <SettingsPageHeader title={t('API Keys')} action={action} />
+      <SettingsPageHeader
+        title={t('API Keys')}
+        action={
+          <Button
+            variant="primary"
+            size="sm"
+            icon={<IconAdd />}
+            busy={busy}
+            disabled={busy}
+            onClick={onAddApiKey}
+          >
+            {t('New API Key')}
+          </Button>
+        }
+      />
 
       <TextBlock>
         {tct(
@@ -80,64 +77,60 @@ function OrganizationApiKeysList({
         )}
       </TextBlock>
 
-      <AlertLink to="/settings/account/api/auth-tokens/" priority="info">
-        {tct(
-          'Until Sentry supports OAuth, you might want to switch to using [tokens:Auth Tokens] instead.',
-          {
-            tokens: <u />,
-          }
-        )}
-      </AlertLink>
-
-      <PanelTable
-        isLoading={loading}
-        isEmpty={!hasKeys}
-        emptyMessage={t('No API keys for this organization')}
-        headers={[t('Name'), t('Key'), t('Actions')]}
+      <AlertLink.Container>
+        <AlertLink to="/settings/account/api/auth-tokens/" variant="info">
+          {tct(
+            'Until Sentry supports OAuth, you might want to switch to using [tokens:Personal Tokens] instead.',
+            {
+              tokens: <u />,
+            }
+          )}
+        </AlertLink>
+      </AlertLink.Container>
+      <SimpleTable
+        columns={API_KEY_COLUMNS}
+        header={
+          <SimpleTable.HeaderRow>
+            <SimpleTable.HeaderCell>{t('Name')}</SimpleTable.HeaderCell>
+            <SimpleTable.HeaderCell>{t('Key')}</SimpleTable.HeaderCell>
+            <SimpleTable.HeaderCell>{t('Actions')}</SimpleTable.HeaderCell>
+          </SimpleTable.HeaderRow>
+        }
       >
-        {keys &&
-          keys.map(({id, key, label}) => {
-            const apiDetailsUrl = recreateRoute(`${id}/`, {
-              params,
-              routes,
-            });
-
+        {loading && <SimpleTable.Loading />}
+        {!loading && !hasKeys && (
+          <SimpleTable.Empty>{t('No API keys for this organization')}</SimpleTable.Empty>
+        )}
+        {!loading &&
+          keys?.map(({id, key, label}) => {
             return (
-              <React.Fragment key={key}>
-                <Cell>
-                  <Link to={apiDetailsUrl}>{label}</Link>
-                </Cell>
+              <SimpleTable.Row key={key}>
+                <SimpleTable.RowCell>
+                  <Link to={`/settings/${organization.slug}/api-keys/${id}/`}>
+                    {label}
+                  </Link>
+                </SimpleTable.RowCell>
 
-                <div>
-                  <AutoSelectTextInput readOnly>{key}</AutoSelectTextInput>
-                </div>
+                <SimpleTable.RowCell>
+                  <TextCopyInput size="md" monospace>
+                    {key}
+                  </TextCopyInput>
+                </SimpleTable.RowCell>
 
-                <Cell>
-                  <LinkWithConfirmation
-                    aria-label={t('Remove API Key')}
-                    className="btn btn-default btn-sm"
+                <SimpleTable.RowCell>
+                  <Confirm
                     onConfirm={() => onRemove(id)}
                     message={t('Are you sure you want to remove this API key?')}
-                    title={t('Remove API Key?')}
                   >
-                    <IconDelete size="xs" css={{position: 'relative', top: '2px'}} />
-                  </LinkWithConfirmation>
-                </Cell>
-              </React.Fragment>
+                    <Button variant="danger" size="sm" icon={<IconDelete />}>
+                      {t('Remove API Key')}
+                    </Button>
+                  </Confirm>
+                </SimpleTable.RowCell>
+              </SimpleTable.Row>
             );
           })}
-      </PanelTable>
+      </SimpleTable>
     </div>
   );
 }
-
-const Cell = styled('div')`
-  display: flex;
-  align-items: center;
-`;
-
-const AutoSelectTextInput = styled(AutoSelectText)<{readOnly: boolean}>`
-  ${p => inputStyles(p)}
-`;
-
-export default OrganizationApiKeysList;

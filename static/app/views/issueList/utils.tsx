@@ -1,140 +1,156 @@
-import React from 'react';
+import type {Location, LocationDescriptorObject} from 'history';
 
-import ExternalLink from 'app/components/links/externalLink';
-import {t, tct} from 'app/locale';
-import {Organization} from 'app/types';
+import {t} from 'sentry/locale';
+import type {Event} from 'sentry/types/event';
+import type {Group} from 'sentry/types/group';
+import type {Organization} from 'sentry/types/organization';
+import {localStorageWrapper} from 'sentry/utils/localStorage';
+
+export const DEFAULT_QUERY = 'is:unresolved issue.priority:[high, medium]';
 
 export enum Query {
-  FOR_REVIEW = 'is:unresolved is:for_review assigned_or_suggested:me_or_none',
+  FOR_REVIEW = 'is:unresolved is:for_review assigned_or_suggested:[me, my_teams, none]',
+  PRIORITIZED = DEFAULT_QUERY, // eslint-disable-line @typescript-eslint/prefer-literal-enum-member
   UNRESOLVED = 'is:unresolved',
   IGNORED = 'is:ignored',
+  NEW = 'is:new',
+  ARCHIVED = 'is:archived',
+  ESCALATING = 'is:escalating',
+  REGRESSED = 'is:regressed',
   REPROCESSING = 'is:reprocessing',
-}
-
-type OverviewTab = {
-  name: string;
-  /** Emitted analytics event tab name  */
-  analyticsName: string;
-  /** Will fetch a count to display on this tab */
-  count: boolean;
-  /** Tabs can be disabled via flag */
-  enabled: boolean;
-  /** Tooltip text for each tab */
-  tooltipTitle: React.ReactNode;
-  /** Tooltip text to be hoverable when text has links */
-  tooltipHoverable?: boolean;
-};
-
-/**
- * Get a list of currently active tabs
- */
-export function getTabs(organization: Organization) {
-  const tabs: Array<[string, OverviewTab]> = [
-    [
-      Query.UNRESOLVED,
-      {
-        name: t('All Unresolved'),
-        analyticsName: 'unresolved',
-        count: true,
-        enabled: true,
-        tooltipTitle: t(`All unresolved issues.`),
-      },
-    ],
-    [
-      Query.FOR_REVIEW,
-      {
-        name: t('For Review'),
-        analyticsName: 'needs_review',
-        count: true,
-        enabled: true,
-        tooltipTitle: t(`Unresolved issues that are new or have reopened. Review, ignore,
-        or resolve an issue to move it out of this list. After 7 days these
-        issues are automatically marked as reviewed.`),
-      },
-    ],
-    [
-      Query.IGNORED,
-      {
-        name: t('Ignored'),
-        analyticsName: 'ignored',
-        count: true,
-        enabled: true,
-        tooltipTitle: t(`Ignored issues don’t trigger alerts. When their ignore
-        conditions are met they become Unresolved and are flagged for review.`),
-      },
-    ],
-    [
-      Query.REPROCESSING,
-      {
-        name: t('Reprocessing'),
-        analyticsName: 'reprocessing',
-        count: true,
-        enabled: organization.features.includes('reprocessing-v2'),
-        tooltipTitle: tct(
-          `These [link:reprocessing issues] will take some time to complete.
-        Any new issues that are created during reprocessing will be flagged for review.`,
-          {
-            link: (
-              <ExternalLink href="https://docs.sentry.io/product/error-monitoring/reprocessing/" />
-            ),
-          }
-        ),
-        tooltipHoverable: true,
-      },
-    ],
-  ];
-
-  return tabs.filter(([_query, tab]) => tab.enabled);
-}
-
-/**
- * @returns queries that should have counts fetched
- */
-export function getTabsWithCounts(organization: Organization) {
-  const tabs = getTabs(organization);
-  return tabs.filter(([_query, tab]) => tab.count).map(([query]) => query);
 }
 
 export function isForReviewQuery(query: string | undefined) {
   return !!query && /\bis:for_review\b/.test(query);
 }
 
-// the tab counts will look like 99+
-export const TAB_MAX_COUNT = 99;
-
-type QueryCount = {
-  count: number;
-  hasMore: boolean;
-};
-
-export type QueryCounts = Partial<Record<Query, QueryCount>>;
-
 export enum IssueSortOptions {
   DATE = 'date',
   NEW = 'new',
-  PRIORITY = 'priority',
+  TRENDS = 'trends',
   FREQ = 'freq',
   USER = 'user',
-  TREND = 'trend',
   INBOX = 'inbox',
+  RECOMMENDED = 'recommended',
+  // Escape hatches for comparing the two recommended scorers regardless of
+  // which one the org's flag serves behind RECOMMENDED. Only reachable via the
+  // sort query param.
+  RECOMMENDED_V1 = 'recommended_v1',
+  RECOMMENDED_EXPERIMENTAL = 'recommended_v2',
+  PROGRESS = 'progress',
 }
+
+export const DEFAULT_ISSUE_STREAM_SORT = IssueSortOptions.DATE;
 
 export function getSortLabel(key: string) {
   switch (key) {
     case IssueSortOptions.NEW:
-      return t('First Seen');
-    case IssueSortOptions.PRIORITY:
-      return t('Priority');
+      return t('Age');
+    case IssueSortOptions.TRENDS:
+      return t('Trends');
     case IssueSortOptions.FREQ:
       return t('Events');
     case IssueSortOptions.USER:
       return t('Users');
-    case IssueSortOptions.TREND:
-      return t('Relative Change');
     case IssueSortOptions.INBOX:
       return t('Date Added');
+    case IssueSortOptions.RECOMMENDED:
+    case IssueSortOptions.RECOMMENDED_V1:
+    case IssueSortOptions.RECOMMENDED_EXPERIMENTAL:
+      return t('Recommended');
+    case IssueSortOptions.PROGRESS:
+      return t('Progress');
     case IssueSortOptions.DATE:
     default:
       return t('Last Seen');
   }
+}
+
+export const DISCOVER_EXCLUSION_FIELDS: string[] = [
+  'query',
+  'status',
+  'bookmarked_by',
+  'assigned',
+  'assigned_to',
+  'unassigned',
+  'subscribed_by',
+  'active_at',
+  'first_release',
+  'first_seen',
+  'is',
+  '__text',
+  'issue.priority',
+  'issue.category',
+  'issue.progress',
+  'issue.type',
+  'issue.seer_actionability',
+  'issue.seer_last_run',
+  'monitor',
+];
+
+export const FOR_REVIEW_QUERIES: string[] = [Query.FOR_REVIEW];
+
+const ISSUE_STREAM_SORT_LOCALSTORAGE_KEY = 'issue-stream-sort';
+
+function makeSortStorageKey(orgSlug: string): string {
+  return `${ISSUE_STREAM_SORT_LOCALSTORAGE_KEY}:${orgSlug}`;
+}
+
+export function getStoredIssueSort(orgSlug: string): IssueSortOptions | null {
+  const value = localStorageWrapper.getItem(makeSortStorageKey(orgSlug));
+  if (value && Object.values(IssueSortOptions).includes(value as IssueSortOptions)) {
+    return value as IssueSortOptions;
+  }
+  return null;
+}
+
+export function setStoredIssueSort(orgSlug: string, sort: IssueSortOptions): void {
+  localStorageWrapper.setItem(makeSortStorageKey(orgSlug), sort);
+}
+
+export function createIssueLink({
+  organization,
+  data,
+  eventId,
+  referrer,
+  location,
+  query,
+}: {
+  data: Event | Group;
+  location: Location;
+  organization: Organization;
+  eventId?: string;
+  query?: string;
+  referrer?: string;
+}): LocationDescriptorObject {
+  const {id, project} = data as Group;
+  const {eventID: latestEventId, groupID} = data as Event;
+
+  // If we have passed in a custom event ID, use it; otherwise use default
+  const finalEventId = eventId ?? latestEventId;
+
+  return {
+    pathname: `/organizations/${organization.slug}/issues/${
+      latestEventId ? groupID : id
+    }/${finalEventId ? `events/${finalEventId}/` : ''}`,
+    query: {
+      referrer: referrer || 'event-or-group-header',
+      query,
+      // Add environment to the query if it was selected
+      ...(location.query.environment === undefined
+        ? {}
+        : {environment: location.query.environment}),
+      // This adds sort to the query if one was selected from the
+      // issues list page
+      ...(location.query.sort === undefined ? {} : {sort: location.query.sort}),
+      // This appends _allp to the URL parameters if they have no
+      // project selected ("all" projects included in results). This is
+      // so that when we enter the issue details page and lock them to
+      // a project, we can properly take them back to the issue list
+      // page with no project selected (and not the locked project
+      // selected)
+      ...(location.query.project === undefined ? {_allp: 1} : {}),
+      ...(project ? {project: project.id} : {}),
+    },
+  };
 }

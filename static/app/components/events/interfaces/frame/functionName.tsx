@@ -1,44 +1,29 @@
-import React from 'react';
-
-import AnnotatedText from 'app/components/events/meta/annotatedText';
-import {getMeta} from 'app/components/events/meta/metaProxy';
-import {t} from 'app/locale';
-import {Frame} from 'app/types';
+import {AnnotatedText} from 'sentry/components/events/meta/annotatedText';
+import type {getMeta} from 'sentry/components/events/meta/metaProxy';
+import {t} from 'sentry/locale';
+import type {Frame} from 'sentry/types/event';
 
 type Props = {
   frame: Frame;
-  hasHiddenDetails?: boolean;
-  showCompleteFunctionName?: boolean;
   className?: string;
+  meta?: Record<any, any>;
 };
 
-const FunctionName = ({
-  frame,
-  showCompleteFunctionName,
-  hasHiddenDetails,
-  className,
-}: Props) => {
+export function FunctionName({frame, className, meta, ...props}: Props) {
   const getValueOutput = ():
-    | {value: Frame['function']; meta: ReturnType<typeof getMeta>}
+    | {meta: ReturnType<typeof getMeta>; value: Frame['function']}
     | undefined => {
-    if (hasHiddenDetails && showCompleteFunctionName && frame.rawFunction) {
-      return {
-        value: frame.rawFunction,
-        meta: getMeta(frame, 'rawFunction'),
-      };
-    }
-
     if (frame.function) {
       return {
         value: frame.function,
-        meta: getMeta(frame, 'function'),
+        meta: meta?.function?.[''],
       };
     }
 
     if (frame.rawFunction) {
       return {
         value: frame.rawFunction,
-        meta: getMeta(frame, 'rawFunction'),
+        meta: meta?.rawFunction?.[''],
       };
     }
 
@@ -48,14 +33,12 @@ const FunctionName = ({
   const valueOutput = getValueOutput();
 
   return (
-    <code className={className}>
-      {!valueOutput ? (
-        t('<unknown>')
-      ) : (
+    <code className={className} {...props}>
+      {valueOutput ? (
         <AnnotatedText value={valueOutput.value} meta={valueOutput.meta} />
+      ) : (
+        t('<unknown>')
       )}
     </code>
   );
-};
-
-export default FunctionName;
+}

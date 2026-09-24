@@ -1,44 +1,88 @@
-import Reflux from 'reflux';
+import {createStore} from 'reflux';
 
-import TeamActions from 'app/actions/teamActions';
-import {Team} from 'app/types';
+import type {Team} from 'sentry/types/organization';
+import {defined} from 'sentry/utils/defined';
 
-type TeamStoreInterface = {
-  initialized: boolean;
-  state: Team[];
-  reset: () => void;
-  loadInitialData: (items: Team[]) => void;
-  onUpdateSuccess: (itemId: string, response: Team) => void;
-  onRemoveSuccess: (slug: string) => void;
-  onCreateSuccess: (team: Team) => void;
-  getById: (id: string) => Team | null;
-  getBySlug: (slug: string) => Team | null;
-  getActive: () => Team[];
-  getAll: () => Team[];
+import {ProjectsStore} from './projectsStore';
+import type {StrictStoreDefinition} from './types';
+
+type State = {
+  cursor: string | null;
+  hasMore: boolean | null;
+  loadedUserTeams: boolean;
+  loading: boolean;
+  teams: Team[];
 };
 
-const teamStoreConfig: Reflux.StoreDefinition & TeamStoreInterface = {
+interface TeamStoreDefinition extends StrictStoreDefinition<State> {
+  getAll(): Team[];
+  getById(id: string): Team | null;
+  getBySlug(slug: string): Team | null;
+  initialized: boolean;
+  loadInitialData(items: Team[], hasMore?: boolean | null, cursor?: string | null): void;
+  loadUserTeams(userTeams: Team[]): void;
+  onCreateSuccess(team: Team): void;
+  onRemoveSuccess(slug: string): void;
+  onUpdateSuccess(itemId: string, response: Team): void;
+  reset(): void;
+  setTeams(teams: Team[], hasMore?: boolean | null, cursor?: string | null): void;
+  updateTeams(teams: Team[]): Team[];
+}
+
+const teamStoreConfig: TeamStoreDefinition = {
   initialized: false,
-  state: [],
+  state: {
+    teams: [],
+    loadedUserTeams: false,
+    loading: true,
+    hasMore: null,
+    cursor: null,
+  },
 
   init() {
-    this.state = [];
+    // XXX: Do not use `this.listenTo` in this store. We avoid usage of reflux
+    // listeners due to their leaky nature in tests.
 
-    this.listenTo(TeamActions.createTeamSuccess, this.onCreateSuccess);
-    this.listenTo(TeamActions.fetchDetailsSuccess, this.onUpdateSuccess);
-    this.listenTo(TeamActions.loadTeams, this.loadInitialData);
-    this.listenTo(TeamActions.removeTeamSuccess, this.onRemoveSuccess);
-    this.listenTo(TeamActions.updateSuccess, this.onUpdateSuccess);
+    this.reset();
   },
 
   reset() {
-    this.state = [];
+    this.state = {
+      teams: [],
+      loadedUserTeams: false,
+      loading: true,
+      hasMore: null,
+      cursor: null,
+    };
   },
 
-  loadInitialData(items) {
+  setTeams(teams, hasMore, cursor) {
     this.initialized = true;
-    this.state = items;
-    this.trigger(new Set(items.map(item => item.id)));
+    this.state = {
+      teams,
+      loadedUserTeams: defined(hasMore) ? !hasMore : this.state.loadedUserTeams,
+      loading: false,
+      hasMore: hasMore ?? this.state.hasMore,
+      cursor: cursor ?? this.state.cursor,
+    };
+    this.trigger(new Set(teams.map(team => team.id)));
+  },
+
+  loadInitialData(items, hasMore, cursor) {
+    const teams = this.updateTeams(items);
+    this.setTeams(teams, hasMore, cursor);
+  },
+
+  loadUserTeams(userTeams: Team[]) {
+    const teams = this.updateTeams(userTeams);
+
+    this.state = {
+      ...this.state,
+      loadedUserTeams: true,
+      teams,
+    };
+
+    this.trigger(new Set(teams.map(team => team.id)));
   },
 
   onUpdateSuccess(itemId, response) {
@@ -49,7 +93,11 @@ const teamStoreConfig: Reflux.StoreDefinition & TeamStoreInterface = {
     const item = this.getBySlug(itemId);
 
     if (!item) {
-      this.state.push(response);
+      this.state = {
+        ...this.state,
+        teams: [...this.state.teams, response],
+      };
+
       this.trigger(new Set([itemId]));
       return;
     }
@@ -58,50 +106,64 @@ const teamStoreConfig: Reflux.StoreDefinition & TeamStoreInterface = {
     // Note: This is the proper way to handle slug changes but unfortunately not all of our
     // components use stores correctly. To be safe reload browser :((
     if (response.slug !== itemId) {
-      // Remove old team
-      this.state = this.state.filter(({slug}) => slug !== itemId);
+      // Replace the team
+      const teams = [...this.state.teams.filter(({slug}) => slug !== itemId), response];
 
-      // Add team w/ updated slug
-      this.state.push(response);
+      this.state = {...this.state, teams};
       this.trigger(new Set([response.slug]));
       return;
     }
 
-    const nextState = [...this.state];
-    const index = nextState.findIndex(team => team.slug === response.slug);
-    nextState[index] = response;
-    this.state = nextState;
+    const newTeams = [...this.state.teams];
+    const index = newTeams.findIndex(team => team.slug === response.slug);
+    newTeams[index] = response;
 
+    this.state = {...this.state, teams: newTeams};
     this.trigger(new Set([itemId]));
   },
 
   onRemoveSuccess(slug: string) {
-    this.loadInitialData(this.state.filter(team => team.slug !== slug));
+    const teams = this.state.teams.filter(team => team.slug !== slug);
+    this.setTeams(teams);
+    ProjectsStore.onDeleteTeam(slug);
   },
 
   onCreateSuccess(team: Team) {
-    this.loadInitialData([...this.state, team]);
+    this.loadInitialData([team]);
+  },
+
+  getState() {
+    return this.state;
   },
 
   getById(id: string) {
-    return this.state.find(item => item.id.toString() === id.toString()) || null;
+    const {teams} = this.state;
+    return teams.find(item => item.id.toString() === id.toString()) || null;
   },
 
   getBySlug(slug: string) {
-    return this.state.find(item => item.slug === slug) || null;
-  },
-
-  getActive() {
-    return this.state.filter(item => item.isMember);
+    const {teams} = this.state;
+    return teams.find(item => item.slug === slug) || null;
   },
 
   getAll() {
-    return this.state;
+    return this.state.teams;
+  },
+
+  updateTeams(teams: Team[]) {
+    const teamIdMap = this.state.teams.reduce((acc: Record<string, Team>, team: Team) => {
+      acc[team.id] = team;
+      return acc;
+    }, {});
+
+    // Replace or insert new user teams
+    teams.reduce((acc: Record<string, Team>, userTeam: Team) => {
+      acc[userTeam.id] = userTeam;
+      return acc;
+    }, teamIdMap);
+
+    return Object.values(teamIdMap).sort((a, b) => a.slug.localeCompare(b.slug));
   },
 };
 
-type TeamStore = Reflux.Store & TeamStoreInterface;
-
-const TeamStore = Reflux.createStore(teamStoreConfig) as TeamStore;
-
-export default TeamStore;
+export const TeamStore = createStore(teamStoreConfig);

@@ -1,21 +1,27 @@
-import {t} from 'app/locale';
-import {Organization, Project} from 'app/types';
-import {NavigationSection} from 'app/views/settings/types';
+import {t} from 'sentry/locale';
+import {ConfigStore} from 'sentry/stores/configStore';
+import type {Organization} from 'sentry/types/organization';
+import type {DetailedProject, Project} from 'sentry/types/project';
+import {hasTempestAccess} from 'sentry/utils/tempest/features';
+import type {NavigationSection} from 'sentry/views/settings/types';
 
 type ConfigParams = {
+  debugFilesNeedsReview?: boolean;
   organization?: Organization;
-  project?: Project;
+  project?: DetailedProject | Project;
 };
 
 const pathPrefix = '/settings/:orgId/projects/:projectId';
 
-export default function getConfiguration({
-  project,
+export function getNavigationConfiguration({
   organization,
+  debugFilesNeedsReview,
 }: ConfigParams): NavigationSection[] {
-  const plugins = ((project && project.plugins) || []).filter(plugin => plugin.enabled);
+  const isSelfHostedErrorsOnly = ConfigStore.get('isSelfHostedErrorsOnly');
+  const isSelfHosted = ConfigStore.get('isSelfHosted');
   return [
     {
+      id: 'settings-project',
       name: t('Project'),
       items: [
         {
@@ -31,46 +37,67 @@ export default function getConfiguration({
         },
         {
           path: `${pathPrefix}/alerts/`,
-          title: t('Alerts'),
-          description: t('Manage alert rules for a project'),
+          title: t('Alert Settings'),
+          keywords: [t('alert'), t('alerts')],
+          description: t('Project alert settings'),
         },
         {
           path: `${pathPrefix}/tags/`,
-          title: t('Tags'),
-          description: t("View and manage a  project's tags"),
+          title: t('Tags & Context'),
+          description: t("View and manage a project's tags and context"),
         },
         {
           path: `${pathPrefix}/environments/`,
           title: t('Environments'),
+          keywords: [t('environment'), t('env'), t('staging'), t('production')],
           description: t('Manage environments in a project'),
         },
         {
           path: `${pathPrefix}/ownership/`,
-          title: t('Issue Owners'),
-          description: t('Manage issue ownership rules for a project'),
+          title: t('Ownership Rules'),
+          keywords: [
+            t('ownership'),
+            t('codeowners'),
+            t('code owners'),
+            t('owners'),
+            t('owner rules'),
+          ],
+          description: t('Manage ownership rules for a project'),
         },
         {
-          path: `${pathPrefix}/data-forwarding/`,
-          title: t('Data Forwarding'),
+          path: `${pathPrefix}/seer/`,
+          title: t('Seer'),
+        },
+        {
+          path: `${pathPrefix}/user-feedback/`,
+          title: t('User Feedback'),
+          show: () => !isSelfHostedErrorsOnly,
+        },
+        {
+          path: `${pathPrefix}/toolbar/`,
+          title: t('Dev Toolbar'),
+          badge: () => 'beta',
         },
       ],
     },
     {
+      id: 'settings-processing',
       name: t('Processing'),
       items: [
         {
           path: `${pathPrefix}/filters/`,
           title: t('Inbound Filters'),
+          keywords: [
+            t('inbound'),
+            t('filter'),
+            t('filters'),
+            t('discard'),
+            t('ignore'),
+            t('attachments'),
+          ],
           description: t(
             "Configure a project's inbound filters (e.g. browsers, messages)"
           ),
-        },
-        {
-          path: `${pathPrefix}/filters-and-sampling/`,
-          title: t('Filters & Sampling'),
-          show: () => !!organization?.features?.includes('filters-and-sampling'),
-          description: t("Manage an organization's inbound data"),
-          badge: () => 'new',
         },
         {
           path: `${pathPrefix}/security-and-privacy/`,
@@ -82,24 +109,13 @@ export default function getConfiguration({
         {
           path: `${pathPrefix}/issue-grouping/`,
           title: t('Issue Grouping'),
-        },
-        {
-          path: `${pathPrefix}/processing-issues/`,
-          title: t('Processing Issues'),
-          // eslint-disable-next-line no-shadow
-          badge: ({project}) => {
-            if (!project) {
-              return null;
-            }
-            if (project.processingIssues <= 0) {
-              return null;
-            }
-            return project.processingIssues > 99 ? '99+' : project.processingIssues;
-          },
+          keywords: [t('fingerprinting'), t('fingerprint rules')],
         },
         {
           path: `${pathPrefix}/debug-symbols/`,
           title: t('Debug Files'),
+          keywords: [t('debug file'), t('debug files'), t('symbols'), t('dsyms')],
+          badge: debugFilesNeedsReview ? () => 'warning' : undefined,
         },
         {
           path: `${pathPrefix}/proguard/`,
@@ -108,20 +124,77 @@ export default function getConfiguration({
         {
           path: `${pathPrefix}/source-maps/`,
           title: t('Source Maps'),
+          keywords: [
+            t('source map'),
+            t('source maps'),
+            t('sourcemap'),
+            t('artifact bundles'),
+          ],
+        },
+        {
+          path: `${pathPrefix}/performance/`,
+          title: t('Performance'),
+          show: () =>
+            !!organization?.features?.includes('performance-view') &&
+            !isSelfHostedErrorsOnly,
+        },
+
+        {
+          path: `${pathPrefix}/replays/`,
+          title: t('Replays'),
+          keywords: [t('session'), t('session replay'), t('replay')],
+          show: () =>
+            !!organization?.features?.includes('session-replay-ui') &&
+            !isSelfHostedErrorsOnly,
+        },
+        {
+          path: `${pathPrefix}/playstation/`,
+          title: t('PlayStation'),
+          show: () => !!(organization && hasTempestAccess(organization)) && !isSelfHosted,
+        },
+        {
+          path: `${pathPrefix}/mobile-builds/`,
+          title: t('Mobile Builds'),
+          badge: () => 'new',
+          keywords: [t('size'), t('size analysis'), t('build size'), t('app size')],
+          description: t('Size analysis and build distribution configuration.'),
+        },
+        {
+          path: `${pathPrefix}/snapshots/`,
+          title: t('Snapshots'),
+          badge: () => 'beta',
+          description: t('Configure snapshot status checks and PR comments.'),
         },
       ],
     },
     {
+      id: 'settings-sdk',
       name: t('SDK Setup'),
       items: [
-        {
-          path: `${pathPrefix}/install/`,
-          title: t('Instrumentation'),
-        },
         {
           path: `${pathPrefix}/keys/`,
           title: t('Client Keys (DSN)'),
           description: t("View and manage the project's client keys (DSN)"),
+          keywords: [
+            t('dsn'),
+            // SDK environment variable names (and the spaced form) that
+            // developers search for, including the Next.js public-prefixed
+            // variant. Not wrapped in t() — these are fixed config/product
+            // tokens, not translatable prose.
+            'SENTRY_DSN',
+            'Sentry DSN',
+            'NEXT_PUBLIC_SENTRY_DSN',
+            t('auth'),
+            t('token'),
+            t('client key'),
+            t('dsn key'),
+            t('allowed domains'),
+          ],
+        },
+        {
+          path: `${pathPrefix}/loader-script/`,
+          title: t('Loader Script'),
+          description: t("View and manage the project's Loader Script"),
         },
         {
           path: `${pathPrefix}/release-tracking/`,
@@ -131,30 +204,18 @@ export default function getConfiguration({
           path: `${pathPrefix}/security-headers/`,
           title: t('Security Headers'),
         },
-        {
-          path: `${pathPrefix}/user-feedback/`,
-          title: t('User Feedback'),
-          description: t('Configure user feedback reporting feature'),
-        },
       ],
     },
     {
+      id: 'settings-legacy-integrations',
       name: t('Legacy Integrations'),
       items: [
         {
-          path: `${pathPrefix}/plugins/`,
-          title: t('Legacy Integrations'),
-          description: t('View, enable, and disable all integrations for a project'),
-          id: 'legacy_integrations',
+          path: `${pathPrefix}/legacy-webhooks/`,
+          title: t('Webhooks (Legacy)'),
+          id: 'webhook_details',
           recordAnalytics: true,
         },
-        ...plugins.map(plugin => ({
-          path: `${pathPrefix}/plugins/${plugin.id}/`,
-          title: plugin.name,
-          show: opts => opts?.access?.has('project:write'),
-          id: 'plugin_details',
-          recordAnalytics: true,
-        })),
       ],
     },
   ];

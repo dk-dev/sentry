@@ -1,8 +1,8 @@
-import {Release} from '@sentry/release-parser';
-import round from 'lodash/round';
-
-import {t, tn} from 'app/locale';
-import {CommitAuthor, User} from 'app/types';
+import {t} from 'sentry/locale';
+import type {CommitAuthor} from 'sentry/types/integrations';
+import type {User} from 'sentry/types/user';
+import {RATE_UNIT_LABELS, RateUnit} from 'sentry/utils/discover/fields';
+import {formatFloat} from 'sentry/utils/number/formatFloat';
 
 export function userDisplayName(user: User | CommitAuthor, includeEmail = true): string {
   let displayName = String(user?.name ?? t('Unknown author')).trim();
@@ -19,204 +19,174 @@ export function userDisplayName(user: User | CommitAuthor, includeEmail = true):
   return displayName;
 }
 
-export const formatVersion = (rawVersion: string, withPackage = false) => {
-  try {
-    const parsedVersion = new Release(rawVersion);
-    const versionToDisplay = parsedVersion.describe();
-
-    if (versionToDisplay.length) {
-      return `${versionToDisplay}${
-        withPackage && parsedVersion.package ? `, ${parsedVersion.package}` : ''
-      }`;
-    }
-
-    return rawVersion;
-  } catch {
-    return rawVersion;
-  }
-};
-
-function roundWithFixed(
-  value: number,
-  fixedDigits: number
-): {label: string; result: number} {
-  const label = value.toFixed(fixedDigits);
-  const result = fixedDigits <= 0 ? Math.round(value) : value;
-
-  return {label, result};
-}
-
 // in milliseconds
+export const YEAR = 31536000000;
 export const MONTH = 2629800000;
 export const WEEK = 604800000;
 export const DAY = 86400000;
 export const HOUR = 3600000;
 export const MINUTE = 60000;
 export const SECOND = 1000;
+export const MILLISECOND = 1;
+export const MICROSECOND = 0.001;
+export const NANOSECOND = 0.000001;
 
-export function getDuration(
-  seconds: number,
-  fixedDigits: number = 0,
-  abbreviation: boolean = false,
-  extraShort: boolean = false
-): string {
-  const value = Math.abs(seconds * 1000);
-
-  if (value >= MONTH && !extraShort) {
-    const {label, result} = roundWithFixed(value / MONTH, fixedDigits);
-    return `${label}${
-      abbreviation ? tn('mo', 'mos', result) : ` ${tn('month', 'months', result)}`
-    }`;
-  }
-  if (value >= WEEK) {
-    const {label, result} = roundWithFixed(value / WEEK, fixedDigits);
-    if (extraShort) {
-      return `${label}${t('w')}`;
-    }
-    if (abbreviation) {
-      return `${label}${t('wk')}`;
-    }
-    return `${label} ${tn('week', 'weeks', result)}`;
-  }
-  if (value >= 172800000) {
-    const {label, result} = roundWithFixed(value / DAY, fixedDigits);
-    return `${label}${
-      abbreviation || extraShort ? t('d') : ` ${tn('day', 'days', result)}`
-    }`;
-  }
-  if (value >= 7200000) {
-    const {label, result} = roundWithFixed(value / HOUR, fixedDigits);
-    if (extraShort) {
-      return `${label}${t('h')}`;
-    }
-    if (abbreviation) {
-      return `${label}${t('hr')}`;
-    }
-    return `${label} ${tn('hour', 'hours', result)}`;
-  }
-  if (value >= 120000) {
-    const {label, result} = roundWithFixed(value / MINUTE, fixedDigits);
-    if (extraShort) {
-      return `${label}${t('m')}`;
-    }
-    if (abbreviation) {
-      return `${label}${t('min')}`;
-    }
-    return `${label} ${tn('minute', 'minutes', result)}`;
-  }
-  if (value >= SECOND) {
-    const {label, result} = roundWithFixed(value / SECOND, fixedDigits);
-    if (extraShort || abbreviation) {
-      return `${label}${t('s')}`;
-    }
-    return `${label} ${tn('second', 'seconds', result)}`;
-  }
-
-  const {label} = roundWithFixed(value, fixedDigits);
-
-  return label + t('ms');
-}
-
-export function getExactDuration(seconds: number, abbreviation: boolean = false) {
-  const convertDuration = (secs: number, abbr: boolean) => {
-    const value = round(Math.abs(secs * 1000));
-
-    const divideBy = (time: number) => {
-      return {quotient: Math.floor(value / time), remainder: value % time};
-    };
-
-    if (value >= WEEK) {
-      const {quotient, remainder} = divideBy(WEEK);
-
-      return `${quotient}${
-        abbr ? t('wk') : ` ${tn('week', 'weeks', quotient)}`
-      } ${convertDuration(remainder / 1000, abbr)}`;
-    }
-    if (value >= DAY) {
-      const {quotient, remainder} = divideBy(DAY);
-
-      return `${quotient}${
-        abbr ? t('d') : ` ${tn('day', 'days', quotient)}`
-      } ${convertDuration(remainder / 1000, abbr)}`;
-    }
-    if (value >= HOUR) {
-      const {quotient, remainder} = divideBy(HOUR);
-
-      return `${quotient}${
-        abbr ? t('hr') : ` ${tn('hour', 'hours', quotient)}`
-      } ${convertDuration(remainder / 1000, abbr)}`;
-    }
-    if (value >= MINUTE) {
-      const {quotient, remainder} = divideBy(MINUTE);
-
-      return `${quotient}${
-        abbr ? t('min') : ` ${tn('minute', 'minutes', quotient)}`
-      } ${convertDuration(remainder / 1000, abbr)}`;
-    }
-    if (value >= SECOND) {
-      const {quotient, remainder} = divideBy(SECOND);
-
-      return `${quotient}${
-        abbr ? t('s') : ` ${tn('second', 'seconds', quotient)}`
-      } ${convertDuration(remainder / 1000, abbr)}`;
-    }
-
-    if (value === 0) {
-      return '';
-    }
-
-    return `${value}${abbr ? t('ms') : ` ${tn('millisecond', 'milliseconds', value)}`}`;
-  };
-
-  const result = convertDuration(seconds, abbreviation).trim();
-
-  if (result.length) {
-    return result;
-  }
-
-  return `0${abbreviation ? t('ms') : ` ${t('milliseconds')}`}`;
-}
-
-export function formatFloat(number: number, places: number) {
-  const multi = Math.pow(10, places);
-  return parseInt((number * multi).toString(), 10) / multi;
-}
-
-/**
- * Format a value between 0 and 1 as a percentage
- */
-export function formatPercentage(value: number, places: number = 2) {
-  if (value === 0) {
-    return '0%';
-  }
-  return (value * 100).toFixed(places) + '%';
-}
-
-const numberFormats = [
-  [1000000000, 'b'],
-  [1000000, 'm'],
-  [1000, 'k'],
+const numberFormatSteps = [
+  [1_000_000_000_000, 'T'],
+  [1_000_000_000, 'B'],
+  [1_000_000, 'M'],
+  [1_000, 'K'],
 ] as const;
 
-export function formatAbbreviatedNumber(number: number | string) {
+/**
+ * Formats a number with an abbreviation e.g. 1000 -> 1K.
+ *
+ * @param number the number to format
+ * @param maximumSignificantDigits the number of significant digits to include
+ * @param includeDecimals when true, formatted number will always include non trailing zero decimal places
+ */
+export function formatAbbreviatedNumber(
+  number: number | string,
+  maximumSignificantDigits?: number,
+  includeDecimals?: boolean
+): string {
   number = Number(number);
 
-  let lookup: typeof numberFormats[number];
+  const prefix = number < 0 ? '-' : '';
+  const numAbsValue = Math.abs(number);
 
-  // eslint-disable-next-line no-cond-assign
-  for (let i = 0; (lookup = numberFormats[i]); i++) {
-    const [suffixNum, suffix] = lookup;
-    const shortValue = Math.floor(number / suffixNum);
-    const fitsBound = number % suffixNum;
+  for (const step of numberFormatSteps) {
+    const [suffixNum, suffix] = step;
+    const shortValue = Math.floor(numAbsValue / suffixNum);
+    const fitsBound = numAbsValue % suffixNum === 0;
 
     if (shortValue <= 0) {
       continue;
     }
 
-    return shortValue / 10 > 1 || !fitsBound
-      ? `${shortValue}${suffix}`
-      : `${formatFloat(number / suffixNum, 1)}${suffix}`;
+    const useShortValue = !includeDecimals && (shortValue > 10 || fitsBound);
+
+    if (useShortValue) {
+      if (maximumSignificantDigits === undefined) {
+        return `${prefix}${shortValue}${suffix}`;
+      }
+      const formattedNumber = parseFloat(
+        shortValue.toPrecision(maximumSignificantDigits)
+      ).toString();
+      return `${prefix}${formattedNumber}${suffix}`;
+    }
+
+    const formattedNumber = formatFloat(
+      numAbsValue / suffixNum,
+      maximumSignificantDigits || 1
+    ).toLocaleString(undefined, {
+      maximumSignificantDigits,
+    });
+
+    return `${prefix}${formattedNumber}${suffix}`;
   }
 
-  return number.toLocaleString();
+  return number.toLocaleString(undefined, {maximumSignificantDigits});
+}
+
+/**
+ * Formats a number with an abbreviation and rounds to 2
+ * decimal digits without forcing trailing zeros.
+ * e. g. 1000 -> 1K, 1234 -> 1.23K
+ */
+export function formatAbbreviatedNumberWithDynamicPrecision(
+  value: number | string
+): string {
+  const number = Number(value);
+
+  if (number === 0) {
+    return '0';
+  }
+
+  const log10 = Math.log10(Math.abs(number));
+  // numbers less than 1 will have a negative log10
+  const numOfDigits = log10 < 0 ? 1 : Math.floor(log10) + 1;
+
+  const maxStep = numberFormatSteps[0][0];
+
+  // if the number is larger than the largest step, we determine the number of digits
+  // by dividing the number by the largest step, otherwise the number of formatted
+  // digits is the number of digits in the number modulo 3 (the number of zeroes between steps)
+  const numOfFormattedDigits =
+    number > maxStep
+      ? Math.floor(Math.log10(number / maxStep))
+      : Math.max(numOfDigits % 3 === 0 ? 3 : numOfDigits % 3, 0);
+
+  const maximumSignificantDigits = numOfFormattedDigits + 2;
+
+  return formatAbbreviatedNumber(value, maximumSignificantDigits, true);
+}
+
+const FORMAT_RATE_SIGNIFICANT_DIGITS = 3;
+
+export function formatRate(
+  value: number,
+  unit: RateUnit = RateUnit.PER_SECOND,
+  options: {
+    minimumValue?: number;
+  } = {}
+) {
+  // NOTE: `Intl` doesn't support unitless-per-unit formats (i.e.,
+  // `"-per-minute"` is not valid) so we have to concatenate the unit manually, since our rates are usually just "/min" or "/s".
+  // Because of this, the unit is not internationalized.
+
+  // 0 is special!
+  if (value === 0) {
+    return `0${RATE_UNIT_LABELS[unit]}`;
+  }
+
+  const minimumValue = options.minimumValue ?? 0;
+  const significantDigits = FORMAT_RATE_SIGNIFICANT_DIGITS;
+
+  const numberFormatOptions: ConstructorParameters<typeof Intl.NumberFormat>[1] = {
+    notation: 'compact',
+    compactDisplay: 'short',
+    minimumSignificantDigits: significantDigits,
+    maximumSignificantDigits: significantDigits,
+  };
+
+  if (value <= minimumValue) {
+    return `<${minimumValue}${RATE_UNIT_LABELS[unit]}`;
+  }
+
+  return `${value.toLocaleString(undefined, numberFormatOptions)}${
+    RATE_UNIT_LABELS[unit]
+  }`;
+}
+
+export function formatSpanOperation(operation?: string) {
+  if (operation?.startsWith('http')) {
+    return t('request');
+  }
+
+  if (operation?.startsWith('db')) {
+    return t('query');
+  }
+
+  if (operation?.startsWith('task')) {
+    return t('task');
+  }
+
+  if (operation?.startsWith('serialize')) {
+    return t('serializer');
+  }
+
+  if (operation?.startsWith('middleware')) {
+    return t('middleware');
+  }
+
+  if (operation?.startsWith('resource')) {
+    return t('resource');
+  }
+
+  return t('span');
+}
+
+export function formatDollars(value: number) {
+  return `$${formatAbbreviatedNumberWithDynamicPrecision(value)}`;
 }

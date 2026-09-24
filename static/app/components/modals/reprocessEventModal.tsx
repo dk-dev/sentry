@@ -1,143 +1,195 @@
-import React from 'react';
 import styled from '@emotion/styled';
+import {useMutation} from '@tanstack/react-query';
+import {z} from 'zod';
 
-import {addErrorMessage} from 'app/actionCreators/indicator';
-import {ModalRenderProps} from 'app/actionCreators/modal';
-import ExternalLink from 'app/components/links/externalLink';
-import List from 'app/components/list';
-import ListItem from 'app/components/list/listItem';
-import {t, tct} from 'app/locale';
-import space from 'app/styles/space';
-import {Group, Organization} from 'app/types';
-import Form from 'app/views/settings/components/forms/form';
-import NumberField from 'app/views/settings/components/forms/numberField';
-import RadioField from 'app/views/settings/components/forms/radioField';
+import {Button} from '@sentry/scraps/button';
+import {defaultFormOptions, setFieldErrors, useScrapsForm} from '@sentry/scraps/form';
+import {Flex, Stack} from '@sentry/scraps/layout';
+import {ExternalLink} from '@sentry/scraps/link';
+import {Separator} from '@sentry/scraps/separator';
 
-const impacts = [
-  tct(
-    "[strong:Quota applies.] Every event you choose to reprocess counts against your plan's quota. Rate limits and spike protection do not apply.",
-    {strong: <strong />}
-  ),
-  tct(
-    '[strong:Attachment storage required.] If your events come from minidumps or unreal crash reports, you must have [link:attachment storage] enabled.',
-    {
-      strong: <strong />,
-      link: (
-        <ExternalLink href="https://docs.sentry.io/platforms/native/enriching-events/attachments/#crash-reports-and-privacy" />
-      ),
-    }
-  ),
-  t(
-    'Please wait one hour after upload before attempting to reprocess missing debug files.'
-  ),
-];
-
-const remainingEventsChoices: [string, string][] = [
-  ['keep', t('Keep')],
-  ['delete', t('Delete')],
-];
+import {addErrorMessage} from 'sentry/actionCreators/indicator';
+import type {ModalRenderProps} from 'sentry/actionCreators/modal';
+import {List} from 'sentry/components/list';
+import {ListItem} from 'sentry/components/list/listItem';
+import {t, tct} from 'sentry/locale';
+import type {Group} from 'sentry/types/group';
+import type {Organization} from 'sentry/types/organization';
+import {getApiUrl} from 'sentry/utils/api/getApiUrl';
+import {fetchMutation} from 'sentry/utils/queryClient';
+import {RequestError} from 'sentry/utils/requestError/requestError';
+import {requestErrorToFieldErrors} from 'sentry/utils/requestError/requestErrorToFieldErrors';
+import {testableWindowLocation} from 'sentry/utils/testableWindowLocation';
 
 export type ReprocessEventModalOptions = {
   groupId: Group['id'];
   organization: Organization;
 };
 
-type Props = ModalRenderProps & ReprocessEventModalOptions;
+const schema = z.object({
+  maxEvents: z.number().positive(t('Must be a positive integer')).nullable(),
+  remainingEvents: z.enum(['keep', 'delete']),
+});
 
-type State = {
-  maxEvents?: number;
-};
+type FormValues = z.infer<typeof schema>;
 
-class ReprocessingEventModal extends React.Component<Props, State> {
-  state: State = {maxEvents: undefined};
+export function ReprocessingEventModal({
+  Header,
+  Body,
+  Footer,
+  organization,
+  closeModal,
+  groupId,
+}: ModalRenderProps & ReprocessEventModalOptions) {
+  const mutation = useMutation({
+    mutationFn: (data: FormValues) => {
+      return fetchMutation({
+        url: getApiUrl(
+          '/organizations/$organizationIdOrSlug/issues/$issueId/reprocessing/',
+          {path: {organizationIdOrSlug: organization.slug, issueId: groupId}}
+        ),
+        method: 'POST',
+        data,
+      });
+    },
+  });
 
-  handleSuccess = () => {
-    const {closeModal} = this.props;
+  const defaultValues: FormValues = {maxEvents: null, remainingEvents: 'keep'};
 
-    closeModal();
-    window.location.reload();
-  };
+  const form = useScrapsForm({
+    ...defaultFormOptions,
+    defaultValues,
+    validators: {onDynamic: schema},
+    onSubmit: ({value, formApi}) =>
+      mutation
+        .mutateAsync(value)
+        .then(() => {
+          closeModal();
+          testableWindowLocation.reload();
+        })
+        .catch((error: unknown) => {
+          const handled =
+            error instanceof RequestError
+              ? setFieldErrors(
+                  formApi,
+                  requestErrorToFieldErrors(error, formApi.state.values)
+                )
+              : false;
+          if (!handled) {
+            addErrorMessage(t('Failed to reprocess. Please check your input.'));
+          }
+        }),
+  });
 
-  handleError() {
-    addErrorMessage(t('Failed to reprocess. Please check your input.'));
-  }
-
-  handleMaxEventsChange = (maxEvents: string) => {
-    this.setState({maxEvents: Number(maxEvents) || undefined});
-  };
-
-  render() {
-    const {organization, Header, Body, closeModal, groupId} = this.props;
-    const {maxEvents} = this.state;
-    const orgSlug = organization.slug;
-    const endpoint = `/organizations/${orgSlug}/issues/${groupId}/reprocessing/`;
-    const title = t('Reprocess Events');
-
-    return (
-      <React.Fragment>
-        <Header closeButton>
-          <span data-test-id="modal-title">{title}</span>
-        </Header>
-        <Body>
-          <Introduction>
-            {t(
-              'Reprocessing applies new debug files and grouping enhancements to this Issue. Please consider these impacts:'
+  return (
+    <form.AppForm form={form}>
+      <Header closeButton>
+        <h4>{t('Reprocess Events')}</h4>
+      </Header>
+      <Body>
+        <Introduction>
+          {t(
+            'Reprocessing applies new debug files and grouping enhancements to this Issue. Please consider these impacts:'
+          )}
+        </Introduction>
+        <StyledList symbol="bullet">
+          <ListItem>
+            {tct(
+              "[strong:Quota applies.] Every event you choose to reprocess counts against your plan's quota. Rate limits and spike protection do not apply.",
+              {strong: <strong />}
             )}
-          </Introduction>
-          <StyledList symbol="bullet">
-            {impacts.map((impact, index) => (
-              <ListItem key={index}>{impact}</ListItem>
-            ))}
-          </StyledList>
-          <Introduction>
-            {tct('For more information, please refer to [link:the documentation.]', {
-              link: (
-                <ExternalLink href="https://docs.sentry.io/product/error-monitoring/reprocessing/" />
-              ),
-            })}
-          </Introduction>
-          <Form
-            submitLabel={title}
-            apiEndpoint={endpoint}
-            apiMethod="POST"
-            initialData={{maxEvents: undefined, remainingEvents: 'keep'}}
-            onSubmitSuccess={this.handleSuccess}
-            onSubmitError={this.handleError}
-            onCancel={closeModal}
-            footerClass="modal-footer"
-          >
-            <NumberField
-              name="maxEvents"
-              label={t('Number of events to be reprocessed')}
-              help={t('If you set a limit, we will reprocess your most recent events.')}
-              placeholder={t('Reprocess all events')}
-              onChange={this.handleMaxEventsChange}
-              min={1}
-            />
+          </ListItem>
+          <ListItem>
+            {tct(
+              '[strong:Attachment storage required.] If your events come from minidumps or unreal crash reports, you must have [link:attachment storage] enabled.',
+              {
+                strong: <strong />,
+                link: (
+                  <ExternalLink href="https://docs.sentry.io/platforms/native/enriching-events/attachments/#crash-reports-and-privacy" />
+                ),
+              }
+            )}
+          </ListItem>
+          <ListItem>
+            {t(
+              'Please wait one hour after upload before attempting to reprocess missing debug files.'
+            )}
+          </ListItem>
+        </StyledList>
+        <Introduction>
+          {tct('For more information, please refer to [link:the documentation.]', {
+            link: (
+              <ExternalLink href="https://docs.sentry.io/product/error-monitoring/reprocessing/" />
+            ),
+          })}
+        </Introduction>
 
-            <RadioField
-              orientInline
-              label={t('Remaining events')}
-              help={t('What to do with the events that are not reprocessed.')}
-              name="remainingEvents"
-              choices={remainingEventsChoices}
-              disabled={maxEvents === undefined}
-            />
-          </Form>
-        </Body>
-      </React.Fragment>
-    );
-  }
+        <Stack gap="xl">
+          <form.AppField name="maxEvents">
+            {field => (
+              <field.Layout.Row
+                label={t('Number of events to be reprocessed')}
+                hintText={t(
+                  'If you set a limit, we will reprocess your most recent events.'
+                )}
+              >
+                <field.Number
+                  min={1}
+                  placeholder={t('Reprocess all events')}
+                  value={field.state.value}
+                  onChange={field.handleChange}
+                />
+              </field.Layout.Row>
+            )}
+          </form.AppField>
+
+          <Separator orientation="horizontal" border="secondary" />
+
+          <form.Subscribe selector={state => state.values.maxEvents === null}>
+            {isDisabled => (
+              <form.AppField name="remainingEvents">
+                {field => (
+                  <field.Radio.Group
+                    value={field.state.value}
+                    onChange={value => {
+                      if (value === 'keep' || value === 'delete') {
+                        field.handleChange(value);
+                      }
+                    }}
+                    disabled={isDisabled}
+                  >
+                    <field.Layout.Row
+                      label={t('Remaining events')}
+                      hintText={t('What to do with the events that are not reprocessed.')}
+                    >
+                      <Flex gap="2xl">
+                        <field.Radio.Item value="keep">{t('Keep')}</field.Radio.Item>
+                        <field.Radio.Item value="delete">{t('Delete')}</field.Radio.Item>
+                      </Flex>
+                    </field.Layout.Row>
+                  </field.Radio.Group>
+                )}
+              </form.AppField>
+            )}
+          </form.Subscribe>
+        </Stack>
+      </Body>
+      <Footer>
+        <Flex gap="md" justify="end">
+          <Button onClick={closeModal}>{t('Cancel')}</Button>
+          <form.SubmitButton>{t('Reprocess Events')}</form.SubmitButton>
+        </Flex>
+      </Footer>
+    </form.AppForm>
+  );
 }
 
-export default ReprocessingEventModal;
-
 const Introduction = styled('p')`
-  font-size: ${p => p.theme.fontSizeLarge};
+  font-size: ${p => p.theme.font.size.lg};
 `;
 
 const StyledList = styled(List)`
-  grid-gap: ${space(1)};
-  margin-bottom: ${space(4)};
-  font-size: ${p => p.theme.fontSizeMedium};
+  gap: ${p => p.theme.space.md};
+  margin-bottom: ${p => p.theme.space['3xl']};
+  font-size: ${p => p.theme.font.size.md};
 `;

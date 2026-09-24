@@ -1,49 +1,29 @@
-import React from 'react';
-import createReactClass from 'create-react-class';
-import Reflux from 'reflux';
-
-import ProjectsStore from 'app/stores/projectsStore';
-import {Project} from 'app/types';
-import getDisplayName from 'app/utils/getDisplayName';
+import type {Project} from 'sentry/types/project';
+import {getDisplayName} from 'sentry/utils/getDisplayName';
+import {useProjects} from 'sentry/utils/useProjects';
 
 type InjectedProjectsProps = {
   projects: Project[];
   loadingProjects?: boolean;
 };
 
-type State = {
-  projects: Project[];
-  loading: boolean;
-};
-
 /**
  * Higher order component that uses ProjectsStore and provides a list of projects
  */
-const withProjects = <P extends InjectedProjectsProps>(
+export function withProjects<P extends InjectedProjectsProps>(
   WrappedComponent: React.ComponentType<P>
-) =>
-  createReactClass<
-    Omit<P, keyof InjectedProjectsProps> & Partial<InjectedProjectsProps>,
-    State
-  >({
-    displayName: `withProjects(${getDisplayName(WrappedComponent)})`,
-    mixins: [Reflux.listenTo(ProjectsStore, 'onProjectUpdate') as any],
-    getInitialState() {
-      return ProjectsStore.getState();
-    },
+) {
+  type Props = Omit<P, keyof InjectedProjectsProps>;
 
-    onProjectUpdate() {
-      this.setState(ProjectsStore.getState());
-    },
-    render() {
-      return (
-        <WrappedComponent
-          {...this.props}
-          projects={this.state.projects}
-          loadingProjects={this.state.loading}
-        />
-      );
-    },
-  });
+  function Wrapper(props: Props) {
+    const {projects, initiallyLoaded} = useProjects();
+    const loadingProjects = !initiallyLoaded;
 
-export default withProjects;
+    // TODO(any): HoC prop types not working w/ emotion https://github.com/emotion-js/emotion/issues/3261
+    return <WrappedComponent {...(props as any)} {...{projects, loadingProjects}} />;
+  }
+
+  Wrapper.displayName = `withProjects(${getDisplayName(WrappedComponent)})`;
+
+  return Wrapper;
+}

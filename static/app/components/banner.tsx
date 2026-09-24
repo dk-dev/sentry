@@ -1,60 +1,80 @@
-import React from 'react';
+import {useState} from 'react';
 import {css} from '@emotion/react';
 import styled from '@emotion/styled';
 
-import {IconClose} from 'app/icons/iconClose';
-import {t} from 'app/locale';
-import space from 'app/styles/space';
+import {Button} from '@sentry/scraps/button';
+import {Grid, type GridProps} from '@sentry/scraps/layout';
 
-type Props = {
-  title?: string;
-  subtitle?: string;
-  isDismissable?: boolean;
-  onCloseClick?: () => void;
-  className?: string;
-} & BannerWrapperProps;
+import {IconClose} from 'sentry/icons';
+import {t} from 'sentry/locale';
 
-class Banner extends React.Component<Props> {
-  static defaultProps: Partial<Props> = {
-    isDismissable: true,
+const makeKey = (prefix: string) => `${prefix}-banner-dismissed`;
+
+function dismissBanner(bannerKey: string) {
+  localStorage.setItem(makeKey(bannerKey), 'true');
+}
+
+export function useDismissable(bannerKey: string) {
+  const key = makeKey(bannerKey);
+  const [value, setValue] = useState(localStorage.getItem(key));
+
+  const dismiss = () => {
+    setValue('true');
+    dismissBanner(bannerKey);
   };
 
-  render() {
-    const {
-      title,
-      subtitle,
-      isDismissable,
-      onCloseClick,
-      children,
-      backgroundImg,
-      backgroundComponent,
-      className,
-    } = this.props;
-
-    return (
-      <BannerWrapper
-        backgroundComponent={backgroundComponent}
-        backgroundImg={backgroundImg}
-        className={className}
-      >
-        {backgroundComponent}
-        {isDismissable ? (
-          <StyledIconClose aria-label={t('Close')} onClick={onCloseClick} />
-        ) : null}
-        <BannerContent>
-          <BannerTitle>{title}</BannerTitle>
-          <BannerSubtitle>{subtitle}</BannerSubtitle>
-          <BannerActions>{children}</BannerActions>
-        </BannerContent>
-      </BannerWrapper>
-    );
-  }
+  return [value === 'true', dismiss] as const;
 }
 
 type BannerWrapperProps = {
-  backgroundImg?: string;
   backgroundComponent?: React.ReactNode;
+  backgroundImg?: string;
 };
+
+type Props = BannerWrapperProps & {
+  children?: React.ReactNode;
+  className?: string;
+  dismissKey?: string;
+  subtitle?: string;
+  title?: string;
+};
+
+export function Banner({
+  title,
+  subtitle,
+  dismissKey = 'generic-banner',
+  className,
+  backgroundImg,
+  backgroundComponent,
+  children,
+}: Props) {
+  const [dismissed, dismiss] = useDismissable(dismissKey);
+
+  if (dismissed) {
+    return null;
+  }
+
+  return (
+    <BannerWrapper backgroundImg={backgroundImg} className={className}>
+      {backgroundComponent}
+      <CloseButton
+        type="button"
+        size="xs"
+        variant="link"
+        icon={<IconClose />}
+        onClick={dismiss}
+        aria-label={t('Close')}
+      />
+      <BannerContent>
+        <BannerTitle>{title}</BannerTitle>
+        <BannerSubtitle>{subtitle}</BannerSubtitle>
+        <StyledButtonBar>{children}</StyledButtonBar>
+      </BannerContent>
+    </BannerWrapper>
+  );
+}
+
+Banner.dismiss = dismissBanner;
 
 const BannerWrapper = styled('div')<BannerWrapperProps>`
   ${p =>
@@ -66,87 +86,62 @@ const BannerWrapper = styled('div')<BannerWrapperProps>`
           background-position: center center;
         `
       : css`
-          background: ${p.theme.gray500};
+          background-color: ${p.theme.colors.gray800};
         `}
-
-  ${p =>
-    p.backgroundComponent &&
-    css`
-      display: flex;
-      flex-direction: column;
-      overflow: hidden;
-    `}
+  display: flex;
+  overflow: hidden;
+  align-items: center;
+  justify-content: center;
   position: relative;
-  margin-bottom: ${space(3)};
-  box-shadow: ${p => p.theme.dropShadowLight};
-  border-radius: ${p => p.theme.borderRadius};
-  color: ${p => p.theme.white};
+  margin-bottom: ${p => p.theme.space.xl};
+  box-shadow: ${p => p.theme.shadow.medium};
+  border-radius: ${p => p.theme.radius.md};
+  height: 180px;
+  color: ${p => p.theme.colors.white};
+
+  @media (min-width: ${p => p.theme.breakpoints.sm}) {
+    height: 220px;
+  }
 `;
 
 const BannerContent = styled('div')`
   position: absolute;
-  top: 0;
-  left: 0;
-  width: 100%;
-  height: 100%;
-  display: flex;
-  flex-direction: column;
-  justify-content: center;
-  align-items: center;
+  display: grid;
+  justify-items: center;
+  grid-template-rows: repeat(3, max-content);
   text-align: center;
-  padding: ${space(4)};
-
-  @media (max-width: ${p => p.theme.breakpoints[0]}) {
-    padding: ${space(0)};
-  }
+  padding: ${p => p.theme.space['3xl']};
 `;
 
 const BannerTitle = styled('h1')`
-  margin-bottom: ${space(0.25)};
+  margin: 0;
 
-  @media (max-width: ${p => p.theme.breakpoints[0]}) {
-    font-size: 24px;
-  }
-
-  @media (min-width: ${p => p.theme.breakpoints[1]}) {
-    margin-top: ${space(2)};
-    margin-bottom: ${space(0.5)};
-    font-size: 42px;
+  @media (min-width: ${p => p.theme.breakpoints.sm}) {
+    font-size: 40px;
   }
 `;
 
 const BannerSubtitle = styled('div')`
-  font-size: ${p => p.theme.fontSizeMedium};
+  margin: 0;
 
-  @media (max-width: ${p => p.theme.breakpoints[0]}) {
-    font-size: ${p => p.theme.fontSizeSmall};
-  }
-  @media (min-width: ${p => p.theme.breakpoints[1]}) {
-    font-size: ${p => p.theme.fontSizeExtraLarge};
-    margin-bottom: ${space(1)};
-    flex-direction: row;
-    min-width: 650px;
+  @media (min-width: ${p => p.theme.breakpoints.sm}) {
+    font-size: ${p => p.theme.font.size.xl};
   }
 `;
 
-const BannerActions = styled('div')`
-  display: flex;
-  justify-content: center;
-  width: 100%;
-
-  @media (min-width: ${p => p.theme.breakpoints[1]}) {
-    width: auto;
-  }
+const StyledButtonBar = styled((props: GridProps) => (
+  <Grid flow="column" align="center" gap="md" {...props} />
+))`
+  margin-top: ${p => p.theme.space.xl};
+  width: fit-content;
 `;
 
-const StyledIconClose = styled(IconClose)`
+const CloseButton = styled(Button)`
   position: absolute;
   display: block;
-  top: ${space(2)};
-  right: ${space(2)};
-  color: ${p => p.theme.white};
+  top: ${p => p.theme.space.xl};
+  right: ${p => p.theme.space.xl};
+  color: ${p => p.theme.colors.white};
   cursor: pointer;
   z-index: 1;
 `;
-
-export default Banner;

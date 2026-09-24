@@ -1,51 +1,18 @@
-import React from 'react';
-import styled from '@emotion/styled';
-
-import Tooltip from 'app/components/tooltip';
-import {IconCheckmark, IconClose} from 'app/icons';
-import {t} from 'app/locale';
-import ControlState from 'app/views/settings/components/forms/field/controlState';
-
-import {EventIdStatus} from '../../types';
+import {LoadingIndicator} from 'sentry/components/loadingIndicator';
+import {IconCheckmark} from 'sentry/icons';
+import {EventIdStatus} from 'sentry/views/settings/components/dataScrubbing/types';
 
 type Props = {
-  onClickIconClose: () => void;
-  status?: EventIdStatus;
+  status: EventIdStatus;
 };
 
-const EventIdFieldStatusIcon = ({status, onClickIconClose}: Props) => {
+export function EventIdFieldStatusIcon({status}: Props) {
   switch (status) {
-    case EventIdStatus.ERROR:
-    case EventIdStatus.INVALID:
-    case EventIdStatus.NOT_FOUND:
-      return (
-        <CloseIcon onClick={onClickIconClose}>
-          <Tooltip title={t('Clear event ID')}>
-            <StyledIconClose size="xs" />
-          </Tooltip>
-        </CloseIcon>
-      );
     case EventIdStatus.LOADING:
-      return <ControlState isSaving />;
+      return <LoadingIndicator size={16} />;
     case EventIdStatus.LOADED:
-      return <IconCheckmark color="green300" />;
+      return <IconCheckmark variant="success" />;
     default:
       return null;
   }
-};
-
-export default EventIdFieldStatusIcon;
-
-const CloseIcon = styled('div')`
-  :first-child {
-    line-height: 0;
-  }
-`;
-
-const StyledIconClose = styled(IconClose)`
-  color: ${p => p.theme.gray200};
-  :hover {
-    color: ${p => p.theme.gray300};
-  }
-  cursor: pointer;
-`;
+}

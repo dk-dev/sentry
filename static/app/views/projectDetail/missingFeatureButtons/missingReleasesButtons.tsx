@@ -1,13 +1,14 @@
-import React from 'react';
-import styled from '@emotion/styled';
+import {Button, LinkButton} from '@sentry/scraps/button';
+import {Grid} from '@sentry/scraps/layout';
 
-import Button from 'app/components/button';
-import ButtonBar from 'app/components/buttonBar';
-import FeatureTourModal from 'app/components/modals/featureTourModal';
-import {t} from 'app/locale';
-import {Organization} from 'app/types';
-import {trackAnalyticsEvent} from 'app/utils/analytics';
-import {RELEASES_TOUR_STEPS} from 'app/views/releases/list/releaseLanding';
+import {FeatureTourModal} from 'sentry/components/modals/featureTourModal';
+import {releaseHealth} from 'sentry/data/platformCategories';
+import {t} from 'sentry/locale';
+import {ConfigStore} from 'sentry/stores/configStore';
+import type {Organization} from 'sentry/types/organization';
+import type {PlatformKey} from 'sentry/types/platform';
+import {trackAnalytics} from 'sentry/utils/analytics';
+import {RELEASES_TOUR_STEPS} from 'sentry/views/explore/releases/list/releasesPromo';
 
 const DOCS_URL = 'https://docs.sentry.io/product/releases/';
 const DOCS_HEALTH_URL = 'https://docs.sentry.io/product/releases/health/';
@@ -15,42 +16,55 @@ const DOCS_HEALTH_URL = 'https://docs.sentry.io/product/releases/health/';
 type Props = {
   organization: Organization;
   health?: boolean;
+  platform?: PlatformKey;
   projectId?: string;
 };
 
-function MissingReleasesButtons({organization, health, projectId}: Props) {
+export function MissingReleasesButtons({
+  organization,
+  health,
+  projectId,
+  platform,
+}: Props) {
   function handleTourAdvance(step: number, duration: number) {
-    trackAnalyticsEvent({
-      eventKey: 'project_detail.releases_tour.advance',
-      eventName: 'Project Detail: Releases Tour Advance',
-      organization_id: parseInt(organization.id, 10),
-      project_id: projectId && parseInt(projectId, 10),
+    trackAnalytics('project_detail.releases_tour.advance', {
+      organization,
+      project_id: projectId ?? '',
       step,
       duration,
     });
   }
 
   function handleClose(step: number, duration: number) {
-    trackAnalyticsEvent({
-      eventKey: 'project_detail.releases_tour.close',
-      eventName: 'Project Detail: Releases Tour Close',
-      organization_id: parseInt(organization.id, 10),
-      project_id: projectId && parseInt(projectId, 10),
+    trackAnalytics('project_detail.releases_tour.close', {
+      organization,
+      project_id: projectId ?? '',
       step,
       duration,
     });
   }
 
+  const isSelfHostedErrorsOnly = ConfigStore.get('isSelfHostedErrorsOnly');
+  const setupDisabled =
+    (health && platform && !releaseHealth.includes(platform)) || isSelfHostedErrorsOnly;
+  const setupDisabledTooltip = isSelfHostedErrorsOnly
+    ? t('Release health is not available for errors only self-hosted.')
+    : t('Release Health is not yet supported on this platform.');
+
   return (
-    <StyledButtonBar gap={1}>
-      <Button
-        size="small"
-        priority="primary"
+    <Grid flow="column" align="center" gap="md">
+      <LinkButton
+        size="sm"
+        variant="primary"
         external
         href={health ? DOCS_HEALTH_URL : DOCS_URL}
+        disabled={setupDisabled}
+        tooltipProps={{title: setupDisabled ? setupDisabledTooltip : undefined}}
+        analyticsEventKey="project_detail.releases_setup_clicked"
+        analyticsEventName="Project Detail: Releases Start Setup Clicked"
       >
         {t('Start Setup')}
-      </Button>
+      </LinkButton>
       {!health && (
         <FeatureTourModal
           steps={RELEASES_TOUR_STEPS}
@@ -60,18 +74,17 @@ function MissingReleasesButtons({organization, health, projectId}: Props) {
           doneUrl={health ? DOCS_HEALTH_URL : DOCS_URL}
         >
           {({showModal}) => (
-            <Button size="small" onClick={showModal}>
-              {t('Get a tour')}
+            <Button
+              size="sm"
+              onClick={showModal}
+              analyticsEventKey="project_detail.releases_tour_clicked"
+              analyticsEventName="Project Detail: Releases Get Tour Clicked"
+            >
+              {t('Get Tour')}
             </Button>
           )}
         </FeatureTourModal>
       )}
-    </StyledButtonBar>
+    </Grid>
   );
 }
-
-const StyledButtonBar = styled(ButtonBar)`
-  grid-template-columns: minmax(auto, max-content) minmax(auto, max-content);
-`;
-
-export default MissingReleasesButtons;

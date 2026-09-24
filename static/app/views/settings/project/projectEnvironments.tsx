@@ -1,272 +1,411 @@
-import React from 'react';
-import {WithRouterProps} from 'react-router';
+import {Fragment, useDeferredValue, useMemo} from 'react';
 import styled from '@emotion/styled';
+import {useMutation, useQuery, useQueryClient} from '@tanstack/react-query';
+import {parseAsInteger, parseAsString, parseAsStringEnum, useQueryStates} from 'nuqs';
 
-import {addErrorMessage, addSuccessMessage} from 'app/actionCreators/indicator';
-import {Client} from 'app/api';
-import Access from 'app/components/acl/access';
-import Button from 'app/components/button';
-import ListLink from 'app/components/links/listLink';
-import LoadingIndicator from 'app/components/loadingIndicator';
-import NavTabs from 'app/components/navTabs';
-import {Panel, PanelBody, PanelHeader, PanelItem} from 'app/components/panels';
-import SentryDocumentTitle from 'app/components/sentryDocumentTitle';
-import {ALL_ENVIRONMENTS_KEY} from 'app/constants';
-import {t, tct} from 'app/locale';
-import space from 'app/styles/space';
-import {Environment, Project} from 'app/types';
-import {getDisplayName, getUrlRoutingName} from 'app/utils/environment';
-import recreateRoute from 'app/utils/recreateRoute';
-import withApi from 'app/utils/withApi';
-import EmptyMessage from 'app/views/settings/components/emptyMessage';
-import SettingsPageHeader from 'app/views/settings/components/settingsPageHeader';
-import PermissionAlert from 'app/views/settings/project/permissionAlert';
+import {Button, ButtonBar} from '@sentry/scraps/button';
+import {InfoText} from '@sentry/scraps/info';
+import {Container, Flex} from '@sentry/scraps/layout';
+import type {TableColumnConfig} from '@sentry/scraps/table';
+import {TabList, Tabs} from '@sentry/scraps/tabs';
+import {Text} from '@sentry/scraps/text';
 
-type Props = {
-  api: Client;
-} & WithRouterProps<{orgId: string; projectId: string}, {}>;
+import {addErrorMessage, addSuccessMessage} from 'sentry/actionCreators/indicator';
+import {hasEveryAccess} from 'sentry/components/acl/access';
+import {Placeholder} from 'sentry/components/placeholder';
+import {SearchBar} from 'sentry/components/searchBar';
+import {SentryDocumentTitle} from 'sentry/components/sentryDocumentTitle';
+import {SimpleTable} from 'sentry/components/tables/simpleTable';
+import {IconChevron} from 'sentry/icons';
+import {t, tct} from 'sentry/locale';
+import type {TagValue} from 'sentry/types/group';
+import type {Organization} from 'sentry/types/organization';
+import type {DetailedProject} from 'sentry/types/project';
+import {apiOptions} from 'sentry/utils/api/apiOptions';
+import {getApiUrl} from 'sentry/utils/api/getApiUrl';
+import {getDisplayName} from 'sentry/utils/environment';
+import {formatAbbreviatedNumber} from 'sentry/utils/formatters';
+import {fetchMutation} from 'sentry/utils/queryClient';
+import {fzf} from 'sentry/utils/search/fzf';
+import {useLocation} from 'sentry/utils/useLocation';
+import {useOrganization} from 'sentry/utils/useOrganization';
+import {useParams} from 'sentry/utils/useParams';
+import {SettingsPageHeader} from 'sentry/views/settings/components/settingsPageHeader';
+import {ProjectPermissionAlert} from 'sentry/views/settings/project/projectPermissionAlert';
+import {useProjectSettingsOutlet} from 'sentry/views/settings/project/projectSettingsLayout';
 
-type State = {
-  isLoading: boolean;
-  project: null | Project;
-  environments: null | Environment[];
-};
+const ENVIRONMENT_COLUMNS: TableColumnConfig[] = [
+  {key: 'name', width: 'minmax(0, 1fr)'},
+  {key: 'toggle', width: 'max-content'},
+  {key: 'action', width: 'max-content'},
+];
 
-class ProjectEnvironments extends React.Component<Props, State> {
-  state: State = {
-    project: null,
-    environments: null,
-    isLoading: true,
-  };
-
-  componentDidMount() {
-    this.fetchData();
-  }
-
-  componentDidUpdate(prevProps: Props) {
-    if (
-      this.props.location.pathname.endsWith('hidden/') !==
-      prevProps.location.pathname.endsWith('hidden/')
-    ) {
-      this.fetchData();
-    }
-  }
-
-  fetchData() {
-    const isHidden = this.props.location.pathname.endsWith('hidden/');
-
-    if (!this.state.isLoading) {
-      this.setState({isLoading: true});
-    }
-
-    const {orgId, projectId} = this.props.params;
-    this.props.api.request(`/projects/${orgId}/${projectId}/environments/`, {
-      query: {
-        visibility: isHidden ? 'hidden' : 'visible',
-      },
-      success: environments => {
-        this.setState({environments, isLoading: false});
-      },
-    });
-  }
-
-  fetchProjectDetails() {
-    const {orgId, projectId} = this.props.params;
-    this.props.api.request(`/projects/${orgId}/${projectId}/`, {
-      success: project => {
-        this.setState({project});
-      },
-    });
-  }
-
-  // Toggle visibility of environment
-  toggleEnv = (env: Environment, shouldHide: boolean) => {
-    const {orgId, projectId} = this.props.params;
-
-    this.props.api.request(
-      `/projects/${orgId}/${projectId}/environments/${getUrlRoutingName(env)}/`,
-      {
-        method: 'PUT',
-        data: {
-          name: env.name,
-          isHidden: shouldHide,
-        },
-        success: () => {
-          addSuccessMessage(
-            tct('Updated [environment]', {
-              environment: getDisplayName(env),
-            })
-          );
-        },
-        error: () => {
-          addErrorMessage(
-            tct('Unable to update [environment]', {
-              environment: getDisplayName(env),
-            })
-          );
-        },
-        complete: this.fetchData.bind(this),
-      }
-    );
-  };
-
-  renderEmpty() {
-    const isHidden = this.props.location.pathname.endsWith('hidden/');
-    const message = isHidden
-      ? t("You don't have any hidden environments.")
-      : t("You don't have any environments yet.");
-    return <EmptyMessage>{message}</EmptyMessage>;
-  }
-
-  /**
-   * Renders rows for "system" environments:
-   * - "All Environments"
-   * - "No Environment"
-   *
-   */
-  renderAllEnvironmentsSystemRow() {
-    // Not available in "Hidden" tab
-    const isHidden = this.props.location.pathname.endsWith('hidden/');
-    if (isHidden) {
-      return null;
-    }
-    return (
-      <EnvironmentRow
-        name={ALL_ENVIRONMENTS_KEY}
-        environment={{
-          id: ALL_ENVIRONMENTS_KEY,
-          name: ALL_ENVIRONMENTS_KEY,
-          displayName: ALL_ENVIRONMENTS_KEY,
-        }}
-        isSystemRow
-      />
-    );
-  }
-
-  renderEnvironmentList(envs: Environment[]) {
-    const isHidden = this.props.location.pathname.endsWith('hidden/');
-    const buttonText = isHidden ? t('Show') : t('Hide');
-
-    return (
-      <React.Fragment>
-        {this.renderAllEnvironmentsSystemRow()}
-        {envs.map(env => (
-          <EnvironmentRow
-            key={env.id}
-            name={env.name}
-            environment={env}
-            isHidden={isHidden}
-            onHide={this.toggleEnv}
-            actionText={buttonText}
-            shouldShowAction
-          />
-        ))}
-      </React.Fragment>
-    );
-  }
-
-  renderBody() {
-    const {environments, isLoading} = this.state;
-
-    if (isLoading) {
-      return <LoadingIndicator />;
-    }
-
-    return (
-      <PanelBody>
-        {environments?.length
-          ? this.renderEnvironmentList(environments)
-          : this.renderEmpty()}
-      </PanelBody>
-    );
-  }
-
-  render() {
-    const {routes, params, location} = this.props;
-    const isHidden = location.pathname.endsWith('hidden/');
-
-    const baseUrl = recreateRoute('', {routes, params, stepBack: -1});
-    return (
-      <div>
-        <SentryDocumentTitle title={t('Environments')} projectSlug={params.projectId} />
-        <SettingsPageHeader
-          title={t('Manage Environments')}
-          tabs={
-            <NavTabs underlined>
-              <ListLink to={baseUrl} index isActive={() => !isHidden}>
-                {t('Environments')}
-              </ListLink>
-              <ListLink to={`${baseUrl}hidden/`} index isActive={() => isHidden}>
-                {t('Hidden')}
-              </ListLink>
-            </NavTabs>
-          }
-        />
-        <PermissionAlert />
-
-        <Panel>
-          <PanelHeader>{isHidden ? t('Hidden') : t('Active Environments')}</PanelHeader>
-          {this.renderBody()}
-        </Panel>
-      </div>
-    );
-  }
+interface EnvironmentRowProps {
+  name: React.ReactNode;
+  children?: React.ReactNode;
+  eventCount?: number;
 }
 
-type RowProps = {
-  environment: Environment;
+interface ProjectEnvironment {
+  id: string;
+  isHidden: boolean;
   name: string;
-  onHide?: (env: Environment, isHidden: boolean) => void;
-  isHidden?: boolean;
-  actionText?: string;
-  isSystemRow?: boolean;
-  shouldShowAction?: boolean;
-};
+}
 
-function EnvironmentRow({
-  environment,
-  name,
-  onHide,
-  shouldShowAction = false,
-  isSystemRow = false,
-  isHidden = false,
-  actionText = '',
-}: RowProps) {
+interface ToggleEnvironmentVariables {
+  environment: ProjectEnvironment;
+  shouldHide: boolean;
+}
+
+const ENVIRONMENTS_PER_PAGE = 100;
+
+function EnvironmentRow({children, eventCount, name}: EnvironmentRowProps) {
   return (
-    <EnvironmentItem>
-      <Name>{isSystemRow ? t('All Environments') : name}</Name>
-      <Access access={['project:write']}>
-        {({hasAccess}) => (
-          <React.Fragment>
-            {shouldShowAction && onHide && (
-              <EnvironmentButton
-                size="xsmall"
-                disabled={!hasAccess}
-                onClick={() => onHide(environment, !isHidden)}
-              >
-                {actionText}
-              </EnvironmentButton>
-            )}
-          </React.Fragment>
-        )}
-      </Access>
-    </EnvironmentItem>
+    <SimpleTable.Row>
+      <SimpleTable.RowCell minHeight="45px" padding="md xl">
+        {name}
+      </SimpleTable.RowCell>
+      <SimpleTable.RowCell justify="end" minHeight="45px" padding="md xl">
+        {eventCount ? formatAbbreviatedNumber(eventCount) : null}
+      </SimpleTable.RowCell>
+      <SimpleTable.RowCell justify="end" minHeight="45px" padding="md xl">
+        {children}
+      </SimpleTable.RowCell>
+    </SimpleTable.Row>
   );
 }
 
-const EnvironmentItem = styled(PanelItem)`
-  align-items: center;
-  justify-content: space-between;
-`;
+function EnvironmentTableSkeleton({isHidden}: {isHidden: boolean}) {
+  return (
+    <Fragment>
+      {!isHidden && <EnvironmentRow name={t('All Environments')} />}
+      {['35%', '28%', '42%', '24%'].map(width => (
+        <SimpleTable.Row key={width}>
+          <SimpleTable.RowCell minHeight="40px" padding="md xl">
+            <Placeholder height="16px" width={width} />
+          </SimpleTable.RowCell>
+          <SimpleTable.RowCell justify="end" minHeight="40px" padding="md xl">
+            <Placeholder height="16px" width="52px" />
+          </SimpleTable.RowCell>
+          <SimpleTable.RowCell justify="end" minHeight="40px" padding="md xl">
+            <Placeholder height="24px" width="44px" />
+          </SimpleTable.RowCell>
+        </SimpleTable.Row>
+      ))}
+    </Fragment>
+  );
+}
 
-const Name = styled('div')`
-  display: flex;
-  align-items: center;
-`;
+function useEventCounts(organization: Organization, project: DetailedProject) {
+  const {data: tagValues = []} = useQuery(
+    apiOptions.as<TagValue[]>()(
+      '/projects/$organizationIdOrSlug/$projectIdOrSlug/tags/$key/values/',
+      {
+        path: {
+          organizationIdOrSlug: organization.slug,
+          projectIdOrSlug: project.slug,
+          key: 'environment',
+        },
+        query: {statsPeriod: '30d'},
+        staleTime: 60_000,
+      }
+    )
+  );
 
-const EnvironmentButton = styled(Button)`
-  margin-left: ${space(0.5)};
-`;
+  return useMemo(() => {
+    const eventCountsByEnvironment = Object.fromEntries(
+      tagValues.map(tag => [tag.value, tag.count])
+    );
+    const eventCountAll = tagValues.reduce((sum, tag) => sum + (tag.count ?? 0), 0);
 
-export {ProjectEnvironments};
-export default withApi(ProjectEnvironments);
+    return {eventCountsByEnvironment, eventCountAll};
+  }, [tagValues]);
+}
+
+export default function ProjectEnvironments() {
+  const location = useLocation();
+  const params = useParams<{projectId: string}>();
+  const organization = useOrganization();
+  const {project} = useProjectSettingsOutlet();
+  const queryClient = useQueryClient();
+  const [{direction, page, query: searchQuery, sort}, setQueryParams] = useQueryStates({
+    direction: parseAsStringEnum(['asc', 'desc']).withDefault('asc'),
+    page: parseAsInteger.withDefault(1),
+    query: parseAsString.withDefault(''),
+    sort: parseAsStringEnum(['events', 'name']).withDefault('name'),
+  });
+  const deferredSearchQuery = useDeferredValue(searchQuery.trim().toLowerCase());
+
+  const isHidden = location.pathname.endsWith('hidden/');
+  const visibility = isHidden ? 'hidden' : 'visible';
+  const environmentsQueryOptions = apiOptions.as<ProjectEnvironment[]>()(
+    '/projects/$organizationIdOrSlug/$projectIdOrSlug/environments/',
+    {
+      path: {
+        organizationIdOrSlug: organization.slug,
+        projectIdOrSlug: params.projectId,
+      },
+      query: {visibility},
+      staleTime: 0,
+    }
+  );
+  const {
+    data: environments,
+    isPending,
+    isError,
+    refetch,
+  } = useQuery(environmentsQueryOptions);
+
+  const toggleEnvironment = useMutation({
+    mutationFn: ({environment, shouldHide}: ToggleEnvironmentVariables) =>
+      fetchMutation({
+        url: getApiUrl(
+          '/projects/$organizationIdOrSlug/$projectIdOrSlug/environments/$environment/',
+          {
+            path: {
+              organizationIdOrSlug: organization.slug,
+              projectIdOrSlug: params.projectId,
+              // Django decodes route params before the endpoint calls
+              // `Environment.get_name_from_path_segment()`, which unquotes the value again.
+              // Pre-encode here so `getApiUrl`'s normal path-param encoding produces the
+              // double-encoded URL needed to preserve literal percent sequences in names.
+              environment: encodeURIComponent(environment.name),
+            },
+          }
+        ),
+        method: 'PUT',
+        data: {isHidden: shouldHide},
+      }),
+    onMutate: async ({environment}) => {
+      await queryClient.cancelQueries({queryKey: environmentsQueryOptions.queryKey});
+
+      const previousData = queryClient.getQueryData(environmentsQueryOptions.queryKey);
+
+      queryClient.setQueryData(environmentsQueryOptions.queryKey, previous =>
+        previous
+          ? {
+              ...previous,
+              json: previous.json.filter(env => env.id !== environment.id),
+            }
+          : previous
+      );
+
+      return {previousData};
+    },
+    onSuccess: (_data, {environment, shouldHide}) => {
+      addSuccessMessage(
+        shouldHide
+          ? t('Hidden %s', getDisplayName(environment))
+          : t('Unhidden %s', getDisplayName(environment))
+      );
+    },
+    onError: (_error, {environment, shouldHide}, context) => {
+      if (context?.previousData) {
+        queryClient.setQueryData(environmentsQueryOptions.queryKey, context.previousData);
+      }
+
+      addErrorMessage(
+        shouldHide
+          ? t('Unable to hide %s', getDisplayName(environment))
+          : t('Unable to unhide %s', getDisplayName(environment))
+      );
+    },
+    onSettled: () => {
+      queryClient.invalidateQueries({queryKey: environmentsQueryOptions.queryKey});
+    },
+  });
+
+  const {eventCountsByEnvironment, eventCountAll} = useEventCounts(organization, project);
+  const hasWriteAccess = hasEveryAccess(['project:write'], {organization, project});
+  const visibleEnvironments = useMemo(() => {
+    const matches = deferredSearchQuery
+      ? (environments ?? []).filter(
+          environment => fzf(environment.name, deferredSearchQuery, false).end !== -1
+        )
+      : (environments ?? []);
+
+    const multiplier = direction === 'asc' ? 1 : -1;
+
+    return matches.toSorted((left, right) => {
+      if (sort === 'events') {
+        const countDifference =
+          (eventCountsByEnvironment[left.name] ?? 0) -
+          (eventCountsByEnvironment[right.name] ?? 0);
+
+        if (countDifference !== 0) {
+          return countDifference * multiplier;
+        }
+      }
+
+      return left.name.localeCompare(right.name) * multiplier;
+    });
+  }, [deferredSearchQuery, direction, environments, eventCountsByEnvironment, sort]);
+  const environmentCount = visibleEnvironments.length;
+  const lastPage = Math.max(1, Math.ceil(environmentCount / ENVIRONMENTS_PER_PAGE));
+  const currentPage = Math.min(Math.max(page, 1), lastPage);
+  const pageStart = (currentPage - 1) * ENVIRONMENTS_PER_PAGE;
+  const paginatedEnvironments = visibleEnvironments.slice(
+    pageStart,
+    pageStart + ENVIRONMENTS_PER_PAGE
+  );
+  const changePage = (delta: number) => {
+    const nextPage = currentPage + delta;
+    setQueryParams({page: nextPage === 1 ? null : nextPage}, {history: 'push'});
+  };
+  const handleSearch = (query: string) => {
+    setQueryParams({page: null, query: query || null}, {history: 'replace'});
+  };
+  const handleSort = (field: 'events' | 'name') => {
+    const nextDirection =
+      sort === field
+        ? direction === 'asc'
+          ? 'desc'
+          : 'asc'
+        : field === 'events'
+          ? 'desc'
+          : 'asc';
+    setQueryParams(
+      {direction: nextDirection, page: null, sort: field},
+      {history: 'push'}
+    );
+  };
+
+  return (
+    <div>
+      <SentryDocumentTitle title={t('Environments')} projectSlug={params.projectId} />
+      <SettingsPageHeader title={t('Manage Environments')} />
+      <TabsContainer>
+        <Tabs value={isHidden ? 'hidden' : 'environments'}>
+          <TabList>
+            <TabList.Item
+              key="environments"
+              to={`/settings/${organization.slug}/projects/${params.projectId}/environments/`}
+            >
+              {t('Environments')}
+            </TabList.Item>
+            <TabList.Item
+              key="hidden"
+              to={`/settings/${organization.slug}/projects/${params.projectId}/environments/hidden/`}
+            >
+              {t('Hidden')}
+            </TabList.Item>
+          </TabList>
+        </Tabs>
+      </TabsContainer>
+      <ProjectPermissionAlert project={project} />
+      <Flex paddingBottom="xl">
+        <Container width="100%">
+          {containerProps => (
+            <SearchBar
+              {...containerProps}
+              aria-label={t('Search environments')}
+              placeholder={t('Search environments')}
+              query={searchQuery}
+              onChange={handleSearch}
+            />
+          )}
+        </Container>
+      </Flex>
+
+      <SimpleTable
+        columns={ENVIRONMENT_COLUMNS}
+        header={
+          <SimpleTable.HeaderRow>
+            <SimpleTable.HeaderCell
+              sort={sort === 'name' ? direction : undefined}
+              handleSortClick={() => handleSort('name')}
+            >
+              {isHidden ? t('Hidden') : t('Active Environments')}
+            </SimpleTable.HeaderCell>
+            <SimpleTable.HeaderCell
+              sort={sort === 'events' ? direction : undefined}
+              handleSortClick={() => handleSort('events')}
+            >
+              <InfoText
+                title={t('Count of all error events from the last 30 days')}
+                variant="muted"
+              >
+                {t('Recent Error Events')}
+              </InfoText>
+            </SimpleTable.HeaderCell>
+            <SimpleTable.HeaderCell>{t('Action')}</SimpleTable.HeaderCell>
+          </SimpleTable.HeaderRow>
+        }
+      >
+        {isPending ? (
+          <EnvironmentTableSkeleton isHidden={isHidden} />
+        ) : isError ? (
+          <SimpleTable.Error onRetry={refetch} />
+        ) : visibleEnvironments.length ? (
+          <Fragment>
+            {currentPage === 1 && !isHidden && !deferredSearchQuery && (
+              <EnvironmentRow name={t('All Environments')} eventCount={eventCountAll} />
+            )}
+            {paginatedEnvironments.map(env => (
+              <EnvironmentRow
+                key={env.id}
+                name={env.name}
+                eventCount={eventCountsByEnvironment[env.name]}
+              >
+                <Button
+                  size="xs"
+                  disabled={!hasWriteAccess}
+                  onClick={() =>
+                    toggleEnvironment.mutate({
+                      environment: env,
+                      shouldHide: !isHidden,
+                    })
+                  }
+                >
+                  {isHidden ? t('Show') : t('Hide')}
+                </Button>
+              </EnvironmentRow>
+            ))}
+          </Fragment>
+        ) : (
+          <SimpleTable.Empty>
+            {deferredSearchQuery
+              ? t('No environments match your search.')
+              : isHidden
+                ? t("You don't have any hidden environments.")
+                : t("You don't have any environments yet.")}
+          </SimpleTable.Empty>
+        )}
+      </SimpleTable>
+      {environmentCount > ENVIRONMENTS_PER_PAGE && (
+        <Flex justify="end" align="center" gap="xl" margin="2xl 0 0 0">
+          <Text variant="muted">
+            {tct('[start]-[end] of [total]', {
+              start: (pageStart + 1).toLocaleString(),
+              end: Math.min(
+                pageStart + ENVIRONMENTS_PER_PAGE,
+                environmentCount
+              ).toLocaleString(),
+              total: environmentCount.toLocaleString(),
+            })}
+          </Text>
+          <ButtonBar>
+            <Button
+              icon={<IconChevron direction="left" />}
+              aria-label={t('Previous')}
+              size="sm"
+              disabled={currentPage === 1}
+              onClick={() => changePage(-1)}
+            />
+            <Button
+              icon={<IconChevron direction="right" />}
+              aria-label={t('Next')}
+              size="sm"
+              disabled={currentPage >= lastPage}
+              onClick={() => changePage(1)}
+            />
+          </ButtonBar>
+        </Flex>
+      )}
+    </div>
+  );
+}
+
+const TabsContainer = styled('div')`
+  margin-bottom: ${p => p.theme.space.xl};
+`;

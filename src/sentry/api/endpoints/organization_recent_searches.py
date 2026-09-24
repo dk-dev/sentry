@@ -1,7 +1,11 @@
 from django.utils import timezone
 from rest_framework import serializers
+from rest_framework.request import Request
 from rest_framework.response import Response
 
+from sentry.api.api_owners import ApiOwner
+from sentry.api.api_publish_status import ApiPublishStatus
+from sentry.api.base import cell_silo_endpoint
 from sentry.api.bases.organization import OrganizationEndpoint, OrganizationPermission
 from sentry.api.serializers import serialize
 from sentry.models.recentsearch import RecentSearch, remove_excess_recent_searches
@@ -20,10 +24,16 @@ class OrganizationRecentSearchPermission(OrganizationPermission):
     }
 
 
+@cell_silo_endpoint
 class OrganizationRecentSearchesEndpoint(OrganizationEndpoint):
+    owner = ApiOwner.UNOWNED
+    publish_status = {
+        "GET": ApiPublishStatus.PRIVATE,
+        "POST": ApiPublishStatus.PRIVATE,
+    }
     permission_classes = (OrganizationRecentSearchPermission,)
 
-    def get(self, request, organization):
+    def get(self, request: Request, organization) -> Response:
         """
         List recent searches for a User within an Organization
         ``````````````````````````````````````````````````````
@@ -42,7 +52,11 @@ class OrganizationRecentSearchesEndpoint(OrganizationEndpoint):
         except ValueError as e:
             return Response({"detail": "Invalid input for `limit`. Error: %s" % str(e)}, status=400)
 
-        query_kwargs = {"organization": organization, "user": request.user, "type": search_type}
+        query_kwargs = {
+            "organization": organization,
+            "user_id": request.user.id,
+            "type": search_type,
+        }
 
         if "query" in request.GET:
             query_kwargs["query__icontains"] = request.GET["query"]
@@ -53,19 +67,19 @@ class OrganizationRecentSearchesEndpoint(OrganizationEndpoint):
 
         return Response(serialize(recent_searches, request.user))
 
-    def post(self, request, organization):
+    def post(self, request: Request, organization) -> Response:
         serializer = RecentSearchSerializer(data=request.data)
 
         if serializer.is_valid():
             result = serializer.validated_data
 
-            created = RecentSearch.objects.create_or_update(
-                organization=organization,
-                user=request.user,
+            _, created = RecentSearch.objects.update_or_create(
+                organization_id=organization.id,
+                user_id=request.user.id,
                 type=result["type"],
                 query=result["query"],
-                values={"last_seen": timezone.now()},
-            )[1]
+                defaults={"last_seen": timezone.now()},
+            )
             if created:
                 remove_excess_recent_searches(organization, request.user, result["type"])
             status = 201 if created else 204

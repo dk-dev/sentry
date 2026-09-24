@@ -1,264 +1,240 @@
-import React from 'react';
-import {RouteComponentProps} from 'react-router';
-import styled from '@emotion/styled';
+import {Fragment} from 'react';
+import {useQuery, keepPreviousData} from '@tanstack/react-query';
+import {parseAsString, useQueryState} from 'nuqs';
+import {z} from 'zod';
 
-import Pagination from 'app/components/pagination';
-import {Panel, PanelBody, PanelHeader} from 'app/components/panels';
-import {fields} from 'app/data/forms/accountNotificationSettings';
-import {t} from 'app/locale';
-import {Organization, Project, UserEmail} from 'app/types';
-import withOrganizations from 'app/utils/withOrganizations';
-import AsyncView from 'app/views/asyncView';
-import {
-  ACCOUNT_NOTIFICATION_FIELDS,
-  FineTuneField,
-} from 'app/views/settings/account/notifications/fields';
-import EmptyMessage from 'app/views/settings/components/emptyMessage';
-import Form from 'app/views/settings/components/forms/form';
-import JsonForm from 'app/views/settings/components/forms/jsonForm';
-import SelectField from 'app/views/settings/components/forms/selectField';
-import SettingsPageHeader from 'app/views/settings/components/settingsPageHeader';
-import TextBlock from 'app/views/settings/components/text/textBlock';
+import {AutoSaveForm} from '@sentry/scraps/form';
+import {Flex, Stack} from '@sentry/scraps/layout';
+import {Pagination} from '@sentry/scraps/pagination';
 
-const PanelBodyLineItem = styled(PanelBody)`
-  font-size: 1.4rem;
-  &:not(:last-child) {
-    border-bottom: 1px solid ${p => p.theme.innerBorder};
-  }
-`;
+import {EmptyMessage} from 'sentry/components/emptyMessage';
+import {EmptyStateWarning} from 'sentry/components/emptyStateWarning';
+import ProjectBadge from 'sentry/components/idBadge/projectBadge';
+import {LoadingError} from 'sentry/components/loadingError';
+import {LoadingIndicator} from 'sentry/components/loadingIndicator';
+import {Panel} from 'sentry/components/panels/panel';
+import {PanelHeader} from 'sentry/components/panels/panelHeader';
+import {SearchBar} from 'sentry/components/searchBar';
+import {t} from 'sentry/locale';
+import {ConfigStore} from 'sentry/stores/configStore';
+import {OrganizationsStore} from 'sentry/stores/organizationsStore';
+import {useLegacyStore} from 'sentry/stores/useLegacyStore';
+import type {Project} from 'sentry/types/project';
+import type {UserEmail} from 'sentry/types/user';
+import {apiOptions, selectJsonWithHeaders} from 'sentry/utils/api/apiOptions';
+import {getApiUrl} from 'sentry/utils/api/getApiUrl';
+import {fetchMutation, useApiQuery} from 'sentry/utils/queryClient';
+import {ACCOUNT_NOTIFICATION_FIELDS} from 'sentry/views/settings/account/notifications/fields';
+import {OrganizationSelectHeader} from 'sentry/views/settings/account/notifications/organizationSelectHeader';
+import {groupByOrganization} from 'sentry/views/settings/account/notifications/utils';
+import {SettingsPageHeader} from 'sentry/views/settings/components/settingsPageHeader';
+import {TextBlock} from 'sentry/views/settings/components/text/textBlock';
 
-// Which fine tuning parts are grouped by project
-const isGroupedByProject = (type: string) =>
-  ['alerts', 'workflow', 'email'].indexOf(type) > -1;
-
-function groupByOrganization(projects: Project[]) {
-  return projects.reduce<
-    Record<string, {organization: Organization; projects: Project[]}>
-  >((acc, project) => {
-    const orgSlug = project.organization.slug;
-    if (acc.hasOwnProperty(orgSlug)) {
-      acc[orgSlug].projects.push(project);
-    } else {
-      acc[orgSlug] = {
-        organization: project.organization,
-        projects: [project],
-      };
-    }
-    return acc;
-  }, {});
-}
+type EmailSelectOption = {label: string; value: string};
 
 type ANBPProps = {
+  emailChoices: EmailSelectOption[];
+  emailsByProject: Record<string, any>;
   projects: Project[];
-  field: FineTuneField;
+  refetchEmailsByProject: () => void;
 };
 
-const AccountNotificationsByProject = ({projects, field}: ANBPProps) => {
+function AccountNotificationsByProject({
+  projects,
+  emailChoices,
+  emailsByProject,
+  refetchEmailsByProject,
+}: ANBPProps) {
   const projectsByOrg = groupByOrganization(projects);
 
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  const {title, description, ...fieldConfig} = field;
-
-  // Display as select box in this view regardless of the type specified in the config
-  const data = Object.values(projectsByOrg).map(org => ({
-    name: org.organization.name,
-    projects: org.projects.map(project => ({
-      ...fieldConfig,
-      // `name` key refers to field name
-      // we use project.id because slugs are not unique across orgs
-      name: project.id,
-      label: project.slug,
-    })),
-  }));
-
   return (
-    <React.Fragment>
-      {data.map(({name, projects: projectFields}) => (
-        <div key={name}>
-          <PanelHeader>{name}</PanelHeader>
-          {projectFields.map(f => (
-            <PanelBodyLineItem key={f.name}>
-              <SelectField
-                defaultValue={f.defaultValue}
-                name={f.name}
-                choices={f.choices}
-                label={f.label}
-              />
-            </PanelBodyLineItem>
-          ))}
-        </div>
-      ))}
-    </React.Fragment>
+    <Fragment>
+      {Object.values(projectsByOrg).map(orgProjects =>
+        orgProjects.map((project, i) => {
+          const schema = z.object({[project.id]: z.string()});
+          return (
+            <Fragment key={project.id}>
+              {i === 0 ? null : <Stack.Separator />}
+              <AutoSaveForm
+                name={project.id}
+                schema={schema}
+                initialValue={emailsByProject?.[project.id] ?? ''}
+                mutationOptions={{
+                  mutationFn: (data: Record<string, string>) =>
+                    fetchMutation({
+                      method: 'PUT',
+                      url: getApiUrl('/users/$userId/notifications/email/', {
+                        path: {userId: 'me'},
+                      }),
+                      data,
+                    }),
+                  onSuccess: () => refetchEmailsByProject(),
+                }}
+              >
+                {field => (
+                  <field.Layout.Row
+                    padding="xl"
+                    label={
+                      <ProjectBadge
+                        project={project}
+                        avatarSize={20}
+                        avatarProps={{consistentWidth: true}}
+                        disableLink
+                      />
+                    }
+                  >
+                    <field.Select
+                      value={field.state.value}
+                      onChange={field.handleChange}
+                      options={emailChoices}
+                    />
+                  </field.Layout.Row>
+                )}
+              </AutoSaveForm>
+            </Fragment>
+          );
+        })
+      )}
+    </Fragment>
   );
-};
-
-type ANBOProps = {
-  organizations: Organization[];
-  field: FineTuneField;
-};
-
-const AccountNotificationsByOrganization = ({organizations, field}: ANBOProps) => {
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  const {title, description, ...fieldConfig} = field;
-
-  // Display as select box in this view regardless of the type specified in the config
-  const data = organizations.map(org => ({
-    ...fieldConfig,
-    // `name` key refers to field name
-    // we use org.id to remain consistent project.id use (which is required because slugs are not unique across orgs)
-    name: org.id,
-    label: org.slug,
-  }));
-
-  return (
-    <React.Fragment>
-      {data.map(f => (
-        <PanelBodyLineItem key={f.name}>
-          <SelectField
-            defaultValue={f.defaultValue}
-            name={f.name}
-            choices={f.choices}
-            label={f.label}
-          />
-        </PanelBodyLineItem>
-      ))}
-    </React.Fragment>
-  );
-};
-
-const AccountNotificationsByOrganizationContainer = withOrganizations(
-  AccountNotificationsByOrganization
-);
-
-type Props = AsyncView['props'] & RouteComponentProps<{fineTuneType: string}, {}>;
-
-type State = AsyncView['state'] & {
-  emails: UserEmail[] | null;
-  projects: Project[] | null;
-  notifications: Record<string, any> | null;
-  fineTuneData: Record<string, any> | null;
-};
-
-export default class AccountNotificationFineTuning extends AsyncView<Props, State> {
-  getEndpoints(): ReturnType<AsyncView['getEndpoints']> {
-    const {fineTuneType} = this.props.params;
-    const endpoints = [
-      ['notifications', '/users/me/notifications/'],
-      ['fineTuneData', `/users/me/notifications/${fineTuneType}/`],
-    ];
-
-    if (isGroupedByProject(fineTuneType)) {
-      endpoints.push(['projects', '/projects/']);
-    }
-
-    endpoints.push(['emails', '/users/me/emails/']);
-    if (fineTuneType === 'email') {
-      endpoints.push(['emails', '/users/me/emails/']);
-    }
-
-    return endpoints as ReturnType<AsyncView['getEndpoints']>;
-  }
-
-  // Return a sorted list of user's verified emails
-  get emailChoices() {
-    return (
-      this.state.emails
-        ?.filter(({isVerified}) => isVerified)
-        ?.sort((a, b) => {
-          // Sort by primary -> email
-          if (a.isPrimary) {
-            return -1;
-          } else if (b.isPrimary) {
-            return 1;
-          }
-
-          return a.email < b.email ? -1 : 1;
-        }) ?? []
-    );
-  }
-
-  renderBody() {
-    const {fineTuneType} = this.props.params;
-    const {notifications, projects, fineTuneData, projectsPageLinks} = this.state;
-
-    const isProject = isGroupedByProject(fineTuneType);
-    const field = ACCOUNT_NOTIFICATION_FIELDS[fineTuneType];
-    const {title, description} = field;
-
-    const [stateKey, url] = isProject ? this.getEndpoints()[2] : [];
-    const hasProjects = !!projects?.length;
-
-    if (fineTuneType === 'email') {
-      // Fetch verified email addresses
-      field.choices = this.emailChoices.map(({email}) => [email, email]);
-    }
-
-    if (!notifications || !fineTuneData) {
-      return null;
-    }
-
-    return (
-      <div>
-        <SettingsPageHeader title={title} />
-        {description && <TextBlock>{description}</TextBlock>}
-
-        {field &&
-          field.defaultFieldName &&
-          // not implemented yet
-          field.defaultFieldName !== 'weeklyReports' && (
-            <Form
-              saveOnBlur
-              apiMethod="PUT"
-              apiEndpoint="/users/me/notifications/"
-              initialData={notifications}
-            >
-              <JsonForm
-                title={`Default ${title}`}
-                fields={[fields[field.defaultFieldName]]}
-              />
-            </Form>
-          )}
-        <Panel>
-          <PanelBody>
-            <PanelHeader hasButtons={isProject}>
-              <Heading>{isProject ? t('Projects') : t('Organizations')}</Heading>
-              <div>
-                {isProject &&
-                  this.renderSearchInput({
-                    placeholder: t('Search Projects'),
-                    url,
-                    stateKey,
-                  })}
-              </div>
-            </PanelHeader>
-
-            <Form
-              saveOnBlur
-              apiMethod="PUT"
-              apiEndpoint={`/users/me/notifications/${fineTuneType}/`}
-              initialData={fineTuneData}
-            >
-              {isProject && hasProjects && (
-                <AccountNotificationsByProject projects={projects!} field={field} />
-              )}
-
-              {isProject && !hasProjects && (
-                <EmptyMessage>{t('No projects found')}</EmptyMessage>
-              )}
-
-              {!isProject && (
-                <AccountNotificationsByOrganizationContainer field={field} />
-              )}
-            </Form>
-          </PanelBody>
-        </Panel>
-
-        {projects && <Pagination pageLinks={projectsPageLinks} {...this.props} />}
-      </div>
-    );
-  }
 }
 
-const Heading = styled('div')`
-  flex: 1;
-`;
+export function AccountNotificationFineTuning() {
+  const {organizations} = useLegacyStore(OrganizationsStore);
+  const config = useLegacyStore(ConfigStore);
+
+  const [orgIdParam, setOrgId] = useQueryState('organizationId', parseAsString);
+  const [cursor] = useQueryState('cursor', parseAsString);
+  const [query, setQuery] = useQueryState('query', parseAsString);
+
+  // Get org id from:
+  // - query param
+  // - subdomain
+  // - default to first org
+  const organizationId =
+    orgIdParam ??
+    organizations.find(({slug}) => slug === config?.customerDomain?.subdomain)?.id ??
+    (organizations.length === 1 ? organizations[0]?.id : undefined);
+
+  const {
+    data: projectsResp,
+    isPending: isPendingProjects,
+    isError: isErrorProjects,
+  } = useQuery({
+    ...apiOptions.as<Project[]>()('/projects/', {
+      query: {
+        organizationId,
+        cursor,
+        query,
+      },
+      staleTime: 0,
+    }),
+    enabled: Boolean(organizationId),
+    select: selectJsonWithHeaders,
+  });
+  const projects = projectsResp?.json;
+
+  const {
+    data: emails = [],
+    isPending: isPendingEmails,
+    isError: isErrorEmails,
+  } = useApiQuery<UserEmail[]>(
+    [getApiUrl('/users/$userId/emails/', {path: {userId: 'me'}})],
+    {
+      staleTime: 0,
+    }
+  );
+  const {
+    data: emailsByProject,
+    isPending: isPendingEmailsByProject,
+    isError: isErrorEmailsByProject,
+    refetch: refetchEmailsByProject,
+  } = useApiQuery<Record<string, any>>(
+    [getApiUrl('/users/$userId/notifications/email/', {path: {userId: 'me'}})],
+    {
+      staleTime: 0,
+      placeholderData: keepPreviousData,
+    }
+  );
+
+  const field = ACCOUNT_NOTIFICATION_FIELDS.email!;
+  const isPending = isPendingProjects || isPendingEmailsByProject || isPendingEmails;
+  const isError = isErrorProjects || isErrorEmails || isErrorEmailsByProject;
+
+  // Verified email addresses
+  const emailChoices: EmailSelectOption[] = emails
+    .filter(({isVerified}) => isVerified)
+    .sort((a, b) => {
+      if (a.isPrimary) {
+        return -1;
+      }
+      if (b.isPrimary) {
+        return 1;
+      }
+      return a.email < b.email ? -1 : 1;
+    })
+    .map(({email}) => ({value: email, label: email}));
+
+  if (isError) {
+    return <LoadingError />;
+  }
+
+  if (!emailsByProject && !isPending) {
+    return null;
+  }
+
+  const hasProjects = !!projects?.length;
+  const mainContent = isPending ? (
+    <LoadingIndicator />
+  ) : (
+    <Fragment>
+      {hasProjects ? (
+        <AccountNotificationsByProject
+          projects={projects}
+          emailChoices={emailChoices}
+          emailsByProject={emailsByProject}
+          refetchEmailsByProject={refetchEmailsByProject}
+        />
+      ) : (
+        <EmptyMessage>{t('No projects found')}</EmptyMessage>
+      )}
+    </Fragment>
+  );
+
+  return (
+    <div>
+      <SettingsPageHeader title={field.title} />
+      {field.description && <TextBlock>{field.description}</TextBlock>}
+      <Panel>
+        <PanelHeader hasButtons>
+          <Flex wrap="wrap" gap="md" flex="1" align="center">
+            <OrganizationSelectHeader
+              organizations={organizations}
+              organizationId={organizationId}
+              handleOrgChange={(newOrgId: string) => {
+                void setOrgId(newOrgId);
+              }}
+            />
+            <SearchBar
+              placeholder={t('Search Projects')}
+              query={query ?? undefined}
+              onSearch={value => {
+                void setQuery(value || null);
+              }}
+            />
+          </Flex>
+        </PanelHeader>
+        <Stack>
+          {organizationId ? (
+            mainContent
+          ) : (
+            <EmptyStateWarning withIcon={false}>
+              {t('Select an organization to continue')}
+            </EmptyStateWarning>
+          )}
+        </Stack>
+      </Panel>
+      {projects && <Pagination pageLinks={projectsResp?.headers.Link} />}
+    </div>
+  );
+}

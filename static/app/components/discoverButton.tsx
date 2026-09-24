@@ -1,27 +1,30 @@
-import React from 'react';
+import type {LinkButtonProps} from '@sentry/scraps/button';
+import {LinkButton} from '@sentry/scraps/button';
 
-import Button from 'app/components/button';
-import DiscoverFeature from 'app/components/discover/discoverFeature';
-
-type Props = React.PropsWithChildren<{
-  className?: string;
-}> &
-  React.ComponentProps<typeof Button>;
+import {DiscoverFeature} from 'sentry/components/discover/discoverFeature';
+import {t} from 'sentry/locale';
+import {useOrganization} from 'sentry/utils/useOrganization';
+import {getDiscoverDeprecation} from 'sentry/views/discover/utils';
 
 /**
  * Provide a button that turns itself off if the current organization
  * doesn't have access to discover results.
  */
-function DiscoverButton({children, ...buttonProps}: Props) {
+export function DiscoverButton(buttonProps: LinkButtonProps) {
+  const organization = useOrganization();
   return (
     <DiscoverFeature>
       {({hasFeature}) => (
-        <Button disabled={!hasFeature} {...buttonProps}>
-          {children}
-        </Button>
+        <LinkButton
+          disabled={!hasFeature}
+          aria-label={
+            getDiscoverDeprecation(organization)
+              ? t('Open in Explore')
+              : t('Open in Discover')
+          }
+          {...buttonProps}
+        />
       )}
     </DiscoverFeature>
   );
 }
-
-export default DiscoverButton;

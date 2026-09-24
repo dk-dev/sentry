@@ -1,9 +1,10 @@
-import React from 'react';
 import styled from '@emotion/styled';
 import classNames from 'classnames';
 
-import ActionButton from './button';
-import ConfirmableAction from './confirmableAction';
+import type {ButtonProps} from '@sentry/scraps/button';
+import {Button} from '@sentry/scraps/button';
+
+import {ConfirmableAction} from './confirmableAction';
 
 const StyledAction = styled('a')<{disabled?: boolean}>`
   display: flex;
@@ -11,10 +12,15 @@ const StyledAction = styled('a')<{disabled?: boolean}>`
   ${p => p.disabled && 'cursor: not-allowed;'}
 `;
 
-const StyledActionButton = styled(ActionButton)`
+const StyledButton = styled(Button)<{
+  disabled?: boolean;
+  hasDropdown?: boolean;
+}>`
   display: flex;
   align-items: center;
+
   ${p => p.disabled && 'cursor: not-allowed;'}
+  ${p => p.hasDropdown && `border-radius: ${p.theme.radius.md} 0 0 ${p.theme.radius.md}`};
 `;
 
 type ConfirmableActionProps = React.ComponentProps<typeof ConfirmableAction>;
@@ -23,36 +29,29 @@ type CommonProps = Omit<
   ConfirmableActionProps,
   'onConfirm' | 'confirmText' | 'children' | 'stopPropagation' | 'priority'
 > & {
-  title: string;
-  onAction?: () => void;
-  children?: React.ReactNode;
-  disabled?: boolean;
+  children: React.ReactNode;
   className?: string;
+  disabled?: boolean;
+  onAction?: () => void;
   shouldConfirm?: boolean;
-  confirmPriority?: ConfirmableActionProps['priority'];
-  confirmLabel?: string;
+  title?: string;
 };
 
 type Props = CommonProps &
-  ({type?: 'button'} & Partial<
-    Omit<React.ComponentProps<typeof StyledActionButton>, 'as'>
-  >);
+  ({type?: 'button'} & Partial<Omit<ButtonProps, 'as' | 'children' | 'ref'>>);
 
-export default function ActionLink({
+export function ActionLink({
   message,
   className,
-  title,
   onAction,
   type,
-  confirmLabel,
   disabled,
   children,
   shouldConfirm,
-  confirmPriority,
+  header,
   ...props
 }: Props) {
   const actionCommonProps = {
-    ['aria-label']: title,
     className: classNames(className, {disabled}),
     onClick: disabled ? undefined : onAction,
     disabled,
@@ -62,19 +61,20 @@ export default function ActionLink({
 
   const action =
     type === 'button' ? (
-      <StyledActionButton {...actionCommonProps} />
+      <StyledButton size="xs" {...actionCommonProps} />
     ) : (
-      <StyledAction {...actionCommonProps} />
+      <StyledAction
+        {...(actionCommonProps as React.ComponentProps<typeof StyledAction>)}
+      />
     );
 
   if (shouldConfirm && onAction) {
     return (
       <ConfirmableAction
         shouldConfirm={shouldConfirm}
-        priority={confirmPriority}
         disabled={disabled}
         message={message}
-        confirmText={confirmLabel}
+        header={header}
         onConfirm={onAction}
         stopPropagation={disabled}
       >

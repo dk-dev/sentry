@@ -1,53 +1,61 @@
-import React from 'react';
-import styled from '@emotion/styled';
 import orderBy from 'lodash/orderBy';
 
-import space from 'app/styles/space';
-import {Relay, RelayActivity} from 'app/types';
+import {Stack} from '@sentry/scraps/layout';
 
-import ActivityList from './activityList';
-import CardHeader from './cardHeader';
+import type {Relay, RelayActivity} from 'sentry/types/relay';
+
+import {ActivityList} from './activityList';
+import {CardHeader} from './cardHeader';
 import {getRelaysByPublicKey} from './utils';
-import WaitingActivity from './waitingActivity';
+import {WaitingActivity} from './waitingActivity';
 
 type CardHeaderProps = React.ComponentProps<typeof CardHeader>;
 type WaitingActivityProps = React.ComponentProps<typeof WaitingActivity>;
 
 type Props = {
-  relays: Array<Relay>;
-  relayActivities: Array<RelayActivity>;
   disabled: boolean;
+  relayActivities: RelayActivity[];
+  relays: Relay[];
+  registerKeyAction?: React.ReactNode;
 } & Pick<CardHeaderProps, 'onDelete' | 'onEdit'> &
   Pick<WaitingActivityProps, 'onRefresh'>;
 
-const List = ({
+function RelayCardContent({
+  activities,
+  disabled,
+  onRefresh,
+}: {
+  activities: RelayActivity[];
+  disabled: boolean;
+  onRefresh: WaitingActivityProps['onRefresh'];
+}) {
+  if (!activities.length) {
+    return <WaitingActivity onRefresh={onRefresh} disabled={disabled} />;
+  }
+
+  return <ActivityList activities={activities} />;
+}
+
+export function List({
   relays,
   relayActivities,
   onRefresh,
   onDelete,
   onEdit,
   disabled,
-}: Props) => {
+  registerKeyAction,
+}: Props) {
   const orderedRelays = orderBy(relays, relay => relay.created, ['desc']);
 
   const relaysByPublicKey = getRelaysByPublicKey(orderedRelays, relayActivities);
 
-  const renderCardContent = (activities: Array<RelayActivity>) => {
-    if (!activities.length) {
-      return <WaitingActivity onRefresh={onRefresh} disabled={disabled} />;
-    }
-
-    return <ActivityList activities={activities} />;
-  };
-
   return (
-    <Wrapper>
+    <Stack gap="xl">
       {Object.keys(relaysByPublicKey).map(relayByPublicKey => {
-        const {name, description, created, activities} = relaysByPublicKey[
-          relayByPublicKey
-        ];
+        const {name, description, created, activities} =
+          relaysByPublicKey[relayByPublicKey]!;
         return (
-          <Card key={relayByPublicKey}>
+          <Stack key={relayByPublicKey} gap="md">
             <CardHeader
               publicKey={relayByPublicKey}
               name={name}
@@ -56,23 +64,20 @@ const List = ({
               onEdit={onEdit}
               onDelete={onDelete}
               disabled={disabled}
+              extraAction={
+                relayByPublicKey === orderedRelays[0]?.publicKey
+                  ? registerKeyAction
+                  : undefined
+              }
             />
-            {renderCardContent(activities)}
-          </Card>
+            <RelayCardContent
+              activities={activities}
+              disabled={disabled}
+              onRefresh={onRefresh}
+            />
+          </Stack>
         );
       })}
-    </Wrapper>
+    </Stack>
   );
-};
-
-export default List;
-
-const Wrapper = styled('div')`
-  display: grid;
-  grid-gap: ${space(3)};
-`;
-
-const Card = styled('div')`
-  display: grid;
-  grid-gap: ${space(1)};
-`;
+}

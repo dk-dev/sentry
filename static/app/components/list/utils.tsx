@@ -1,67 +1,54 @@
+import type {Theme} from '@emotion/react';
 import {css} from '@emotion/react';
 
-import space from 'app/styles/space';
-import {Theme} from 'app/utils/theme';
-
-const commonSymbolStyle = css`
-  & > li {
-    padding-left: ${space(4)};
-    :before {
-      border-radius: 50%;
-      position: absolute;
-    }
-  }
-`;
-
 const bulletStyle = (theme: Theme) => css`
-  ${commonSymbolStyle}
-  & > li:before {
-    content: '';
-    width: 6px;
-    height: 6px;
-    left: 5px;
-    top: 10px;
-    border: 1px solid ${theme.subText};
+  padding-left: ${theme.space['2xl']};
+  list-style-type: circle;
+  & > li::marker {
+    color: ${theme.tokens.content.secondary};
   }
 `;
 
 type Options = {
   isSolid?: boolean;
-  //setting initialCounterValue to 0 means the first visible step is 1
-  initialCounterValue?: number;
 };
 
-const numericStyle = (
-  theme: Theme,
-  {isSolid = false, initialCounterValue = 0}: Options
-) => css`
-  ${commonSymbolStyle}
-  & > li:before {
-    counter-increment: numberedList;
-    content: counter(numberedList);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    text-align: center;
-    left: 0;
-    ${isSolid
-      ? css`
-          width: 24px;
-          height: 24px;
-          font-weight: 500;
-          font-size: ${theme.fontSizeSmall};
-          background-color: ${theme.yellow300};
-        `
-      : css`
-          top: 3px;
-          width: 18px;
-          height: 18px;
-          font-weight: 600;
-          font-size: 10px;
-          border: 1px solid ${theme.gray500};
-        `}
+const numericStyle = (theme: Theme, {isSolid = false}: Options) => css`
+  & > li {
+    padding-left: ${theme.space['3xl']};
+    :before {
+      border-radius: 50%;
+      position: absolute;
+      counter-increment: numberedList;
+      content: counter(numberedList);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      text-align: center;
+      left: 0;
+      line-height: 1;
+      ${
+        isSolid
+          ? css`
+              width: 24px;
+              height: 24px;
+              font-weight: ${theme.font.weight.sans.regular};
+              font-size: ${theme.font.size.sm};
+              background-color: ${theme.tokens.background.warning.vibrant};
+              color: ${theme.tokens.content.onVibrant.dark};
+            `
+          : css`
+              top: 3px;
+              width: 18px;
+              height: 18px;
+              font-weight: ${theme.font.weight.sans.medium};
+              font-size: 10px;
+              border: 1px solid ${theme.tokens.border.primary};
+            `
+      }
+    }
   }
-  counter-reset: numberedList ${initialCounterValue};
+  counter-reset: numberedList 0;
 `;
 
 export const listSymbol = {
@@ -70,16 +57,12 @@ export const listSymbol = {
   bullet: 'bullet',
 };
 
-export function getListSymbolStyle(
-  theme: Theme,
-  symbol: keyof typeof listSymbol,
-  initialCounterValue?: number
-) {
+export function getListSymbolStyle(theme: Theme, symbol: keyof typeof listSymbol) {
   switch (symbol) {
     case 'numeric':
-      return numericStyle(theme, {initialCounterValue});
+      return numericStyle(theme, {});
     case 'colored-numeric':
-      return numericStyle(theme, {isSolid: true, initialCounterValue});
+      return numericStyle(theme, {isSolid: true});
     default:
       return bulletStyle(theme);
   }

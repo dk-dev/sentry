@@ -1,30 +1,29 @@
 import functools
 import os.path
+import random
 from collections import namedtuple
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from random import randint
-from urllib.parse import quote
+from urllib.parse import quote, urlencode
 
 from django import template
 from django.template.defaultfilters import stringfilter
-from django.utils import timezone
-from django.utils.html import escape
+from django.utils import timezone as django_timezone
 from django.utils.safestring import mark_safe
-from django.utils.translation import ugettext as _
-from pkg_resources import parse_version as Version
+from django.utils.translation import gettext as _
+from packaging.version import parse as parse_version
 
 from sentry import options
 from sentry.api.serializers import serialize as serialize_func
 from sentry.utils import json
 from sentry.utils.strings import soft_break as _soft_break
-from sentry.utils.strings import soft_hyphenate, to_unicode, truncatechars
+from sentry.utils.strings import soft_hyphenate, truncatechars
 
 SentryVersion = namedtuple("SentryVersion", ["current", "latest", "update_available", "build"])
 
 register = template.Library()
 
-truncatechars = register.filter(stringfilter(truncatechars))
-truncatechars.is_safe = True
+truncatechars = register.filter(stringfilter(truncatechars), is_safe=True)
 
 
 @register.filter
@@ -100,6 +99,77 @@ def absolute_uri(parser, token):
 
 
 @register.simple_tag
+def org_url(organization, path, query=None, fragment=None) -> str:
+    """
+    Generate an absolute url for an organization
+    """
+    if not hasattr(organization, "absolute_url"):
+        raise RuntimeError("organization parameter is not an Organization instance")
+    return organization.absolute_url(path, query=query, fragment=fragment)
+
+
+LOADING_MESSAGES = [
+    "Loading a <scraps-bleep>$#!%</scraps-bleep>-ton of JavaScript&hellip;",
+    "Escaping <code>node_modules</code> gravity well&hellip;",
+    "Parallelizing webpack builders&hellip;",
+    "Awaiting solution to the halting problem&hellip;",
+    "Collapsing wavefunctions&hellip;",
+    "Reticulating splines&hellip;",
+    "Making it make sense&hellip;",
+    "Deploying swarm of autonomous agents&hellip;",
+    "Installing <code>left-pad</code>&hellip;",
+]
+
+PRIDE_LOADING_MESSAGES = [
+    "Exceptions belong in code; You belong here.",
+    "You&rsquo;re valid. Your code, however&hellip;",
+    "Making space for everyone&hellip;",
+    "Waving some flags while you wait&hellip;",
+]
+
+
+def _get_organization_from_context(context):
+    org_context = context.get("org_context")
+    if org_context is not None:
+        return getattr(org_context, "organization", None)
+    return None
+
+
+def _is_themed_loader(context) -> bool:
+    organization = _get_organization_from_context(context)
+    if organization is None:
+        return False
+    from sentry import features
+
+    return features.has("organizations:sentry-pride-logo-footer", organization)
+
+
+@register.simple_tag(takes_context=True)
+def loading_message(context):
+    options = list(LOADING_MESSAGES)
+    if _is_themed_loader(context):
+        options.extend(PRIDE_LOADING_MESSAGES)
+    return mark_safe(random.choice(options))
+
+
+@register.simple_tag(takes_context=True)
+def loader(context):
+    from django.template.loader import render_to_string
+
+    template_name = (
+        "sentry/partial/loader-pride.html"
+        if _is_themed_loader(context)
+        else "sentry/partial/loader.html"
+    )
+    return mark_safe(render_to_string(template_name, context.flatten()))
+
+
+@register.simple_tag
+def querystring(**kwargs):
+    return urlencode(kwargs, doseq=False)
+
+
+@register.simple_tag
 def system_origin():
     from sentry.utils.http import absolute_uri, origin_from_url
 
@@ -109,21 +179,6 @@ def system_origin():
 @register.simple_tag
 def security_contact():
     return options.get("system.security-email") or options.get("system.admin-email")
-
-
-@register.filter
-def pprint(value, break_after=10):
-    """
-    break_after is used to define how often a <span> is
-    inserted (for soft wrapping).
-    """
-
-    value = to_unicode(value)
-    return mark_safe(
-        "<span></span>".join(
-            [escape(value[i : (i + break_after)]) for i in range(0, len(value), break_after)]
-        )
-    )
 
 
 @register.filter
@@ -163,6 +218,36 @@ def small_count(v, precision=1):
 
 
 @register.filter
+def format_duration_ms(v):
+    """Format a duration in milliseconds to a human-readable string."""
+    try:
+        v = float(v)
+    except (TypeError, ValueError):
+        return "0ms"
+    if v < 1:
+        return "0ms"
+    if v < 1000:
+        return f"{v:.0f}ms"
+    seconds = v / 1000
+    if seconds < 60:
+        return f"{seconds:.1f}s"
+    minutes = seconds / 60
+    if minutes < 60:
+        return f"{minutes:.1f}min"
+    hours = minutes / 60
+    if hours < 24:
+        return f"{hours:.1f}hr"
+    days = hours / 24
+    if days < 30.44:
+        return f"{days:.1f}d"
+    months = days / 30.44
+    if days < 365.25:
+        return f"{months:.1f}mo"
+    years = days / 365.25
+    return f"{years:.1f}yr"
+
+
+@register.filter
 def as_tag_alias(v):
     return {"sentry:release": "release", "sentry:dist": "dist", "sentry:user": "user"}.get(v, v)
 
@@ -180,7 +265,7 @@ def get_sentry_version(context):
     current = sentry.VERSION
 
     latest = options.get("sentry:latest_version") or current
-    update_available = Version(latest) > Version(current)
+    update_available = parse_version(latest) > parse_version(current)
     build = sentry.__build__ or current
 
     context["sentry_version"] = SentryVersion(current, latest, update_available, build)
@@ -189,10 +274,10 @@ def get_sentry_version(context):
 
 @register.filter
 def timesince(value, now=None):
-    from django.template.defaultfilters import timesince
+    from django.utils.timesince import timesince
 
     if now is None:
-        now = timezone.now()
+        now = django_timezone.now()
     if not value:
         return _("never")
     if value < (now - timedelta(days=5)):
@@ -235,15 +320,23 @@ def duration(value):
 def date(dt, arg=None):
     from django.template.defaultfilters import date
 
-    if isinstance(dt, datetime) and not timezone.is_aware(dt):
+    if isinstance(dt, datetime) and not django_timezone.is_aware(dt):
         dt = dt.replace(tzinfo=timezone.utc)
     return date(dt, arg)
+
+
+@register.filter
+def day_initial(dt):
+    """Returns the single-letter day-of-week initial (M, T, W, T, F, S, S)."""
+    if isinstance(dt, datetime) and not django_timezone.is_aware(dt):
+        dt = dt.replace(tzinfo=timezone.utc)
+    return "MTWTFSS"[dt.weekday()]
 
 
 @register.simple_tag
 def percent(value, total, format=None):
     if not (value and total):
-        result = 0
+        result = 0.0
     else:
         result = int(value) / float(total) * 100
 
@@ -285,3 +378,20 @@ def random_int(a, b=None):
     if b is None:
         a, b = 0, a
     return randint(a, b)
+
+
+@register.filter
+def get_item(dictionary, key):
+    return dictionary.get(key, "")
+
+
+@register.filter
+@stringfilter
+def sanitize_periods(value):
+    """
+    Primarily used in email templates when a field may contain a domain name to prevent
+    email clients from creating a clickable link to the domain.
+    """
+    from sentry.utils.email.sanitize import sanitize_outbound_name
+
+    return sanitize_outbound_name(value)

@@ -1,49 +1,55 @@
-import React from 'react';
+import {css} from '@emotion/react';
 import styled from '@emotion/styled';
 
-import space from 'app/styles/space';
+import type {SpaceSize} from 'sentry/utils/theme';
 
-const defaultProps = {
-  shape: 'rect' as 'rect' | 'circle',
-  bottomGutter: 0 as Parameters<typeof space>[0],
-  width: '100%',
-  height: '60px',
-  testId: 'loading-placeholder',
-};
-
-type DefaultProps = Readonly<typeof defaultProps>;
-
-type Props = {
-  className?: string;
+export interface PlaceholderProps {
+  bottomGutter?: SpaceSize;
   children?: React.ReactNode;
+  className?: string;
   error?: React.ReactNode;
+  height?: string;
+  shape?: 'rect' | 'circle';
+  style?: React.CSSProperties;
   testId?: string;
-} & Partial<DefaultProps>;
+  width?: string;
+}
 
-const Placeholder = styled(({className, children, error, testId}: Props) => {
-  return (
-    <div data-test-id={testId} className={className}>
-      {error || children}
-    </div>
-  );
-})<Props>`
+export const Placeholder = styled(
+  ({
+    className,
+    children,
+    error,
+    testId = 'loading-placeholder',
+    style,
+  }: PlaceholderProps) => {
+    return (
+      <div data-test-id={testId} className={className} style={style}>
+        {error || children}
+      </div>
+    );
+  }
+)<PlaceholderProps>`
   display: flex;
   flex-direction: column;
   flex-shrink: 0;
   justify-content: center;
   align-items: center;
-
-  background-color: ${p => (p.error ? p.theme.red100 : p.theme.backgroundSecondary)};
-  ${p => p.error && `color: ${p.theme.red200};`}
-  width: ${p => p.width};
-  height: ${p => p.height};
-  ${p => (p.shape === 'circle' ? 'border-radius: 100%;' : '')}
+  border-radius: ${p => p.theme.radius.md};
+  background-color: ${p =>
+    p.error ? p.theme.colors.red100 : p.theme.tokens.background.tertiary};
   ${p =>
-    typeof p.bottomGutter === 'number' && p.bottomGutter > 0
-      ? `margin-bottom: ${space(p.bottomGutter)};`
+    !!p.error &&
+    css`
+      color: ${p.theme.colors.red200};
+    `}
+  width: ${p => p.width ?? '100%'};
+  height: ${p => p.height ?? '60px'};
+  ${({shape = 'rect'}) => (shape === 'circle' ? 'border-radius: 100%;' : '')}
+  ${({bottomGutter, theme}) =>
+    bottomGutter
+      ? css`
+          margin-bottom: ${theme.space[bottomGutter]};
+        `
       : ''}
 `;
-
-Placeholder.defaultProps = defaultProps;
-
-export default Placeholder;

@@ -1,35 +1,68 @@
-from django.http import HttpResponse
+from __future__ import annotations
 
-from sentry.integrations import (
+from collections.abc import Mapping
+from typing import Any
+
+from django.http.request import HttpRequest
+from rest_framework.fields import CharField
+
+from sentry.api.serializers.rest_framework.base import CamelSnakeSerializer
+from sentry.integrations.base import (
     FeatureDescription,
+    IntegrationData,
     IntegrationFeatures,
-    IntegrationInstallation,
     IntegrationMetadata,
     IntegrationProvider,
 )
-from sentry.integrations.issues import IssueSyncMixin
-from sentry.mediators.plugins import Migrator
-from sentry.models import User
-from sentry.pipeline import PipelineView
+from sentry.integrations.mixins import ResolveSyncAction
+from sentry.integrations.mixins.issues import IssueSyncIntegration
+from sentry.integrations.models.external_issue import ExternalIssue
+from sentry.integrations.models.integration import Integration
+from sentry.integrations.pipeline import IntegrationPipeline
+from sentry.integrations.services.repository.model import RpcRepository
+from sentry.integrations.source_code_management.issues import SourceCodeIssueIntegration
+from sentry.integrations.source_code_management.repository import (
+    RepositoryInfo,
+    RepositoryIntegration,
+)
+from sentry.models.repository import Repository
+from sentry.organizations.services.organization.model import RpcOrganization
+from sentry.pipeline.types import PipelineStepResult
+from sentry.pipeline.views.base import ApiPipelineSteps
 from sentry.shared_integrations.exceptions import IntegrationError
+from sentry.users.services.user import RpcUser
+from sentry.users.services.user.service import user_service
 
 
-class ExampleSetupView(PipelineView):
-    TEMPLATE = """
-        <form method="POST">
-            <p>This is an example integration configuration page.</p>
-            <p><label>Integration Name:</label></p>
-            <p><input type="name" name="name" /></p>
-            <p><input type="submit" value="Continue" /></p>
-        </form>
-    """
+class ExampleSetupSerializer(CamelSnakeSerializer):
+    """Validates the POST data submitted during the setup step. CamelSnakeSerializer
+    automatically converts between camelCase (frontend) and snake_case (backend)."""
 
-    def dispatch(self, request, pipeline):
-        if "name" in request.POST:
-            pipeline.bind_state("name", request.POST["name"])
-            return pipeline.next_step()
+    name = CharField(required=True)
 
-        return HttpResponse(self.TEMPLATE)
+
+class ExampleSetupApiStep:
+    """Example API pipeline step demonstrating the integration setup pattern. Each step
+    exposes initial data via get_step_data (GET) and accepts validated input via
+    handle_post (POST). The frontend renders the form and calls the pipeline API
+    endpoint."""
+
+    step_name = "setup"
+
+    def get_step_data(self, pipeline: IntegrationPipeline, request: HttpRequest) -> dict[str, Any]:
+        return {}
+
+    def get_serializer_cls(self) -> type:
+        return ExampleSetupSerializer
+
+    def handle_post(
+        self,
+        validated_data: dict[str, str],
+        pipeline: IntegrationPipeline,
+        request: HttpRequest,
+    ) -> PipelineStepResult:
+        pipeline.bind_state("name", validated_data["name"])
+        return PipelineStepResult.advance()
 
 
 DESCRIPTION = """
@@ -47,35 +80,42 @@ metadata = IntegrationMetadata(
     features=FEATURES,
     author="The Sentry Team",
     noun="example",
-    issue_url="https://github.com/getsentry/sentry/issues/new?assignees=&labels=Component:%20Integrations&template=bug_report.md&title=Integration%20Problem",
+    issue_url="https://github.com/getsentry/sentry/issues/new?assignees=&labels=Component:%20Integrations&template=bug.yml&title=Integration%20Problem",
     source_url="https://github.com/getsentry/sentry",
     aspects={},
 )
 
 
-class ExampleIntegration(IntegrationInstallation, IssueSyncMixin):
+class ExampleIntegration(RepositoryIntegration, SourceCodeIssueIntegration, IssueSyncIntegration):
     comment_key = "sync_comments"
     outbound_status_key = "sync_status_outbound"
     inbound_status_key = "sync_status_inbound"
     outbound_assignee_key = "sync_assignee_outbound"
     inbound_assignee_key = "sync_assignee_inbound"
 
-    def get_issue_url(self, key):
+    @property
+    def integration_name(self) -> str:
+        return "example"
+
+    def get_client(self):
+        pass
+
+    def get_issue_url(self, key) -> str:
         return f"https://example/issues/{key}"
 
     def create_comment(self, issue_id, user_id, group_note):
-        user = User.objects.get(id=user_id)
-        attribution = "%s wrote:\n\n" % user.name
-        comment = {
+        user = user_service.get_user(user_id)
+        assert user is not None
+        attribution = f"{user.name} wrote:\n\n"
+        return {
             "id": "123456789",
             "text": "{}<blockquote>{}</blockquote>".format(attribution, group_note.data["text"]),
         }
-        return comment
 
-    def get_persisted_default_config_fields(self):
+    def get_persisted_default_config_fields(self) -> list[str]:
         return ["project", "issueType"]
 
-    def get_persisted_user_default_config_fields(self):
+    def get_persisted_user_default_config_fields(self) -> list[str]:
         return ["assignedTo", "reportedBy"]
 
     def get_create_issue_config(self, group, user, **kwargs):
@@ -121,32 +161,63 @@ class ExampleIntegration(IntegrationInstallation, IssueSyncMixin):
             "description": "This is a test external issue description",
         }
 
-    def get_repositories(self):
-        return [{"name": "repo", "identifier": "user/repo"}]
+    def get_repositories(
+        self,
+        query: str | None = None,
+        page_number_limit: int | None = None,
+        accessible_only: bool = False,
+        use_cache: bool = False,
+        raise_on_page_limit: bool = False,
+        parallel: bool = False,
+    ) -> list[RepositoryInfo]:
+        return [{"name": "repo", "identifier": "user/repo", "external_id": "1"}]
 
-    def get_unmigratable_repositories(self):
-        return []
-
-    def sync_assignee_outbound(self, external_issue, user, assign=True, **kwargs):
+    def sync_assignee_outbound(
+        self,
+        external_issue: ExternalIssue,
+        user: RpcUser | None,
+        assign: bool = True,
+        **kwargs: Any,
+    ) -> None:
         pass
 
-    def sync_status_outbound(self, external_issue, is_resolved, project_id):
+    def sync_status_outbound(
+        self, external_issue: ExternalIssue, is_resolved: bool, project_id: int
+    ) -> None:
         pass
 
-    def should_unresolve(self, data):
-        return data["status"]["category"] != "done"
+    def get_resolve_sync_action(self, data: Mapping[str, Any]) -> ResolveSyncAction:
+        category = data["status"]["category"]
+        return ResolveSyncAction.from_resolve_unresolve(
+            should_resolve=category == "done",
+            should_unresolve=category != "done",
+        )
 
-    def should_resolve(self, data):
-        return data["status"]["category"] == "done"
+    def get_issue_display_name(self, external_issue) -> str:
+        return f"display name: {external_issue.key}"
 
-    def get_issue_display_name(self, external_issue):
-        return "display name: %s" % external_issue.key
-
-    def get_stacktrace_link(self, repo, path, default, version):
+    def get_stacktrace_link(
+        self, repo: Repository, filepath: str, default: str, version: str | None
+    ) -> str | None:
         pass
 
-    def format_source_url(self, repo, filepath, branch):
+    def format_source_url(self, repo: Repository, filepath: str, branch: str | None) -> str:
         return f"https://example.com/{repo.name}/blob/{branch}/{filepath}"
+
+    def source_url_matches(self, url: str) -> bool:
+        return True
+
+    def extract_branch_from_source_url(self, repo: Repository, url: str) -> str:
+        return ""
+
+    def extract_source_path_from_source_url(self, repo: Repository, url: str) -> str:
+        return ""
+
+    def has_repo_access(self, repo: RpcRepository) -> bool:
+        return False
+
+    def search_issues(self, query: str | None, **kwargs):
+        return []
 
 
 class ExampleIntegrationProvider(IntegrationProvider):
@@ -168,17 +239,23 @@ class ExampleIntegrationProvider(IntegrationProvider):
         ]
     )
 
-    def get_pipeline_views(self):
-        return [ExampleSetupView()]
+    def get_pipeline_api_steps(self) -> ApiPipelineSteps[IntegrationPipeline]:
+        return [ExampleSetupApiStep()]
 
     def get_config(self):
         return [{"name": "name", "label": "Name", "type": "text", "required": True}]
 
-    def post_install(self, integration, organization, extra=None):
-        Migrator.run(integration=integration, organization=organization)
+    def post_install(
+        self,
+        integration: Integration,
+        organization: RpcOrganization,
+        *,
+        extra: dict[str, Any],
+    ) -> None:
+        pass
 
-    def build_integration(self, state):
-        return {"external_id": state["name"]}
+    def build_integration(self, state: Mapping[str, Any]) -> IntegrationData:
+        return {"external_id": state.get("name", "example")}
 
     def setup(self):
         """

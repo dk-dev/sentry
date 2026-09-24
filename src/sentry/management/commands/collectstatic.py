@@ -6,8 +6,6 @@ from operator import itemgetter
 from click import echo
 from django.contrib.staticfiles.management.commands.collectstatic import Command as BaseCommand
 
-from sentry.utils.compat import map, zip
-
 BUFFER_SIZE = 65536
 VERSION_PATH = "version"
 
@@ -26,7 +24,7 @@ def get_bundle_version(files):
     hasher = md5()
     for (short, _), sum in zip(files, map(checksum, files)):
         echo(f"{sum}  {short}")
-        hasher.update(f"{sum}  {short}\n".encode("utf-8"))
+        hasher.update(f"{sum}  {short}\n".encode())
     return hasher.hexdigest()
 
 

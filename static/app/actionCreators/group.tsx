@@ -1,183 +1,21 @@
-import * as Sentry from '@sentry/react';
-import isNil from 'lodash/isNil';
+import {queryOptions} from '@tanstack/react-query';
 
-import GroupActions from 'app/actions/groupActions';
-import {Client, RequestCallbacks, RequestOptions} from 'app/api';
-import GroupStore from 'app/stores/groupStore';
-import {Actor, Group, Member, Note, User} from 'app/types';
-import {buildTeamId, buildUserId} from 'app/utils';
-import {uniqueId} from 'app/utils/guid';
-
-type AssignToUserParams = {
-  /**
-   * Issue id
-   */
-  id: string;
-  user: User | Actor;
-  member?: Member;
-};
-
-export function assignToUser(params: AssignToUserParams) {
-  const api = new Client();
-
-  const endpoint = `/issues/${params.id}/`;
-
-  const id = uniqueId();
-
-  GroupActions.assignTo(id, params.id, {
-    email: (params.member && params.member.email) || '',
-  });
-
-  const request = api.requestPromise(endpoint, {
-    method: 'PUT',
-    // Sending an empty value to assignedTo is the same as "clear",
-    // so if no member exists, that implies that we want to clear the
-    // current assignee.
-    data: {
-      assignedTo: params.user ? buildUserId(params.user.id) : '',
-    },
-  });
-
-  request
-    .then(data => {
-      GroupActions.assignToSuccess(id, params.id, data);
-    })
-    .catch(data => {
-      GroupActions.assignToError(id, params.id, data);
-    });
-
-  return request;
-}
-
-export function clearAssignment(groupId: string) {
-  const api = new Client();
-
-  const endpoint = `/issues/${groupId}/`;
-
-  const id = uniqueId();
-
-  GroupActions.assignTo(id, groupId, {
-    email: '',
-  });
-
-  const request = api.requestPromise(endpoint, {
-    method: 'PUT',
-    // Sending an empty value to assignedTo is the same as "clear"
-    data: {
-      assignedTo: '',
-    },
-  });
-
-  request
-    .then(data => {
-      GroupActions.assignToSuccess(id, groupId, data);
-    })
-    .catch(data => {
-      GroupActions.assignToError(id, groupId, data);
-    });
-
-  return request;
-}
-
-type AssignToActorParams = {
-  /**
-   * Issue id
-   */
-  id: string;
-  actor: Pick<Actor, 'id' | 'type'>;
-};
-
-export function assignToActor({id, actor}: AssignToActorParams) {
-  const api = new Client();
-
-  const endpoint = `/issues/${id}/`;
-
-  const guid = uniqueId();
-  let actorId;
-
-  GroupActions.assignTo(guid, id, {email: ''});
-
-  switch (actor.type) {
-    case 'user':
-      actorId = buildUserId(actor.id);
-      break;
-
-    case 'team':
-      actorId = buildTeamId(actor.id);
-      break;
-
-    default:
-      Sentry.withScope(scope => {
-        scope.setExtra('actor', actor);
-        Sentry.captureException('Unknown assignee type');
-      });
-  }
-
-  return api
-    .requestPromise(endpoint, {
-      method: 'PUT',
-      data: {assignedTo: actorId},
-    })
-    .then(data => {
-      GroupActions.assignToSuccess(guid, id, data);
-    })
-    .catch(data => {
-      GroupActions.assignToError(guid, id, data);
-    });
-}
-
-export function deleteNote(api: Client, group: Group, id: string, _oldText: string) {
-  const restore = group.activity.find(activity => activity.id === id);
-  const index = GroupStore.removeActivity(group.id, id);
-  if (index === -1) {
-    // I dunno, the id wasn't found in the GroupStore
-    return Promise.reject(new Error('Group was not found in store'));
-  }
-
-  const promise = api.requestPromise(`/issues/${group.id}/comments/${id}/`, {
-    method: 'DELETE',
-  });
-
-  promise.catch(() => GroupStore.addActivity(group.id, restore, index));
-
-  return promise;
-}
-
-export function createNote(api: Client, group: Group, note: Note) {
-  const promise = api.requestPromise(`/issues/${group.id}/comments/`, {
-    method: 'POST',
-    data: note,
-  });
-
-  promise.then(data => GroupStore.addActivity(group.id, data));
-
-  return promise;
-}
-
-export function updateNote(
-  api: Client,
-  group: Group,
-  note: Note,
-  id: string,
-  oldText: string
-) {
-  GroupStore.updateActivity(group.id, id, {text: note.text});
-
-  const promise = api.requestPromise(`/issues/${group.id}/comments/${id}/`, {
-    method: 'PUT',
-    data: note,
-  });
-
-  promise.catch(() => GroupStore.updateActivity(group.id, id, {text: oldText}));
-
-  return promise;
-}
+import type {RequestCallbacks} from 'sentry/api';
+import {Client} from 'sentry/api';
+import {GroupStore} from 'sentry/stores/groupStore';
+import type {Group, Tag as GroupTag, TagValue} from 'sentry/types/group';
+import type {Organization} from 'sentry/types/organization';
+import {apiOptions} from 'sentry/utils/api/apiOptions';
+import {uniqueId} from 'sentry/utils/guid';
+import {parseActorString} from 'sentry/utils/parseActorString';
+import {RequestError} from 'sentry/utils/requestError/requestError';
+import type {QueryParamValue} from 'sentry/utils/useLocation';
 
 type ParamsType = {
-  itemIds?: Array<number> | Array<string>;
+  environment?: string | string[] | null;
+  itemIds?: string[];
+  project?: number[] | string[] | null;
   query?: string;
-  environment?: string | Array<string> | null;
-  project?: Array<number> | null;
 };
 
 type UpdateParams = ParamsType & {
@@ -188,17 +26,17 @@ type UpdateParams = ParamsType & {
 type QueryArgs =
   | {
       query: string;
-      environment?: string | Array<string>;
-      project?: Array<number>;
+      environment?: string | string[];
+      project?: Array<number | string>;
     }
   | {
-      id: Array<number> | Array<string>;
-      environment?: string | Array<string>;
-      project?: Array<number>;
+      id: number[] | string[];
+      environment?: string | string[];
+      project?: Array<number | string>;
     }
   | {
-      environment?: string | Array<string>;
-      project?: Array<number>;
+      environment?: string | string[];
+      project?: Array<number | string>;
     };
 
 /**
@@ -208,11 +46,11 @@ export function paramsToQueryArgs(params: ParamsType): QueryArgs {
   const p: QueryArgs = params.itemIds
     ? {id: params.itemIds} // items matching array of itemids
     : params.query
-    ? {query: params.query} // items matching search query
-    : {}; // all items
+      ? {query: params.query} // items matching search query
+      : {}; // all items
 
   // only include environment if it is not null/undefined
-  if (params.query && !isNil(params.environment)) {
+  if (params.query && params.environment !== null && params.environment !== undefined) {
     p.environment = params.environment;
   }
 
@@ -224,8 +62,12 @@ export function paramsToQueryArgs(params: ParamsType): QueryArgs {
   // only include date filters if they are not null/undefined
   if (params.query) {
     ['start', 'end', 'period', 'utc'].forEach(prop => {
-      if (!isNil(params[prop])) {
-        p[prop === 'period' ? 'statsPeriod' : prop] = params[prop];
+      if (
+        params[prop as keyof typeof params] !== null &&
+        params[prop as keyof typeof params] !== undefined
+      ) {
+        (p as any)[prop === 'period' ? 'statsPeriod' : prop] =
+          params[prop as keyof typeof params];
       }
     });
   }
@@ -238,129 +80,176 @@ function getUpdateUrl({projectId, orgId}: UpdateParams) {
     : `/organizations/${orgId}/issues/`;
 }
 
-function chainUtil<Args extends any[]>(
-  ...funcs: Array<((...args: Args) => any) | undefined>
-) {
-  const filteredFuncs = funcs.filter(
-    (f): f is (...args: Args) => any => typeof f === 'function'
-  );
-  return (...args: Args): void => {
-    filteredFuncs.forEach(func => {
-      func.apply(funcs, args);
-    });
-  };
-}
-
-function wrapRequest(
-  api: Client,
-  path: string,
-  options: RequestOptions,
-  extraParams: RequestCallbacks = {}
-) {
-  options.success = chainUtil(options.success, extraParams.success);
-  options.error = chainUtil(options.error, extraParams.error);
-  options.complete = chainUtil(options.complete, extraParams.complete);
-
-  return api.request(path, options);
-}
-
 type BulkDeleteParams = UpdateParams;
 
-export function bulkDelete(
+export async function bulkDelete(
   api: Client,
   params: BulkDeleteParams,
-  options: RequestCallbacks
+  options: RequestCallbacks = {}
 ) {
   const {itemIds} = params;
   const path = getUpdateUrl(params);
 
-  const query: QueryArgs = paramsToQueryArgs(params);
+  const query = paramsToQueryArgs(params);
   const id = uniqueId();
 
-  GroupActions.delete(id, itemIds);
+  GroupStore.onDelete(id, itemIds);
 
-  return wrapRequest(
-    api,
-    path,
-    {
+  let responseMeta: any;
+  let statusText: string | undefined;
+
+  try {
+    const [data, status, meta] = await api.requestPromise(path, {
       query,
       method: 'DELETE',
-      success: response => {
-        GroupActions.deleteSuccess(id, itemIds, response);
-      },
-      error: error => {
-        GroupActions.deleteError(id, itemIds, error);
-      },
-    },
-    options
-  );
+      includeAllArgs: true,
+    });
+    statusText = status;
+    responseMeta = meta;
+    GroupStore.onDeleteSuccess(id, itemIds, data);
+    options?.success?.(data, statusText, responseMeta);
+  } catch (error) {
+    GroupStore.onDeleteError(id, itemIds, error as RequestError);
+    options?.error?.(error);
+  } finally {
+    options?.complete?.(responseMeta, statusText ?? '');
+  }
 }
 
 type BulkUpdateParams = UpdateParams & {
-  failSilently?: boolean;
   data?: any;
+  failSilently?: boolean;
 };
 
-export function bulkUpdate(
+export async function bulkUpdate(
   api: Client,
   params: BulkUpdateParams,
-  options: RequestCallbacks
+  options: RequestCallbacks = {}
 ) {
   const {itemIds, failSilently, data} = params;
   const path = getUpdateUrl(params);
 
-  const query: QueryArgs = paramsToQueryArgs(params);
+  const query = paramsToQueryArgs(params);
   const id = uniqueId();
 
-  GroupActions.update(id, itemIds, data);
+  const optimisticData: Partial<Group> =
+    typeof data.assignedTo === 'string'
+      ? {...data, assignedTo: parseActorString(data.assignedTo) ?? null}
+      : data;
+  GroupStore.onUpdate(id, itemIds, optimisticData);
 
-  return wrapRequest(
-    api,
-    path,
-    {
+  let responseMeta: any;
+  let statusText: string | undefined;
+
+  try {
+    const [response, status, meta] = await api.requestPromise(path, {
       query,
       method: 'PUT',
       data,
-      success: response => {
-        GroupActions.updateSuccess(id, itemIds, response);
-      },
-      error: error => {
-        GroupActions.updateError(id, itemIds, error, failSilently);
-      },
-    },
-    options
-  );
+      includeAllArgs: true,
+    });
+    statusText = status;
+    responseMeta = meta;
+    GroupStore.onUpdateSuccess(id, itemIds, response);
+    options?.success?.(response, statusText, responseMeta);
+  } catch (error) {
+    GroupStore.onUpdateError(id, itemIds, !!failSilently);
+    options?.error?.(error);
+  } finally {
+    options?.complete?.(responseMeta, statusText ?? '');
+  }
 }
 
 type MergeGroupsParams = UpdateParams;
 
-export function mergeGroups(
+export async function mergeGroups(
   api: Client,
   params: MergeGroupsParams,
-  options: RequestCallbacks
+  options: RequestCallbacks = {}
 ) {
   const {itemIds} = params;
   const path = getUpdateUrl(params);
 
-  const query: QueryArgs = paramsToQueryArgs(params);
+  const query = paramsToQueryArgs(params);
   const id = uniqueId();
 
-  GroupActions.merge(id, itemIds);
+  GroupStore.onMerge(id, itemIds);
 
-  return wrapRequest(
-    api,
-    path,
-    {
+  let responseMeta: any;
+  let statusText: string | undefined;
+
+  try {
+    const [response, status, meta] = await api.requestPromise(path, {
       query,
       method: 'PUT',
       data: {merge: 1},
-      success: response => {
-        GroupActions.mergeSuccess(id, itemIds, response);
-      },
-      error: error => {
-        GroupActions.mergeError(id, itemIds, error);
-      },
-    },
-    options
-  );
+      includeAllArgs: true,
+    });
+    statusText = status;
+    responseMeta = meta;
+    GroupStore.onMergeSuccess(id, itemIds, response);
+    options?.success?.(response, statusText, responseMeta);
+  } catch (error) {
+    GroupStore.onMergeError(id, itemIds, error);
+    options?.error?.(error);
+  } finally {
+    options?.complete?.(responseMeta, statusText ?? '');
+  }
+}
+
+type FetchIssueTagValuesParameters = {
+  groupId: string;
+  organization: Organization;
+  tagKey: string;
+  cursor?: QueryParamValue;
+  sort?: string | string[];
+};
+
+export function issueTagValuesApiOptions({
+  organization,
+  groupId,
+  tagKey,
+  sort,
+  cursor,
+}: FetchIssueTagValuesParameters) {
+  return queryOptions({
+    ...apiOptions.as<TagValue[]>()(
+      '/organizations/$organizationIdOrSlug/issues/$issueId/tags/$key/values/',
+      {
+        path: {
+          organizationIdOrSlug: organization.slug,
+          issueId: groupId,
+          key: tagKey,
+        },
+        query: {sort, cursor},
+        staleTime: 0,
+      }
+    ),
+    retry: false,
+  });
+}
+
+type FetchIssueTagParameters = {
+  groupId: string;
+  organization: Organization;
+  tagKey: string;
+};
+
+export function fetchIssueTagApiOptions<TData = GroupTag>(
+  parameters: FetchIssueTagParameters
+) {
+  return queryOptions({
+    ...apiOptions.as<TData>()(
+      '/organizations/$organizationIdOrSlug/issues/$issueId/tags/$key/',
+      {
+        path: {
+          organizationIdOrSlug: parameters.organization.slug,
+          issueId: parameters.groupId,
+          key: parameters.tagKey,
+        },
+        staleTime: 0,
+      }
+    ),
+    retry: false,
+  });
 }

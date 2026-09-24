@@ -1,77 +1,188 @@
-import React from 'react';
-import DocumentTitle from 'react-document-title';
-import {browserHistory} from 'react-router';
+import {useCallback, useState} from 'react';
+import {useMutation, useQueryClient} from '@tanstack/react-query';
+import {z} from 'zod';
 
-import {Panel, PanelBody, PanelHeader} from 'app/components/panels';
-import {API_ACCESS_SCOPES, DEFAULT_API_ACCESS_SCOPES} from 'app/constants';
-import {t, tct} from 'app/locale';
-import {Choices} from 'app/types';
-import ApiForm from 'app/views/settings/components/forms/apiForm';
-import MultipleCheckbox from 'app/views/settings/components/forms/controls/multipleCheckbox';
-import FormField from 'app/views/settings/components/forms/formField';
-import SettingsPageHeader from 'app/views/settings/components/settingsPageHeader';
-import TextBlock from 'app/views/settings/components/text/textBlock';
+import {Button} from '@sentry/scraps/button';
+import {defaultFormOptions, useScrapsForm} from '@sentry/scraps/form';
+import {Flex, Stack} from '@sentry/scraps/layout';
+import {ExternalLink} from '@sentry/scraps/link';
 
-const SORTED_DEFAULT_API_ACCESS_SCOPES = DEFAULT_API_ACCESS_SCOPES.sort();
-const API_CHOICES: Choices = API_ACCESS_SCOPES.map(s => [s, s]);
+import {
+  addErrorMessage,
+  addLoadingMessage,
+  addSuccessMessage,
+} from 'sentry/actionCreators/indicator';
+import {FieldGroup} from 'sentry/components/forms/fieldGroup';
+import {Panel} from 'sentry/components/panels/panel';
+import {PanelBody} from 'sentry/components/panels/panelBody';
+import {PanelHeader} from 'sentry/components/panels/panelHeader';
+import {SentryDocumentTitle} from 'sentry/components/sentryDocumentTitle';
+import {
+  DISTRIBUTION_SENTRY_APP_PERMISSION,
+  SENTRY_APP_PERMISSIONS,
+} from 'sentry/constants';
+import {t, tct} from 'sentry/locale';
+import type {Permissions} from 'sentry/types/integrations';
+import type {NewInternalAppApiToken} from 'sentry/types/user';
+import {getApiUrl} from 'sentry/utils/api/getApiUrl';
+import {handleXhrErrorResponse} from 'sentry/utils/handleXhrErrorResponse';
+import {fetchMutation} from 'sentry/utils/queryClient';
+import type {RequestError} from 'sentry/utils/requestError/requestError';
+import {normalizeUrl} from 'sentry/utils/url/normalizeUrl';
+import {useNavigate} from 'sentry/utils/useNavigate';
+import {displayNewToken} from 'sentry/views/settings/components/newTokenHandler';
+import {SettingsPageHeader} from 'sentry/views/settings/components/settingsPageHeader';
+import {
+  PermissionSelection,
+  permissionStateToList,
+} from 'sentry/views/settings/organizationDeveloperSettings/permissionSelection';
+
 const API_INDEX_ROUTE = '/settings/account/api/auth-tokens/';
 
-export default class ApiNewToken extends React.Component {
-  onCancel = () => {
-    browserHistory.push(API_INDEX_ROUTE);
-  };
+const schema = z.object({
+  name: z.string(),
+});
 
-  onSubmitSuccess = () => {
-    browserHistory.push(API_INDEX_ROUTE);
-  };
+const INITIAL_PERMISSIONS: Permissions = {
+  Event: 'no-access',
+  Team: 'no-access',
+  Member: 'no-access',
+  Project: 'no-access',
+  Release: 'no-access',
+  Organization: 'no-access',
+  Alerts: 'no-access',
+  Distribution: 'no-access',
+};
 
-  render() {
-    return (
-      <DocumentTitle title="Create API Token - Sentry">
-        <div>
-          <SettingsPageHeader title={t('Create New Token')} />
-          <TextBlock>
-            {t(
-              "Authentication tokens allow you to perform actions against the Sentry API on behalf of your account. They're the easiest way to get started using the API."
-            )}
-          </TextBlock>
-          <TextBlock>
-            {tct(
-              'For more information on how to use the web API, see our [link:documentation].',
-              {
-                link: <a href="https://docs.sentry.io/api/" />,
-              }
-            )}
-          </TextBlock>
+// Personal tokens can't be used for Distribution. The point of
+// Distribution is to embed the token into an app. We don't want people
+// using personal tokens for that.
+const DISPLAYED_PERMISSIONS = SENTRY_APP_PERMISSIONS.filter(
+  o => o !== DISTRIBUTION_SENTRY_APP_PERMISSION
+);
+
+function getPermissionsPreview(scopes: string[]): string {
+  return scopes.join(', ');
+}
+
+export default function ApiNewToken() {
+  const [permissions, setPermissions] = useState({...INITIAL_PERMISSIONS});
+  const navigate = useNavigate();
+  const queryClient = useQueryClient();
+
+  const handleGoBack = useCallback(
+    () => navigate(normalizeUrl(API_INDEX_ROUTE)),
+    [navigate]
+  );
+
+  const scopes = Array.from(
+    new Set(
+      permissionStateToList(permissions, false).filter(
+        (value): value is NonNullable<typeof value> => value !== undefined
+      )
+    )
+  ).sort();
+
+  const allPermissionsNoAccess = scopes.length === 0;
+
+  const mutation = useMutation({
+    mutationFn: (data: z.infer<typeof schema>) =>
+      fetchMutation<NewInternalAppApiToken>({
+        url: getApiUrl('/api-tokens/'),
+        method: 'POST',
+        data: {
+          ...data,
+          scopes,
+        },
+      }),
+    onSuccess: token => {
+      addSuccessMessage(t('Created personal token.'));
+      queryClient.invalidateQueries({queryKey: [getApiUrl('/api-tokens/')]});
+      displayNewToken(token.token, handleGoBack);
+    },
+    onError: (error: RequestError) => {
+      const message = t('Failed to create a new personal token.');
+      handleXhrErrorResponse(message, error);
+      addErrorMessage(message);
+    },
+  });
+
+  const form = useScrapsForm({
+    ...defaultFormOptions,
+    defaultValues: {name: ''},
+    validators: {onDynamic: schema},
+    onSubmit: ({value}) => {
+      addLoadingMessage();
+      return mutation.mutateAsync(value).catch(() => {});
+    },
+  });
+
+  const permissionsPreview = getPermissionsPreview(scopes);
+
+  return (
+    <SentryDocumentTitle title={t('Create New Personal Token')}>
+      <div>
+        <SettingsPageHeader
+          title={t('Create New Personal Token')}
+          subtitle={
+            <Stack gap="md">
+              <div>
+                {t(
+                  "Personal tokens allow you to perform actions against the Sentry API on behalf of your account. They're the easiest way to get started using the API."
+                )}
+              </div>
+              <div>
+                {tct(
+                  'For more information on how to use the web API, see our [link:documentation].',
+                  {
+                    link: <ExternalLink href="https://docs.sentry.io/api/" />,
+                  }
+                )}
+              </div>
+            </Stack>
+          }
+        />
+        <form.AppForm form={form}>
+          <form.FieldGroup title={t('General')}>
+            <form.AppField name="name">
+              {field => (
+                <field.Layout.Row
+                  label={t('Name')}
+                  hintText={t('A name to help you identify this token.')}
+                >
+                  <field.Input value={field.state.value} onChange={field.handleChange} />
+                </field.Layout.Row>
+              )}
+            </form.AppField>
+          </form.FieldGroup>
           <Panel>
-            <PanelHeader>{t('Create New Token')}</PanelHeader>
-            <ApiForm
-              apiMethod="POST"
-              apiEndpoint="/api-tokens/"
-              initialData={{scopes: SORTED_DEFAULT_API_ACCESS_SCOPES}}
-              onSubmitSuccess={this.onSubmitSuccess}
-              onCancel={this.onCancel}
-              footerStyle={{
-                marginTop: 0,
-                paddingRight: 20,
-              }}
-              submitLabel={t('Create Token')}
+            <PanelHeader>{t('Permissions')}</PanelHeader>
+            <PanelBody>
+              <PermissionSelection
+                appPublished={false}
+                displaySpecialPermissions={false}
+                permissions={permissions}
+                onChange={nextPermissions => {
+                  setPermissions({...nextPermissions});
+                }}
+                displayedPermissions={DISPLAYED_PERMISSIONS}
+              />
+            </PanelBody>
+            <FieldGroup
+              label={t('Permissions Preview')}
+              help={t('Your token will have the following scopes.')}
             >
-              <PanelBody>
-                <FormField name="scopes" label={t('Scopes')} inline={false} required>
-                  {({value, onChange}) => (
-                    <MultipleCheckbox
-                      onChange={onChange}
-                      value={value}
-                      choices={API_CHOICES}
-                    />
-                  )}
-                </FormField>
-              </PanelBody>
-            </ApiForm>
+              <div>{permissionsPreview || '—'}</div>
+            </FieldGroup>
           </Panel>
-        </div>
-      </DocumentTitle>
-    );
-  }
+          <Flex justify="end" gap="md" padding="md">
+            <Button onClick={handleGoBack}>{t('Cancel')}</Button>
+            <form.SubmitButton disabled={mutation.isSuccess || allPermissionsNoAccess}>
+              {t('Create Token')}
+            </form.SubmitButton>
+          </Flex>
+        </form.AppForm>
+      </div>
+    </SentryDocumentTitle>
+  );
 }

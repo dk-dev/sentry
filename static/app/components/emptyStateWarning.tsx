@@ -1,41 +1,52 @@
-import React from 'react';
 import styled from '@emotion/styled';
 
-import {IconSearch} from 'app/icons';
-import space from 'app/styles/space';
-import EmptyMessage from 'app/views/settings/components/emptyMessage';
+import {EmptyMessage} from 'sentry/components/emptyMessage';
+import {IconSearch} from 'sentry/icons';
+import type {IconVariant} from 'sentry/icons/svgIcon';
 
+/**
+ * @deprecated Use `EmptyState` from `@sentry/scraps/emptyState` instead.
+ */
 type Props = {
-  small?: boolean;
   children?: React.ReactNode;
-  withIcon?: boolean;
   className?: string;
+  small?: boolean;
+  variant?: IconVariant;
+  withIcon?: boolean;
 };
 
-const EmptyStateWarning = ({
+/**
+ * @deprecated Use `EmptyState` from `@sentry/scraps/emptyState` instead.
+ */
+export function EmptyStateWarning({
   small = false,
+  variant = 'muted',
   withIcon = true,
   children,
   className,
-}: Props) =>
-  small ? (
+}: Props) {
+  return small ? (
     <EmptyMessage className={className}>
       <SmallMessage>
-        {withIcon && <StyledIconSearch color="gray300" size="lg" />}
+        {withIcon && <StyledIconSearch variant={variant} size="lg" />}
         {children}
       </SmallMessage>
     </EmptyMessage>
   ) : (
     <EmptyStreamWrapper data-test-id="empty-state" className={className}>
-      {withIcon && <IconSearch size="54px" />}
+      {withIcon && <IconSearch variant={variant} legacySize="54px" />}
       {children}
     </EmptyStreamWrapper>
   );
+}
 
-const EmptyStreamWrapper = styled('div')`
+/**
+ * @deprecated Use `EmptyState` from `@sentry/scraps/emptyState` instead.
+ */
+export const EmptyStreamWrapper = styled('div')`
   text-align: center;
   font-size: 22px;
-  padding: 48px ${space(1)};
+  padding: ${p => p.theme.space['3xl']} ${p => p.theme.space.xl};
 
   p {
     line-height: 1.2;
@@ -45,22 +56,19 @@ const EmptyStreamWrapper = styled('div')`
     }
   }
 
-  svg {
-    fill: ${p => p.theme.gray200};
-    margin-bottom: ${space(2)};
+  > svg {
+    margin-bottom: ${p => p.theme.space.xl};
   }
 `;
 
 const SmallMessage = styled('div')`
   display: flex;
   align-items: center;
-  color: ${p => p.theme.gray300};
-  font-size: ${p => p.theme.fontSizeExtraLarge};
+  color: ${p => p.theme.tokens.content.secondary};
+  font-size: ${p => p.theme.font.size.xl};
   line-height: 1em;
 `;
 
 const StyledIconSearch = styled(IconSearch)`
-  margin-right: ${space(1)};
+  margin-right: ${p => p.theme.space.md};
 `;
-
-export default EmptyStateWarning;

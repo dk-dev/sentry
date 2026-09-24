@@ -1,236 +1,260 @@
-import React from 'react';
-import {PlainRoute} from 'react-router';
+import {Fragment, useState} from 'react';
 import styled from '@emotion/styled';
 
-import UserAvatar from 'app/components/avatar/userAvatar';
-import Button from 'app/components/button';
-import Confirm from 'app/components/confirm';
-import Link from 'app/components/links/link';
-import LoadingIndicator from 'app/components/loadingIndicator';
-import {PanelItem} from 'app/components/panels';
-import {IconCheckmark, IconClose, IconFlag, IconMail, IconSubtract} from 'app/icons';
-import {t, tct} from 'app/locale';
-import space from 'app/styles/space';
-import {AvatarUser, Member} from 'app/types';
-import recreateRoute from 'app/utils/recreateRoute';
+import {UserAvatar} from '@sentry/scraps/avatar';
+import {Button} from '@sentry/scraps/button';
+import {Flex} from '@sentry/scraps/layout';
+import {Link} from '@sentry/scraps/link';
+
+import {Confirm} from 'sentry/components/confirm';
+import {LoadingIndicator} from 'sentry/components/loadingIndicator';
+import {OverrideOrDefault} from 'sentry/components/overrideOrDefault';
+import {PanelItem} from 'sentry/components/panels/panelItem';
+import {IconCheckmark, IconClose, IconFlag, IconMail, IconSubtract} from 'sentry/icons';
+import {t, tct} from 'sentry/locale';
+import type {Member, Organization} from 'sentry/types/organization';
+import type {AvatarUser} from 'sentry/types/user';
+import {isMemberDisabledFromLimit} from 'sentry/utils/isMemberDisabledFromLimit';
+import {capitalize} from 'sentry/utils/string/capitalize';
 
 type Props = {
-  params: Record<string, string>;
-  routes: PlainRoute[];
-  member: Member;
-  onRemove: (member: Member) => void;
-  onLeave: (member: Member) => void;
-  onSendInvite: (member: Member) => void;
-  orgName: string;
-  memberCanLeave: boolean;
-  requireLink: boolean;
-  canRemoveMembers: boolean;
   canAddMembers: boolean;
+  canRemoveMembers: boolean;
   currentUser: AvatarUser;
+  member: Member;
+  memberCanLeave: boolean;
+  onLeave: (member: Member) => void;
+  onRemove: (member: Member) => void;
+  onSendInvite: (member: Member) => void;
+  organization: Organization;
+  requireLink: boolean;
   status: '' | 'loading' | 'success' | 'error' | null;
 };
 
-type State = {
-  busy: boolean;
-};
+const DisabledMemberTooltip = OverrideOrDefault({
+  overrideName: 'component:disabled-member-tooltip',
+  defaultComponent: ({children}) => <Fragment>{children}</Fragment>,
+});
 
-export default class OrganizationMemberRow extends React.PureComponent<Props, State> {
-  state: State = {
-    busy: false,
-  };
+function MemberRole({member}: {member: Member}) {
+  const {roleName, pending: isPending, expired} = member;
+  if (isMemberDisabledFromLimit(member)) {
+    return <DisabledMemberTooltip>{t('Deactivated')}</DisabledMemberTooltip>;
+  }
+  if (isPending) {
+    return (
+      <InvitedRole>
+        <IconMail size="md" />
+        {expired ? t('Expired Invite') : tct('Invited [roleName]', {roleName})}
+      </InvitedRole>
+    );
+  }
+  return <Fragment>{capitalize(member.orgRole)}</Fragment>;
+}
 
-  handleRemove = () => {
-    const {onRemove} = this.props;
+export function OrganizationMemberRow({
+  member,
+  organization,
+  status,
+  requireLink,
+  memberCanLeave,
+  currentUser,
+  canRemoveMembers,
+  canAddMembers,
+  onLeave,
+  onRemove,
+  onSendInvite,
+}: Props) {
+  const [busy, setBusy] = useState(false);
 
+  const handleRemove = () => {
     if (typeof onRemove !== 'function') {
       return;
     }
 
-    this.setState({busy: true});
-    onRemove(this.props.member);
+    setBusy(true);
+    onRemove(member);
   };
 
-  handleLeave = () => {
-    const {onLeave} = this.props;
-
+  const handleLeave = () => {
     if (typeof onLeave !== 'function') {
       return;
     }
 
-    this.setState({busy: true});
-    onLeave(this.props.member);
+    setBusy(true);
+    onLeave(member);
   };
 
-  handleSendInvite = () => {
-    const {onSendInvite, member} = this.props;
-
+  const handleSendInvite = () => {
     if (typeof onSendInvite !== 'function') {
       return;
     }
-
     onSendInvite(member);
   };
 
-  render() {
-    const {
-      params,
-      routes,
-      member,
-      orgName,
-      status,
-      requireLink,
-      memberCanLeave,
-      currentUser,
-      canRemoveMembers,
-      canAddMembers,
-    } = this.props;
+  const {id, flags, email, name, pending, user, inviterName} = member;
+  const {access} = organization;
 
-    const {id, flags, email, name, roleName, pending, expired, user} = member;
+  // if member is not the only owner, they can leave
+  const isIdpProvisioned = flags['idp:provisioned'];
+  const isPartnershipUser = flags['partnership:restricted'];
+  const needsSso = !flags['sso:linked'] && requireLink;
+  const isCurrentUser = currentUser.email === email;
+  const showRemoveButton = !isCurrentUser;
+  const showLeaveButton = isCurrentUser;
+  const isInviteFromCurrentUser = pending && inviterName === currentUser.name;
+  const canInvite = organization.allowMemberInvite && access.includes('member:invite');
+  // members can remove invites they sent if allowMemberInvite is true
+  const canEditInvite = canInvite && isInviteFromCurrentUser;
+  const canRemoveMember =
+    (canRemoveMembers && !isCurrentUser && !isIdpProvisioned && !isPartnershipUser) ||
+    canEditInvite;
+  // member has a `user` property if they are registered with sentry
+  // i.e. has accepted an invite to join org
+  const has2fa = user?.has2fa;
+  const detailsUrl = `/settings/${organization.slug}/members/${id}/`;
+  const isInviteSuccessful = status === 'success';
+  const isInviting = status === 'loading';
+  const showResendButton = pending || needsSso;
 
-    // if member is not the only owner, they can leave
-    const needsSso = !flags['sso:linked'] && requireLink;
-    const isCurrentUser = currentUser.email === email;
-    const showRemoveButton = !isCurrentUser;
-    const showLeaveButton = isCurrentUser;
-    const canRemoveMember = canRemoveMembers && !isCurrentUser;
-    // member has a `user` property if they are registered with sentry
-    // i.e. has accepted an invite to join org
-    const has2fa = user && user.has2fa;
-    const detailsUrl = recreateRoute(id, {routes, params});
-    const isInviteSuccessful = status === 'success';
-    const isInviting = status === 'loading';
-    const showResendButton = pending || needsSso;
+  return (
+    <StyledPanelItem data-test-id={email}>
+      <MemberHeading>
+        <UserAvatar
+          size={32}
+          user={user ?? {email, id: email, name: email, type: 'user'}}
+        />
+        <MemberDescription to={detailsUrl}>
+          <h5 style={{margin: '0 0 3px'}}>
+            <UserName>{name}</UserName>
+          </h5>
+          <Email>{email}</Email>
+        </MemberDescription>
+      </MemberHeading>
 
-    return (
-      <StyledPanelItem data-test-id={email}>
-        <MemberHeading>
-          <UserAvatar size={32} user={user ?? {id: email, email}} />
-          <MemberDescription to={detailsUrl}>
-            <h5 style={{margin: '0 0 3px'}}>
-              <UserName>{name}</UserName>
-            </h5>
-            <Email>{email}</Email>
-          </MemberDescription>
-        </MemberHeading>
+      <div data-test-id="member-role">
+        <MemberRole member={member} />
+      </div>
 
-        <div data-test-id="member-role">
-          {pending ? (
-            <InvitedRole>
-              <IconMail size="md" />
-              {expired ? t('Expired Invite') : tct('Invited [roleName]', {roleName})}
-            </InvitedRole>
-          ) : (
-            roleName
-          )}
-        </div>
-
-        <div data-test-id="member-status">
-          {showResendButton ? (
-            <React.Fragment>
-              {isInviting && (
-                <LoadingContainer>
-                  <LoadingIndicator mini />
-                </LoadingContainer>
-              )}
-              {isInviteSuccessful && <span>Sent!</span>}
-              {!isInviting && !isInviteSuccessful && (
-                <Button
-                  disabled={!canAddMembers}
-                  priority="primary"
-                  size="small"
-                  onClick={this.handleSendInvite}
-                >
-                  {pending ? t('Resend invite') : t('Resend SSO link')}
-                </Button>
-              )}
-            </React.Fragment>
-          ) : (
-            <AuthStatus>
-              {has2fa ? (
-                <IconCheckmark isCircled color="success" />
-              ) : (
-                <IconFlag color="error" />
-              )}
-              {has2fa ? t('2FA Enabled') : t('2FA Not Enabled')}
-            </AuthStatus>
-          )}
-        </div>
-
-        {showRemoveButton || showLeaveButton ? (
-          <div>
-            {showRemoveButton && canRemoveMember && (
-              <Confirm
-                message={tct('Are you sure you want to remove [name] from [orgName]?', {
-                  name,
-                  orgName,
-                })}
-                onConfirm={this.handleRemove}
-              >
-                <Button
-                  data-test-id="remove"
-                  icon={<IconSubtract isCircled size="xs" />}
-                  size="small"
-                  busy={this.state.busy}
-                >
-                  {t('Remove')}
-                </Button>
-              </Confirm>
+      <div data-test-id="member-status">
+        {showResendButton ? (
+          <Fragment>
+            {isInviting && (
+              <LoadingContainer>
+                <LoadingIndicator mini />
+              </LoadingContainer>
             )}
-
-            {showRemoveButton && !canRemoveMember && (
+            {isInviteSuccessful && <span>{t('Sent!')}</span>}
+            {!isInviting && !isInviteSuccessful && (
               <Button
-                disabled
-                size="small"
-                title={t('You do not have access to remove members')}
-                icon={<IconSubtract isCircled size="xs" />}
+                disabled={!canAddMembers && !canEditInvite}
+                variant="primary"
+                size="sm"
+                onClick={handleSendInvite}
               >
+                {pending ? t('Resend invite') : t('Resend SSO link')}
+              </Button>
+            )}
+          </Fragment>
+        ) : (
+          <AuthStatus>
+            {has2fa ? <IconCheckmark variant="success" /> : <IconFlag variant="danger" />}
+            {has2fa ? t('2FA Enabled') : t('2FA Not Enabled')}
+          </AuthStatus>
+        )}
+      </div>
+
+      {showRemoveButton || showLeaveButton ? (
+        <Flex justify="end">
+          {showRemoveButton && canRemoveMember && (
+            <Confirm
+              message={tct('Are you sure you want to remove [name] from [orgName]?', {
+                name,
+                orgName: organization.slug,
+              })}
+              onConfirm={handleRemove}
+            >
+              <Button data-test-id="remove" icon={<IconSubtract />} size="sm" busy={busy}>
                 {t('Remove')}
               </Button>
-            )}
+            </Confirm>
+          )}
 
-            {showLeaveButton && memberCanLeave && (
-              <Confirm
-                message={tct('Are you sure you want to leave [orgName]?', {
-                  orgName,
-                })}
-                onConfirm={this.handleLeave}
-              >
-                <Button priority="danger" size="small" icon={<IconClose size="xs" />}>
-                  {t('Leave')}
-                </Button>
-              </Confirm>
-            )}
+          {showRemoveButton && !canRemoveMember && (
+            <Button
+              disabled
+              size="sm"
+              tooltipProps={{
+                title: isIdpProvisioned
+                  ? t(
+                      "This user is managed through your organization's identity provider."
+                    )
+                  : isPartnershipUser
+                    ? t('You cannot make changes to this partner-provisioned user.')
+                    : // only show this message if member can remove invites but invite was not sent by them
+                      pending && canInvite && !isInviteFromCurrentUser
+                      ? t('You cannot modify this invite.')
+                      : t('You do not have access to remove members'),
+              }}
+              icon={<IconSubtract />}
+            >
+              {t('Remove')}
+            </Button>
+          )}
 
-            {showLeaveButton && !memberCanLeave && (
-              <Button
-                size="small"
-                icon={<IconClose size="xs" />}
-                disabled
-                title={t(
-                  'You cannot leave this organization as you are the only organization owner.'
-                )}
-              >
+          {showLeaveButton && memberCanLeave && (
+            <Confirm
+              message={tct('Are you sure you want to leave [orgName]?', {
+                orgName: organization.slug,
+              })}
+              onConfirm={handleLeave}
+            >
+              <Button variant="danger" size="sm" icon={<IconClose />}>
                 {t('Leave')}
               </Button>
-            )}
-          </div>
-        ) : null}
-      </StyledPanelItem>
-    );
-  }
+            </Confirm>
+          )}
+
+          {showLeaveButton && !memberCanLeave && (
+            <Button
+              size="sm"
+              icon={<IconClose />}
+              disabled
+              tooltipProps={{
+                title: isIdpProvisioned
+                  ? t(
+                      "Your account is managed through your organization's identity provider."
+                    )
+                  : isPartnershipUser
+                    ? t('You cannot make changes as a partner-provisioned user.')
+                    : t(
+                        'You cannot leave this organization as you are the only organization owner.'
+                      ),
+              }}
+            >
+              {t('Leave')}
+            </Button>
+          )}
+        </Flex>
+      ) : null}
+    </StyledPanelItem>
+  );
 }
 
 const StyledPanelItem = styled(PanelItem)`
   display: grid;
-  grid-template-columns: minmax(150px, 2fr) minmax(90px, 1fr) minmax(120px, 1fr) 90px;
-  grid-gap: ${space(2)};
+  grid-template-columns: minmax(150px, 4fr) minmax(90px, 2fr) minmax(120px, 2fr) minmax(
+      100px,
+      1fr
+    );
+  gap: ${p => p.theme.space.xl};
   align-items: center;
 `;
-
+// Force action button at the end to align to right
 const Section = styled('div')`
   display: inline-grid;
   grid-template-columns: max-content auto;
-  grid-gap: ${space(1)};
+  gap: ${p => p.theme.space.md};
   align-items: center;
 `;
 
@@ -241,14 +265,14 @@ const MemberDescription = styled(Link)`
 
 const UserName = styled('div')`
   display: block;
-  font-size: ${p => p.theme.fontSizeLarge};
   overflow: hidden;
+  font-size: ${p => p.theme.font.size.md};
   text-overflow: ellipsis;
 `;
 
 const Email = styled('div')`
-  color: ${p => p.theme.textColor};
-  font-size: ${p => p.theme.fontSizeMedium};
+  color: ${p => p.theme.tokens.content.secondary};
+  font-size: ${p => p.theme.font.size.sm};
   overflow: hidden;
   text-overflow: ellipsis;
 `;
@@ -256,7 +280,7 @@ const Email = styled('div')`
 const InvitedRole = styled(Section)``;
 const LoadingContainer = styled('div')`
   margin-top: 0;
-  margin-bottom: ${space(1.5)};
+  margin-bottom: ${p => p.theme.space.lg};
 `;
 
 const AuthStatus = styled(Section)``;

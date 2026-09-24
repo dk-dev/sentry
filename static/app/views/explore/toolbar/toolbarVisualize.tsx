@@ -1,0 +1,360 @@
+import type {MouseEventHandler, ReactNode} from 'react';
+import {useCallback, useMemo, useState} from 'react';
+import styled from '@emotion/styled';
+import {useDebouncedValue} from '@tanstack/react-pacer';
+import cloneDeep from 'lodash/cloneDeep';
+
+import type {SelectKey, SelectOption} from '@sentry/scraps/compactSelect';
+
+import {IconHide} from 'sentry/icons/iconHide';
+import {t} from 'sentry/locale';
+import {EQUATION_PREFIX} from 'sentry/utils/discover/fields';
+import {ALLOWED_EXPLORE_VISUALIZE_AGGREGATES} from 'sentry/utils/fields';
+import {useOrganization} from 'sentry/utils/useOrganization';
+import {ConditionalAggregateFilterBar} from 'sentry/views/explore/components/conditionalAggregateFilterBar';
+import {
+  ToolbarFooter,
+  ToolbarSection,
+} from 'sentry/views/explore/components/toolbar/styles';
+import {
+  ToolbarVisualizeAddChart,
+  ToolbarVisualizeAddEquation,
+  ToolbarVisualizeDropdown,
+  ToolbarVisualizeHeader,
+} from 'sentry/views/explore/components/toolbar/toolbarVisualize';
+import {VisualizeEquation as VisualizeEquationInput} from 'sentry/views/explore/components/toolbar/toolbarVisualize/visualizeEquation';
+import {DragNDropContext} from 'sentry/views/explore/contexts/dragNDropContext';
+import type {BaseVisualize} from 'sentry/views/explore/contexts/pageParamsContext/visualizes';
+import {
+  DEFAULT_VISUALIZATION,
+  updateVisualizeAggregate,
+} from 'sentry/views/explore/contexts/pageParamsContext/visualizes';
+import {useSpanItemAttributes} from 'sentry/views/explore/hooks/useTraceItemAttributes';
+import {useVisualizeFields} from 'sentry/views/explore/hooks/useVisualizeFields';
+import {
+  isVisualizeEquation,
+  isVisualizeFunction,
+  MAX_VISUALIZES,
+  Visualize,
+  VisualizeEquation,
+  VisualizeFunction,
+} from 'sentry/views/explore/queryParams/visualize';
+import {TraceItemDataset} from 'sentry/views/explore/types';
+import {
+  applyConditionalFilter,
+  buildConditionalAggregate,
+  parseConditionalAggregate,
+  supportsConditionalAggregateFilter,
+} from 'sentry/views/explore/utils/conditionalAggregate';
+
+interface ToolbarVisualizeProps {
+  allowEquations: boolean;
+  setVisualizes: (visualizes: BaseVisualize[]) => void;
+  visualizes: readonly Visualize[];
+}
+
+export function ToolbarVisualize({
+  allowEquations,
+  setVisualizes,
+  visualizes,
+}: ToolbarVisualizeProps) {
+  const addChart = useCallback(() => {
+    const newVisualizes = [
+      ...visualizes,
+      new VisualizeFunction(DEFAULT_VISUALIZATION),
+    ].map(visualize => visualize.serialize());
+    setVisualizes(newVisualizes);
+  }, [setVisualizes, visualizes]);
+
+  const addEquation = useCallback(() => {
+    const newVisualizes = [...visualizes, new VisualizeEquation(EQUATION_PREFIX)].map(
+      visualize => visualize.serialize()
+    );
+    setVisualizes(newVisualizes);
+  }, [setVisualizes, visualizes]);
+
+  const replaceOverlay = (group: number, newVisualize: Visualize) => {
+    const newVisualizes = visualizes.map((visualize, i) => {
+      if (i === group) {
+        return newVisualize.serialize();
+      }
+      return visualize.serialize();
+    });
+    setVisualizes(newVisualizes);
+  };
+
+  const toggleVisibility = (group: number) => {
+    const newVisualizes = visualizes.map((visualize, i) => {
+      if (i === group) {
+        visualize = visualize.replace({visible: !visualize.visible});
+      }
+      return visualize.serialize();
+    });
+    setVisualizes(newVisualizes);
+  };
+
+  const setVisualizesWithOp = useCallback(
+    (columns: Visualize[]) => {
+      setVisualizes(columns.map(v => v.serialize()));
+    },
+    [setVisualizes]
+  );
+
+  return (
+    <DragNDropContext columns={[...visualizes]} setColumns={setVisualizesWithOp}>
+      {({editableColumns, deleteColumnAtIndex}) => (
+        <ToolbarSection data-test-id="section-visualizes">
+          <ToolbarVisualizeHeader />
+          {editableColumns.map((column, i) => {
+            const visualize = column.column;
+            const isOnlyVisualize = editableColumns.length === 1;
+            const canReset = isOnlyVisualize && !isDefaultVisualize(visualize);
+            const onDelete = isOnlyVisualize
+              ? canReset
+                ? () => replaceOverlay(i, new VisualizeFunction(DEFAULT_VISUALIZATION))
+                : undefined
+              : () => deleteColumnAtIndex(i);
+
+            const rowProps = {
+              dragColumnId: isOnlyVisualize ? undefined : column.id,
+              onDelete,
+              deleteLabel: canReset ? t('Clear Visualize') : undefined,
+              onReplace: (newVisualize: Visualize) => replaceOverlay(i, newVisualize),
+              visualize,
+              label: (
+                <VisualizeLabel
+                  index={i}
+                  visualize={visualize}
+                  onClick={() => toggleVisibility(i)}
+                />
+              ),
+            };
+
+            return isVisualizeEquation(visualize) ? (
+              <VisualizeEquationInput key={column.uniqueId} {...rowProps} />
+            ) : (
+              <ToolbarVisualizeItem key={column.uniqueId} {...rowProps} />
+            );
+          })}
+          <ToolbarFooter>
+            <ToolbarVisualizeAddChart
+              add={addChart}
+              disabled={visualizes.length >= MAX_VISUALIZES}
+            />
+            {allowEquations && (
+              <ToolbarVisualizeAddEquation
+                add={addEquation}
+                disabled={visualizes.length >= MAX_VISUALIZES}
+              />
+            )}
+          </ToolbarFooter>
+        </ToolbarSection>
+      )}
+    </DragNDropContext>
+  );
+}
+
+interface VisualizeDropdownProps {
+  label: ReactNode;
+  onReplace: (visualize: Visualize) => void;
+  visualize: Visualize;
+  deleteLabel?: string;
+  dragColumnId?: number;
+  onDelete?: () => void;
+}
+
+function ToolbarVisualizeItem({
+  dragColumnId,
+  label,
+  onDelete,
+  deleteLabel,
+  onReplace,
+  visualize,
+}: VisualizeDropdownProps) {
+  const [search, setSearch] = useState<string | undefined>(undefined);
+  const [debouncedSearch] = useDebouncedValue(search, {wait: 200});
+  const organization = useOrganization();
+  const hasConditionalAggregates = organization.features.includes(
+    'explore-conditional-aggregates'
+  );
+
+  const {attributes: stringTags, isLoading: stringTagsLoading} = useSpanItemAttributes(
+    {search: debouncedSearch},
+    'string'
+  );
+  const {attributes: numberTags, isLoading: numberTagsLoading} = useSpanItemAttributes(
+    {search: debouncedSearch},
+    'number'
+  );
+  const {attributes: booleanTags, isLoading: booleanTagsLoading} = useSpanItemAttributes(
+    {search: debouncedSearch},
+    'boolean'
+  );
+
+  const aggregateOptions = useMemo(
+    () =>
+      ALLOWED_EXPLORE_VISUALIZE_AGGREGATES.map(aggregate => {
+        return {
+          label: aggregate,
+          value: aggregate,
+          textValue: aggregate,
+        };
+      }),
+    []
+  );
+
+  // The dropdowns operate on the base aggregate, with the `_if` combinator and its
+  // filter argument stripped off.
+  const parsedFunction = useMemo(
+    () => parseConditionalAggregate(visualize.yAxis),
+    [visualize.yAxis]
+  );
+
+  const fieldOptions = useVisualizeFields({
+    numberTags,
+    stringTags,
+    booleanTags,
+    parsedFunction,
+    traceItemType: TraceItemDataset.SPANS,
+  });
+
+  // Filters only survive a swap to another aggregate that supports them, and are dropped
+  // entirely while the feature is off so that toggling it never leaves a stale filter.
+  const filter = useMemo(
+    () => (hasConditionalAggregates ? (parsedFunction?.filter ?? '') : ''),
+    [hasConditionalAggregates, parsedFunction?.filter]
+  );
+
+  const onChangeAggregate = useCallback(
+    (option: SelectOption<SelectKey>) => {
+      if (typeof option.value === 'string') {
+        const yAxis = updateVisualizeAggregate({
+          newAggregate: option.value,
+          oldAggregate: parsedFunction?.name,
+          oldArguments: parsedFunction?.arguments,
+        });
+        onReplace(
+          visualize.replace({
+            yAxis: supportsConditionalAggregateFilter(option.value)
+              ? applyConditionalFilter(yAxis, filter)
+              : yAxis,
+          })
+        );
+      }
+    },
+    [filter, onReplace, parsedFunction, visualize]
+  );
+
+  const onChangeArgument = useCallback(
+    (index: number, option: SelectOption<SelectKey>) => {
+      if (typeof option.value === 'string') {
+        let args = cloneDeep(parsedFunction?.arguments);
+        if (args) {
+          args[index] = option.value;
+        } else {
+          args = [option.value];
+        }
+        onReplace(
+          visualize.replace({
+            yAxis: buildConditionalAggregate({
+              name: parsedFunction?.name ?? '',
+              arguments: args,
+              filter,
+            }),
+          })
+        );
+      }
+    },
+    [filter, onReplace, parsedFunction, visualize]
+  );
+
+  const onFilterSearch = useCallback(
+    (newFilter: string) => {
+      if (!parsedFunction) {
+        return;
+      }
+      onReplace(
+        visualize.replace({
+          yAxis: buildConditionalAggregate({
+            name: parsedFunction.name,
+            arguments: parsedFunction.arguments,
+            filter: newFilter,
+          }),
+        })
+      );
+    },
+    [onReplace, parsedFunction, visualize]
+  );
+
+  const showFilterSearchBar =
+    hasConditionalAggregates &&
+    supportsConditionalAggregateFilter(parsedFunction?.name ?? '');
+
+  return (
+    <ToolbarVisualizeDropdown
+      dragColumnId={dragColumnId}
+      aggregateOptions={aggregateOptions}
+      fieldOptions={fieldOptions}
+      onChangeAggregate={onChangeAggregate}
+      onChangeArgument={onChangeArgument}
+      onDelete={onDelete}
+      deleteLabel={deleteLabel}
+      parsedFunction={parsedFunction}
+      label={label}
+      loading={numberTagsLoading || stringTagsLoading || booleanTagsLoading}
+      onSearch={setSearch}
+      onClose={() => setSearch(undefined)}
+      filterSearchBar={
+        showFilterSearchBar ? (
+          <ConditionalAggregateFilterBar
+            menuPresentation="panel"
+            initialQuery={filter}
+            onSearch={onFilterSearch}
+            searchSource="explore-conditional-aggregate"
+          />
+        ) : undefined
+      }
+    />
+  );
+}
+
+function isDefaultVisualize(visualize: Visualize): boolean {
+  return isVisualizeFunction(visualize) && visualize.yAxis === DEFAULT_VISUALIZATION;
+}
+
+interface VisualizeLabelProps {
+  index: number;
+  onClick: MouseEventHandler<HTMLDivElement>;
+  visualize: Visualize;
+}
+
+export function getFunctionLabel(index: number) {
+  return String.fromCharCode('A'.charCodeAt(0) + index);
+}
+
+function getEquationLabel(index: number) {
+  return `ƒ${index}`;
+}
+
+export function getVisualizeLabel(labelIndex: number, isEquation: boolean): string {
+  return isEquation ? getEquationLabel(labelIndex) : getFunctionLabel(labelIndex);
+}
+
+export function VisualizeLabel({index, onClick, visualize}: VisualizeLabelProps) {
+  const label = visualize.visible ? getFunctionLabel(index) : <IconHide />;
+
+  return <Label onClick={onClick}>{label}</Label>;
+}
+
+const Label = styled('div')`
+  cursor: pointer;
+  border-radius: ${p => p.theme.radius.md};
+  background-color: ${p => p.theme.tokens.background.transparent.accent.muted};
+  color: ${p => p.theme.tokens.content.accent};
+  font-weight: ${p => p.theme.font.weight.sans.medium};
+  width: 24px;
+  height: 36px;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+`;

@@ -1,19 +1,43 @@
-import {escapeDoubleQuotes} from 'app/utils';
+import {WildcardOperators} from 'sentry/components/searchSyntax/parser';
+import {quoteFilterKey} from 'sentry/components/searchSyntax/utils';
+import {escapeDoubleQuotes} from 'sentry/utils';
+
+const ALLOWED_WILDCARD_FIELDS = [
+  'span.description',
+  'span.domain',
+  'span.status_code',
+  'log.body',
+  'sentry.normalized_description',
+  'transaction',
+];
+export const EMPTY_OPTION_VALUE = '(empty)';
 
 export enum TokenType {
-  OP,
-  TAG,
-  QUERY,
+  OPERATOR = 0,
+  FILTER = 1,
+  FREE_TEXT = 2,
+  CONTAINS_FILTER = 3,
+  STARTS_WITH_FILTER = 4,
+  ENDS_WITH_FILTER = 5,
+  REGEX_FILTER = 6,
 }
 
-export type Token = {
+const FILTER_TOKENS = [
+  TokenType.FILTER,
+  TokenType.CONTAINS_FILTER,
+  TokenType.STARTS_WITH_FILTER,
+  TokenType.ENDS_WITH_FILTER,
+  TokenType.REGEX_FILTER,
+];
+
+type Token = {
   type: TokenType;
   value: string;
   key?: string;
 };
 
 function isOp(t: Token) {
-  return t.type === TokenType.OP;
+  return t.type === TokenType.OPERATOR;
 }
 
 function isBooleanOp(value: string) {
@@ -29,15 +53,157 @@ function isParen(token: Token, character: '(' | ')') {
   );
 }
 
-export class QueryResults {
-  tagValues: Record<string, string[]>;
+function isCharacterEscaped(value: ArrayLike<string>, index: number): boolean {
+  let precedingBackslashCount = 0;
+  for (let i = index - 1; i >= 0 && value[i] === '\\'; i--) {
+    precedingBackslashCount++;
+  }
+
+  return precedingBackslashCount % 2 === 1;
+}
+
+function countUnquotedUnmatchedClosingParens(s: string): number {
+  let inQuotes = false;
+  let openParenCount = 0;
+  let unmatchedClosingParenCount = 0;
+
+  for (let i = 0; i < s.length; i++) {
+    const char = s[i];
+    if (char === '"' && !isCharacterEscaped(s, i)) {
+      inQuotes = !inQuotes;
+    } else if (char === '(' && !inQuotes) {
+      openParenCount++;
+    } else if (char === ')' && !inQuotes) {
+      if (openParenCount > 0) {
+        openParenCount--;
+      } else {
+        unmatchedClosingParenCount++;
+      }
+    }
+  }
+
+  return unmatchedClosingParenCount;
+}
+
+const REGEX_VALUE_RE = /^\/\/((?:(?!\/\/(?:[\t\n )]|$))[^\n])*)\/\/(?=[\t\n )]|$)/;
+
+function parseRegexFilter(token: string) {
+  const colonIndex = token.indexOf(':');
+  if (colonIndex <= 0) {
+    return null;
+  }
+
+  const value = token.slice(colonIndex + 1);
+  const match = value.match(REGEX_VALUE_RE);
+  if (!match) {
+    return null;
+  }
+
+  const trailingParens = value.slice(match[0].length);
+  if (!/^\)*$/.test(trailingParens)) {
+    return null;
+  }
+
+  return {key: token.slice(0, colonIndex), pattern: match[1]!, trailingParens};
+}
+
+function isProperlyBracketed(value: string): boolean {
+  return /^\[.*\]$/.test(value);
+}
+
+function isProperlyQuoted(value: string): boolean {
+  return /^".*"$/.test(value);
+}
+
+function requiresQuotes(value: string): boolean {
+  return /[\s()\\"]/.test(value);
+}
+
+function generateFilterValue(token: Token, operator: string): string {
+  const key = token.key ? quoteFilterKey(token.key) : token.key;
+  const value =
+    token.key === 'has' || token.key === '!has'
+      ? quoteFilterKey(token.value)
+      : token.value;
+
+  if (value === '' || value === null) {
+    return `${key}${operator}""`;
+  }
+
+  if (
+    // Don't quote if it's already a properly formatted bracket expression
+    isProperlyBracketed(value) ||
+    // Don't quote if it's already properly quoted
+    isProperlyQuoted(value)
+  ) {
+    return `${key}${operator}${value}`;
+  }
+
+  if (requiresQuotes(value) || /^\/\//.test(value)) {
+    return `${key}${operator}"${escapeDoubleQuotes(value)}"`;
+  }
+  return `${key}${operator}${value}`;
+}
+
+// TODO(epurkhiser): This is legacy from before the existence of
+// searchSyntax/parser. We should absolutely replace the internals of this API
+// with `parseSearch`.
+
+export class MutableSearch {
   tokens: Token[];
 
-  constructor(strTokens: string[]) {
+  /**
+   * Creates a `MutableSearch` from a key-value mapping of field:value.
+   * This construct doesn't support conditions like `OR` and `AND` or
+   * parentheses, so it's only useful for simple queries.
+   * @param params
+   * @returns {MutableSearch}
+   */
+  static fromQueryObject(
+    params: Record<string, string[] | string | number | undefined>
+  ): MutableSearch {
+    const query = new MutableSearch('');
+
+    Object.entries(params).forEach(([key, value]) => {
+      if (!value) {
+        return;
+      }
+
+      if (value === EMPTY_OPTION_VALUE) {
+        query.addFilterValue('!has', key);
+      } else if (Array.isArray(value)) {
+        query.addFilterValues(key, value, !ALLOWED_WILDCARD_FIELDS.includes(key));
+      } else {
+        query.addFilterValue(
+          key,
+          value.toString(),
+          !ALLOWED_WILDCARD_FIELDS.includes(key)
+        );
+      }
+    });
+
+    return query;
+  }
+
+  /**
+   * Creates a MutableSearch from a string query
+   */
+  constructor(query: string);
+  /**
+   * Creates a mutable search query from a list of query parts
+   */
+  constructor(queries: string[]);
+  constructor(tokensOrQuery: string[] | string) {
+    const strTokens = Array.isArray(tokensOrQuery)
+      ? tokensOrQuery
+      : splitSearchIntoTokens(tokensOrQuery);
+
     this.tokens = [];
-    this.tagValues = {};
+
     for (let token of strTokens) {
-      let tokenState = TokenType.QUERY;
+      let tokenState = TokenType.FREE_TEXT;
+      let quoted = false;
+      let bracketDepth = 0;
 
       if (isBooleanOp(token)) {
         this.addOp(token.toUpperCase());
@@ -52,40 +218,89 @@ export class QueryResults {
         }
       }
 
-      // Traverse the token and determine if it is a tag
-      // condition or bare words.
+      const regexFilter = parseRegexFilter(token);
+      if (regexFilter) {
+        this.addRegexFilterValue(regexFilter.key, regexFilter.pattern);
+        regexFilter.trailingParens.split('').map(paren => this.addOp(paren));
+        continue;
+      }
+
+      // Traverse the token and check if it's a filter condition or free text
       for (let i = 0, len = token.length; i < len; i++) {
         const char = token[i];
 
-        if (i === 0 && (char === '"' || char === ':')) {
+        if (char === '"' && !isCharacterEscaped(token, i)) {
+          quoted = !quoted;
+          continue;
+        }
+
+        if (!quoted && char === '[') {
+          bracketDepth++;
+        } else if (!quoted && char === ']') {
+          bracketDepth = Math.max(0, bracketDepth - 1);
+        }
+
+        if (i === 0 && char === ':') {
           break;
         }
 
-        // We may have entered a tag condition
-        if (char === ':') {
-          const nextChar = token[i + 1] || '';
-          if ([':', ' '].includes(nextChar)) {
-            tokenState = TokenType.QUERY;
+        // We may have entered a filter condition
+        if (char === ':' && !quoted && bracketDepth === 0) {
+          const indexOffset = i + 1;
+          const nextChar = token[indexOffset] || '';
+
+          if (nextChar === ':' || nextChar === ' ') {
+            tokenState = TokenType.FREE_TEXT;
+          } else if (
+            token.slice(indexOffset, indexOffset + WildcardOperators.CONTAINS.length) ===
+            WildcardOperators.CONTAINS
+          ) {
+            tokenState = TokenType.CONTAINS_FILTER;
+          } else if (
+            token.slice(
+              indexOffset,
+              indexOffset + WildcardOperators.STARTS_WITH.length
+            ) === WildcardOperators.STARTS_WITH
+          ) {
+            tokenState = TokenType.STARTS_WITH_FILTER;
+          } else if (
+            token.slice(indexOffset, indexOffset + WildcardOperators.ENDS_WITH.length) ===
+            WildcardOperators.ENDS_WITH
+          ) {
+            tokenState = TokenType.ENDS_WITH_FILTER;
           } else {
-            tokenState = TokenType.TAG;
+            tokenState = TokenType.FILTER;
           }
           break;
         }
       }
 
       let trailingParen = '';
-      if (token.endsWith(')') && !token.includes('(')) {
+      if (token.endsWith(')')) {
         const parenMatch = token.match(/\)+$/g);
-        if (parenMatch) {
-          trailingParen = parenMatch[0];
-          token = token.replace(/\)+$/g, '');
+        const trailingParenCount = Math.min(
+          parenMatch?.[0].length ?? 0,
+          countUnquotedUnmatchedClosingParens(token)
+        );
+        if (trailingParenCount > 0) {
+          trailingParen = ')'.repeat(trailingParenCount);
+          token = token.slice(0, -trailingParenCount);
         }
       }
 
-      if (tokenState === TokenType.QUERY && token.length) {
-        this.addQuery(token);
-      } else if (tokenState === TokenType.TAG) {
-        this.addStringTag(token);
+      if (tokenState === TokenType.FREE_TEXT && token.length) {
+        this.addFreeText(token);
+      } else if (tokenState === TokenType.FILTER) {
+        this.addStringFilter(token, false);
+      } else if (tokenState === TokenType.CONTAINS_FILTER) {
+        token = token.replace(WildcardOperators.CONTAINS, '');
+        this.addStringContainsFilter(token, false);
+      } else if (tokenState === TokenType.STARTS_WITH_FILTER) {
+        token = token.replace(WildcardOperators.STARTS_WITH, '');
+        this.addStringStartsWithFilter(token, false);
+      } else if (tokenState === TokenType.ENDS_WITH_FILTER) {
+        token = token.replace(WildcardOperators.ENDS_WITH, '');
+        this.addStringEndsWithFilter(token, false);
       }
 
       if (trailingParen !== '') {
@@ -98,17 +313,29 @@ export class QueryResults {
     const formattedTokens: string[] = [];
     for (const token of this.tokens) {
       switch (token.type) {
-        case TokenType.TAG:
-          if (token.value === '' || token.value === null) {
-            formattedTokens.push(`${token.key}:""`);
-          } else if (/[\s\(\)\\"]/g.test(token.value)) {
-            formattedTokens.push(`${token.key}:"${escapeDoubleQuotes(token.value)}"`);
-          } else {
-            formattedTokens.push(`${token.key}:${token.value}`);
-          }
+        case TokenType.FILTER:
+          formattedTokens.push(generateFilterValue(token, ':'));
           break;
-        case TokenType.QUERY:
-          if (/[\s\(\)\\"]/g.test(token.value)) {
+        case TokenType.CONTAINS_FILTER:
+          formattedTokens.push(
+            generateFilterValue(token, `:${WildcardOperators.CONTAINS}`)
+          );
+          break;
+        case TokenType.STARTS_WITH_FILTER:
+          formattedTokens.push(
+            generateFilterValue(token, `:${WildcardOperators.STARTS_WITH}`)
+          );
+          break;
+        case TokenType.ENDS_WITH_FILTER:
+          formattedTokens.push(
+            generateFilterValue(token, `:${WildcardOperators.ENDS_WITH}`)
+          );
+          break;
+        case TokenType.REGEX_FILTER:
+          formattedTokens.push(`${quoteFilterKey(token.key!)}://${token.value}//`);
+          break;
+        case TokenType.FREE_TEXT:
+          if (requiresQuotes(token.value)) {
             formattedTokens.push(`"${escapeDoubleQuotes(token.value)}"`);
           } else {
             formattedTokens.push(token.value);
@@ -121,45 +348,199 @@ export class QueryResults {
     return formattedTokens.join(' ').trim();
   }
 
-  addStringTag(value: string) {
-    const [key, tag] = formatTag(value);
-    this.addTagValues(key, [tag]);
+  /**
+   * Adds a string filter to the current MutableSearch query. The filter should follow
+   * the format key:value.
+   */
+  addStringFilter(filter: string, shouldEscape = true) {
+    const [key, value] = parseFilter(filter);
+    this.addFilterValues(key!, [value!], shouldEscape);
     return this;
   }
 
-  addTagValues(tag: string, tagValues: string[]) {
-    for (const t of tagValues) {
-      this.tagValues[tag] = Array.isArray(this.tagValues[tag])
-        ? [...this.tagValues[tag], t]
-        : [t];
-      const token: Token = {type: TokenType.TAG, key: tag, value: t};
-      this.tokens.push(token);
+  addStringContainsFilter(filter: string, shouldEscape = true) {
+    const [key, value] = parseFilter(filter);
+    this.addContainsFilterValues(key!, [value!], shouldEscape);
+    return this;
+  }
+
+  addStringStartsWithFilter(filter: string, shouldEscape = true) {
+    const [key, value] = parseFilter(filter);
+    this.addStartsWithFilterValues(key!, [value!], shouldEscape);
+    return this;
+  }
+
+  addStringEndsWithFilter(filter: string, shouldEscape = true) {
+    const [key, value] = parseFilter(filter);
+    this.addEndsWithFilterValues(key!, [value!], shouldEscape);
+    return this;
+  }
+
+  addFilterValues(key: string, values: string[], shouldEscape = true) {
+    for (const value of values) {
+      this.addFilterValue(key, value, shouldEscape);
     }
     return this;
   }
 
-  setTagValues(tag: string, tagValues: string[]) {
-    this.removeTag(tag);
-    this.addTagValues(tag, tagValues);
+  addContainsFilterValues(key: string, values: string[], shouldEscape = true) {
+    for (const value of values) {
+      this.addContainsFilterValue(key, value, shouldEscape);
+    }
     return this;
   }
 
-  getTagValues(tag: string) {
-    return this.tagValues[tag] ?? [];
+  addStartsWithFilterValues(key: string, values: string[], shouldEscape = true) {
+    for (const value of values) {
+      this.addStartsWithFilterValue(key, value, shouldEscape);
+    }
+    return this;
   }
 
-  getTagKeys() {
-    return Object.keys(this.tagValues);
+  addEndsWithFilterValues(key: string, values: string[], shouldEscape = true) {
+    for (const value of values) {
+      this.addEndsWithFilterValue(key, value, shouldEscape);
+    }
+    return this;
   }
 
-  hasTag(tag: string) {
-    const tags = this.getTagValues(tag);
-    return tags && tags.length;
+  /**
+   * Adds the filter values separated by OR operators. This is in contrast to
+   * addFilterValues, which implicitly separates each filter value with an AND operator.
+   */
+  addDisjunctionFilterValues(key: string, values: string[]) {
+    if (values.length === 0) {
+      return this;
+    }
+
+    this.addOp('(');
+    for (let i = 0; i < values.length; i++) {
+      if (i > 0) {
+        this.addOp('OR');
+      }
+      this.addFilterValue(key, values[i]!);
+    }
+    this.addOp(')');
+    return this;
   }
 
-  removeTag(key: string) {
+  addFilterValue(key: string, value: string, shouldEscape = true) {
+    // Filter values that we insert through the UI can contain special characters
+    // that need to escaped. User entered filters should not be escaped.
+    const escaped = shouldEscape ? escapeFilterValue(value) : value;
+    const token: Token = {type: TokenType.FILTER, key, value: escaped};
+    this.tokens.push(token);
+  }
+
+  setFilterValues(key: string, values: string[], shouldEscape = true) {
+    this.removeFilter(key);
+    this.addFilterValues(key, values, shouldEscape);
+    return this;
+  }
+
+  addContainsFilterValue(key: string, value: string, shouldEscape = true) {
+    const escaped = shouldEscape ? escapeFilterValue(value) : value;
+    const token: Token = {type: TokenType.CONTAINS_FILTER, key, value: escaped};
+    this.tokens.push(token);
+  }
+
+  addStartsWithFilterValue(key: string, value: string, shouldEscape = true) {
+    const escaped = shouldEscape ? escapeFilterValue(value) : value;
+    const token: Token = {type: TokenType.STARTS_WITH_FILTER, key, value: escaped};
+    this.tokens.push(token);
+  }
+
+  addEndsWithFilterValue(key: string, value: string, shouldEscape = true) {
+    const escaped = shouldEscape ? escapeFilterValue(value) : value;
+    const token: Token = {type: TokenType.ENDS_WITH_FILTER, key, value: escaped};
+    this.tokens.push(token);
+  }
+
+  addRegexFilterValue(key: string, pattern: string) {
+    const token: Token = {type: TokenType.REGEX_FILTER, key, value: pattern};
+    this.tokens.push(token);
+  }
+
+  get filters() {
+    type Filters = Record<string, string[]>;
+
+    const reducer = (acc: Filters, token: Token) => ({
+      ...acc,
+      [token.key!]: [...(acc[token.key!] ?? []), token.value],
+    });
+
+    return this.tokens
+      .filter(t => FILTER_TOKENS.includes(t.type))
+      .reduce<Filters>(reducer, {});
+  }
+
+  getFilterValues(key: string) {
+    return this.filters[key] ?? [];
+  }
+
+  getFilterKeys() {
+    return Object.keys(this.filters);
+  }
+
+  getTokenKeys() {
+    return this.tokens.map(t => t.key);
+  }
+
+  hasFilter(key: string): boolean {
+    return this.getFilterValues(key).length > 0;
+  }
+
+  /**
+   * Renames all filter tokens matching `oldKey` to `newKey` in-place,
+   * preserving operators, negation, position, and filter type.
+   */
+  renameFilter(oldKey: string, newKey: string) {
+    for (const token of this.tokens) {
+      if (token.key === oldKey) {
+        token.key = newKey;
+      } else if (token.key === `!${oldKey}`) {
+        token.key = `!${newKey}`;
+      }
+    }
+    return this;
+  }
+
+  removeFilter(key: string) {
+    const removeErroneousAndOrOps = () => {
+      let toRemove = -1;
+      do {
+        if (toRemove >= 0) {
+          this.tokens.splice(toRemove, 1);
+          toRemove = -1;
+        }
+
+        for (let i = 0; i < this.tokens.length; i++) {
+          const token = this.tokens[i]!;
+          const prev = this.tokens[i - 1];
+          const next = this.tokens[i + 1];
+          if (isOp(token) && isBooleanOp(token.value)) {
+            if (prev === undefined || isOp(prev) || next === undefined || isOp(next)) {
+              // Want to avoid removing `(term) OR (term)` and `term OR (term)`
+              if (
+                prev &&
+                next &&
+                (isParen(prev, ')') || !isOp(prev)) &&
+                (isParen(next, '(') || !isOp(next))
+              ) {
+                continue;
+              }
+              toRemove = i;
+              break;
+            }
+          }
+        }
+      } while (toRemove >= 0);
+    };
+
     this.tokens = this.tokens.filter(token => token.key !== key);
-    delete this.tagValues[key];
+
+    // Remove any AND/OR operators that have become erroneous due to filtering out tokens
+    removeErroneousAndOrOps();
 
     // Now the really complicated part: removing parens that only have one element in them.
     // Since parens are themselves tokens, this gets tricky. In summary, loop through the
@@ -167,7 +548,7 @@ export class QueryResults {
     // to see if that open paren corresponds to a closed paren with one or fewer items inside.
     // If it does, delete those parens, and loop again until there are no more parens to delete.
     let parensToDelete: number[] = [];
-    const cleanParens = (_, idx: number) => !parensToDelete.includes(idx);
+    const cleanParens = (_: any, idx: number) => !parensToDelete.includes(idx);
     do {
       if (parensToDelete.length) {
         this.tokens = this.tokens.filter(cleanParens);
@@ -175,14 +556,14 @@ export class QueryResults {
       parensToDelete = [];
 
       for (let i = 0; i < this.tokens.length; i++) {
-        const token = this.tokens[i];
+        const token = this.tokens[i]!;
         if (!isOp(token) || token.value !== '(') {
           continue;
         }
 
         let alreadySeen = false;
         for (let j = i + 1; j < this.tokens.length; j++) {
-          const nextToken = this.tokens[j];
+          const nextToken = this.tokens[j]!;
           if (isOp(nextToken) && nextToken.value === '(') {
             // Continue down to the nested parens. We can skip i forward since we know
             // everything between i and j is NOT an open paren.
@@ -212,69 +593,47 @@ export class QueryResults {
     // cases like `a OR OR b` would remove both operators, when only one should be removed. So
     // instead, we loop until we find an operator to remove, then go back to the start and loop
     // again.
-    let toRemove = -1;
-    do {
-      if (toRemove >= 0) {
-        this.tokens.splice(toRemove, 1);
-        toRemove = -1;
-      }
-
-      for (let i = 0; i < this.tokens.length; i++) {
-        const token = this.tokens[i];
-        const prev = this.tokens[i - 1];
-        const next = this.tokens[i + 1];
-        if (isOp(token) && isBooleanOp(token.value)) {
-          if (prev === undefined || isOp(prev) || next === undefined || isOp(next)) {
-            // Want to avoid removing `(term) OR (term)`
-            if (isParen(prev, ')') && isParen(next, '(')) {
-              continue;
-            }
-            toRemove = i;
-            break;
-          }
-        }
-      }
-    } while (toRemove >= 0);
+    removeErroneousAndOrOps();
 
     return this;
   }
 
-  removeTagValue(key: string, value: string) {
-    const values = this.getTagValues(key);
+  removeFilterValue(key: string, value: string) {
+    const values = this.getFilterValues(key);
     if (Array.isArray(values) && values.length) {
-      this.setTagValues(
+      this.setFilterValues(
         key,
         values.filter(item => item !== value)
       );
     }
+    return this;
   }
 
-  addQuery(value: string) {
-    const token: Token = {type: TokenType.QUERY, value: formatQuery(value)};
+  addFreeText(value: string) {
+    const token: Token = {type: TokenType.FREE_TEXT, value: formatQuery(value)};
     this.tokens.push(token);
     return this;
   }
 
   addOp(value: string) {
-    const token: Token = {type: TokenType.OP, value};
+    const token: Token = {type: TokenType.OPERATOR, value};
     this.tokens.push(token);
     return this;
   }
 
-  get query(): string[] {
-    return this.tokens.filter(t => t.type === TokenType.QUERY).map(t => t.value);
+  get freeText(): string[] {
+    return this.tokens.filter(t => t.type === TokenType.FREE_TEXT).map(t => t.value);
   }
 
-  set query(values: string[]) {
-    this.tokens = this.tokens.filter(t => t.type !== TokenType.QUERY);
+  set freeText(values: string[]) {
+    this.tokens = this.tokens.filter(t => t.type !== TokenType.FREE_TEXT);
     for (const v of values) {
-      this.addQuery(v);
+      this.addFreeText(v);
     }
   }
 
   copy() {
-    const q = new QueryResults([]);
-    q.tagValues = {...this.tagValues};
+    const q = new MutableSearch([]);
     q.tokens = [...this.tokens];
     return q;
   }
@@ -285,21 +644,84 @@ export class QueryResults {
 }
 
 /**
- * Tokenize a search into a QueryResult
- *
- *
- * Should stay in sync with src.sentry.search.utils:tokenize_query
+ * The prefixes of the grammar's explicit typed keys, e.g. `tags[foo, string]`.
  */
-export function tokenizeSearch(query: string) {
-  const tokens = splitSearchIntoTokens(query);
-  return new QueryResults(tokens);
+const TYPED_KEY_PREFIXES = ['tags', 'flags'];
+
+/**
+ * Whether the unquoted `[` at `openIdx` opens a span the grammar lets contain
+ * whitespace. There are exactly two: a filter's value list, which follows the
+ * `:` behind an optional wildcard operator (`text_in_filter` /
+ * `numeric_in_filter`), and an explicit typed key such as `tags[foo, string]`,
+ * which follows a `tags`/`flags` prefix. A `[` anywhere else is ordinary text.
+ */
+function opensBracketedSpan(queryChars: string[], openIdx: number): boolean {
+  let idx = openIdx;
+
+  for (const op of Object.values(WildcardOperators)) {
+    if (idx >= op.length && queryChars.slice(idx - op.length, idx).join('') === op) {
+      idx -= op.length;
+      break;
+    }
+  }
+
+  if (queryChars[idx - 1] === ':') {
+    return true;
+  }
+
+  return TYPED_KEY_PREFIXES.some(prefix => {
+    const start = openIdx - prefix.length;
+    if (start < 0 || queryChars.slice(start, openIdx).join('') !== prefix) {
+      return false;
+    }
+    // The prefix has to start the key, so `mytags[a, b]` is still plain text.
+    const before = queryChars[start - 1];
+    return before === undefined || isSpace(before) || before === '!' || before === '(';
+  });
 }
 
 /**
- * Convert a QueryResults object back to a query string
+ * Whether the unquoted `[` at `openIdx` is closed by a matching unquoted `]`
+ * later in the query. An unclosed bracket is plain text, not the start of a
+ * list, so the splitter must not swallow the rest of the query waiting for its
+ * `]`. Nested pairs are matched, so the `]` of a later `tags[foo]` does not
+ * pass as the closer of an earlier stray `[`.
  */
-export function stringifyQueryObject(results: QueryResults) {
-  return results.formatString();
+function hasClosingBracket(queryChars: string[], openIdx: number): boolean {
+  let quoteType = '';
+  let quoteEnclosed = false;
+  let depth = 1;
+
+  for (let idx = openIdx + 1; idx < queryChars.length; idx++) {
+    const char = queryChars[idx]!;
+
+    if (
+      ["'", '"'].includes(char) &&
+      !isCharacterEscaped(queryChars, idx) &&
+      (!quoteEnclosed || quoteType === char)
+    ) {
+      quoteEnclosed = !quoteEnclosed;
+      if (quoteEnclosed) {
+        quoteType = char;
+      }
+      continue;
+    }
+
+    if (quoteEnclosed) {
+      continue;
+    }
+
+    if (char === '[') {
+      depth++;
+    } else if (char === ']') {
+      depth--;
+      if (depth === 0) {
+        return true;
+      }
+    }
+  }
+
+  return false;
 }
 
 /**
@@ -315,31 +737,69 @@ function splitSearchIntoTokens(query: string) {
   let endOfPrevWord = '';
   let quoteType = '';
   let quoteEnclosed = false;
+  // The search grammar allows whitespace between the items of a bracketed
+  // list, e.g. `key:[a, b]`, so a space inside brackets does not end the
+  // token, and the same goes for a typed key like `tags[foo, string]`. Only a
+  // `[` in one of those positions that is closed later counts; a stray or
+  // unclosed bracket is ordinary text and keeps splitting on whitespace.
+  let bracketDepth = 0;
 
   for (let idx = 0; idx < queryChars.length; idx++) {
-    const char = queryChars[idx];
-    const nextChar = queryChars.length - 1 > idx ? queryChars[idx + 1] : null;
+    const char = queryChars[idx]!;
+    const nextChar = queryChars.length - 1 > idx ? queryChars[idx + 1]! : null;
     token += char;
+
+    if (!quoteEnclosed && bracketDepth === 0 && char === ':' && nextChar === '/') {
+      const regexValue = queryChars
+        .slice(idx + 1)
+        .join('')
+        .match(REGEX_VALUE_RE)?.[0];
+      if (regexValue) {
+        token += regexValue;
+        idx += Array.from(regexValue).length;
+        endOfPrevWord = '/';
+        continue;
+      }
+    }
+
+    if (!quoteEnclosed && char === '[') {
+      if (bracketDepth > 0) {
+        // Already inside a list, so track nesting to find the matching `]`.
+        bracketDepth++;
+      } else if (
+        opensBracketedSpan(queryChars, idx) &&
+        hasClosingBracket(queryChars, idx)
+      ) {
+        bracketDepth = 1;
+      }
+    } else if (!quoteEnclosed && char === ']' && bracketDepth > 0) {
+      bracketDepth--;
+    }
 
     if (nextChar !== null && !isSpace(char) && isSpace(nextChar)) {
       endOfPrevWord = char;
     }
 
-    if (isSpace(char) && !quoteEnclosed && endOfPrevWord !== ':' && !isSpace(token)) {
+    if (
+      isSpace(char) &&
+      !quoteEnclosed &&
+      bracketDepth === 0 &&
+      endOfPrevWord !== ':' &&
+      !isSpace(token)
+    ) {
       tokens.push(token.trim());
       token = '';
     }
 
-    if (["'", '"'].includes(char) && (!quoteEnclosed || quoteType === char)) {
+    if (
+      ["'", '"'].includes(char) &&
+      !isCharacterEscaped(queryChars, idx) &&
+      (!quoteEnclosed || quoteType === char)
+    ) {
       quoteEnclosed = !quoteEnclosed;
       if (quoteEnclosed) {
         quoteType = char;
       }
-    }
-
-    if (quoteEnclosed && char === '\\' && nextChar === quoteType) {
-      token += nextChar;
-      idx++;
     }
   }
 
@@ -359,15 +819,61 @@ function isSpace(s: string) {
 }
 
 /**
- * Splits tags on ':' and removes enclosing quotes if present, and returns both
- * sides of the split as strings.
+ * Splits a filter on ':' and removes enclosing quotes if present, and returns
+ * both sides of the split as strings.
  */
-function formatTag(tag: string) {
-  const idx = tag.indexOf(':');
-  const key = removeSurroundingQuotes(tag.slice(0, idx));
-  const value = removeSurroundingQuotes(tag.slice(idx + 1));
+function parseFilter(filter: string) {
+  let idx = 0;
+  let quoted = false;
+  let bracketDepth = 0;
+
+  // look for the first `:` that is not in quotes
+  for (; idx < filter.length; idx++) {
+    const c = filter[idx];
+
+    if (c === '"' && !isCharacterEscaped(filter, idx)) {
+      quoted = !quoted;
+      continue;
+    }
+
+    if (!quoted && c === '[') {
+      bracketDepth++;
+    } else if (!quoted && c === ']') {
+      bracketDepth = Math.max(0, bracketDepth - 1);
+    }
+
+    if (c === ':' && !quoted && bracketDepth === 0) {
+      const key = removeSurroundingFilterKeyQuotes(filter.slice(0, idx));
+      const foundValue = filter.slice(idx + 1);
+
+      // This snippet here handles the case where we have a single value that uses quotes
+      // to escape the brackets e.g. message:"[foo]" whereas before it was removing them.
+      const isEscapingBrackets = foundValue.startsWith('"[') && foundValue.endsWith(']"');
+      const value = isEscapingBrackets ? foundValue : removeSurroundingQuotes(foundValue);
+
+      return [key, value];
+    }
+  }
+
+  // something went wrong, fallback to the naive approach of spliting the filter
+  idx = filter.indexOf(':');
+  const key = removeSurroundingFilterKeyQuotes(filter.slice(0, idx));
+  const foundValue = filter.slice(idx + 1);
+
+  // This snippet here handles the case where we have a single value that uses quotes
+  // to escape the brackets e.g. message:"[foo]" whereas before it was removing them.
+  const isEscapingBrackets = foundValue.startsWith('"[') && foundValue.endsWith(']"');
+  const value = isEscapingBrackets ? foundValue : removeSurroundingQuotes(foundValue);
 
   return [key, value];
+}
+
+function removeSurroundingFilterKeyQuotes(key: string) {
+  if (key.startsWith('!')) {
+    return `!${removeSurroundingQuotes(key.slice(1))}`;
+  }
+
+  return removeSurroundingQuotes(key);
 }
 
 function removeSurroundingQuotes(text: string) {
@@ -385,7 +891,7 @@ function removeSurroundingQuotes(text: string) {
 
   let right = length - 1;
   for (; right >= length / 2; right--) {
-    if (text.charAt(right) !== '"' || text.charAt(right - 1) === '\\') {
+    if (text.charAt(right) !== '"' || isCharacterEscaped(text, right)) {
       break;
     }
   }
@@ -397,5 +903,17 @@ function removeSurroundingQuotes(text: string) {
  * Strips enclosing quotes and parens from a query, if present.
  */
 function formatQuery(query: string) {
-  return query.replace(/^["\(]+|["\)]+$/g, '');
+  return query.replace(/^["(]+|[")]+$/g, '');
+}
+
+/**
+ * Some characters have special meaning in a filter value. So when they are
+ * directly added as a value, we have to escape them to mean the literal.
+ */
+export function escapeFilterValue(value: string) {
+  // TODO(txiao): The types here are definitely wrong.
+  // Need to dig deeper to see where exactly it's wrong.
+  //
+  // astericks (*) is used for wildcard searches
+  return typeof value === 'string' ? value.replace(/(\*)/g, '\\$1') : value;
 }

@@ -1,143 +1,152 @@
-import React from 'react';
-import {withRouter, WithRouterProps} from 'react-router';
+import {useContext, useEffect} from 'react';
+import {useMatches} from 'react-router-dom';
 import styled from '@emotion/styled';
+import type {Scope} from '@sentry/core';
 import * as Sentry from '@sentry/react';
-import PropTypes from 'prop-types';
 
-import Alert from 'app/components/alert';
-import {IconWarning} from 'app/icons';
-import {t, tct} from 'app/locale';
-import space from 'app/styles/space';
-import getRouteStringFromRoutes from 'app/utils/getRouteStringFromRoutes';
+import {Alert} from '@sentry/scraps/alert';
+import {ExternalLink} from '@sentry/scraps/link';
 
-type Props = WithRouterProps & {
-  error: Error | undefined;
-  /**
-   * Disable logging to Sentry
-   */
-  disableLogSentry?: boolean;
-  disableReport?: boolean;
-};
+import {getLastEventId} from 'sentry/bootstrap/initializeSdk';
+import {List} from 'sentry/components/list';
+import {ListItem} from 'sentry/components/list/listItem';
+import {t, tct} from 'sentry/locale';
+import {OrganizationStore} from 'sentry/stores/organizationStore';
+import {useLegacyStore} from 'sentry/stores/useLegacyStore';
+import {getRouteStringFromRoutes} from 'sentry/utils/getRouteStringFromRoutes';
+import {ProjectRouteContext} from 'sentry/views/projects/projectRouteContext';
 
-class RouteError extends React.Component<Props> {
-  static contextTypes = {
-    organization: PropTypes.object,
-    project: PropTypes.object,
-  };
+interface RouteErrorProps {
+  error?: Error;
+}
 
-  UNSAFE_componentWillMount() {
-    const {error} = this.props;
-    const {disableLogSentry, disableReport, routes} = this.props;
-    const {organization, project} = this.context;
+export function RouteError({error}: RouteErrorProps) {
+  const matches = useMatches();
+  const {organization} = useLegacyStore(OrganizationStore);
+  const project = useContext(ProjectRouteContext);
 
-    if (disableLogSentry) {
-      return;
-    }
+  useEffect(() => {
     if (!error) {
       return;
     }
 
-    const route = getRouteStringFromRoutes(routes);
-    const enrichScopeContext = scope => {
+    const route = getRouteStringFromRoutes({matches});
+    const enrichScopeContext = (scope: Scope) => {
       scope.setExtra('route', route);
-      scope.setExtra('orgFeatures', (organization && organization.features) || []);
-      scope.setExtra('orgAccess', (organization && organization.access) || []);
-      scope.setExtra('projectFeatures', (project && project.features) || []);
+      scope.setExtra('orgFeatures', organization?.features ?? []);
+      scope.setExtra('orgAccess', organization?.access ?? []);
+      scope.setExtra('projectFeatures', project?.features ?? []);
       return scope;
     };
 
     if (route) {
-      /**
-       * Unexpectedly, error.message would sometimes not have a setter property, causing another exception to be thrown,
-       * and losing the original error in the process. Wrapping the mutation in a try-catch in an attempt to preserve
-       * the original error for logging.
-       * See https://github.com/getsentry/sentry/issues/16314 for more details.
-       */
+      // Unexpectedly, error.message would sometimes not have a setter
+      // property, causing another exception to be thrown, and losing the
+      // original error in the process. Wrapping the mutation in a try-catch in
+      // an attempt to preserve the original error for logging.
+      //
+      // See https://github.com/getsentry/sentry/issues/16314 for more details.
       try {
         error.message = `${error.message}: ${route}`;
       } catch (e) {
         Sentry.withScope(scope => {
           enrichScopeContext(scope);
-          Sentry.captureException(e);
+          scope.setExtra('cannotSetMessage', true);
         });
       }
     }
+
     // TODO(dcramer): show something in addition to embed (that contains it?)
-    // throw this in a timeout so if it errors we dont fall over
-    this._timeout = window.setTimeout(() => {
+    // throw this in a timeout so if it errors we don't fall over
+    const reportDialogTimeout = window.setTimeout(() => {
       Sentry.withScope(scope => {
         enrichScopeContext(scope);
         Sentry.captureException(error);
       });
 
-      if (!disableReport) {
-        Sentry.showReportDialog();
-      }
+      Sentry.showReportDialog({eventId: getLastEventId() || ''});
     });
-  }
 
-  componentWillUnmount() {
-    if (this._timeout) {
-      window.clearTimeout(this._timeout);
-    }
-    document.querySelector('.sentry-error-embed-wrapper')?.remove();
-  }
+    return function cleanup() {
+      window.clearTimeout(reportDialogTimeout);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [error]);
 
-  private _timeout: undefined | number;
+  // Remove the report dialog on unmount
+  useEffect(() => () => document.querySelector('.sentry-error-embed-wrapper')?.remove());
 
-  render() {
-    // TODO(dcramer): show additional resource links
-    return (
-      <Alert icon={<IconWarning size="md" />} type="error">
-        <Heading>
-          <span>{t('Oops! Something went wrong')}</span>
-        </Heading>
+  return (
+    <Alert.Container>
+      <Alert variant="danger" showIcon={false}>
+        <Heading>{t('Oops! Something went wrong')}</Heading>
         <p>
           {t(`
           It looks like you've hit an issue in our client application. Don't worry though!
           We use Sentry to monitor Sentry and it's likely we're already looking into this!
           `)}
         </p>
-        <p>{t("If you're daring, you may want to try the following:")}</p>
-        <ul>
-          {window && window.adblockSuspected && (
-            <li>
+        <p style={{marginBottom: 0}}>
+          {t("If you're daring, you may want to try the following:")}
+        </p>
+        <List symbol="bullet">
+          {window?.adblockSuspected && (
+            <ListItem>
               {t(
                 "We detected something AdBlock-like. Try disabling it, as it's known to cause issues."
               )}
-            </li>
+            </ListItem>
           )}
-          <li>
-            {tct(`Give it a few seconds and [link:reload the page].`, {
+          <ListItem>
+            {tct('Give it a few seconds and [link:reload the page].', {
               link: (
                 <a
                   onClick={() => {
-                    window.location.href = window.location.href;
+                    window.location.href = String(window.location.href);
                   }}
                 />
               ),
             })}
-          </li>
-          <li>
-            {tct(`If all else fails, [link:contact us] with more details.`, {
-              link: <a href="https://github.com/getsentry/sentry/issues/new/choose" />,
-            })}
-          </li>
-        </ul>
+          </ListItem>
+          <ListItem>
+            {tct(
+              'Still stuck? Our [link:troubleshooting guide] has tips for common browser-related issues.',
+              {
+                link: (
+                  <ExternalLink href="https://www.sentry.help/en/articles/13964425-why-sentry-io-is-not-loading" />
+                ),
+              }
+            )}
+          </ListItem>
+        </List>
+        <p style={{marginTop: '1em', marginBottom: 0}}>
+          {tct(
+            'If the guide does not help, [link:contact support] — include as many of these details as you can:',
+            {
+              link: <ExternalLink href="https://www.sentry.help" />,
+            }
+          )}
+        </p>
+        <List symbol="bullet">
+          <ListItem>{t('Browser logs (console and network tab errors)')}</ListItem>
+          <ListItem>
+            {t(
+              'Whether anyone else in your organization sees the same error on that page'
+            )}
+          </ListItem>
+          <ListItem>{t('Which browser(s) and version(s) you are using')}</ListItem>
+          <ListItem>{t('Whether the error is intermittent or consistent')}</ListItem>
+          <ListItem>
+            {t('Whether the error only appears on that page, or on other pages too')}
+          </ListItem>
+        </List>
       </Alert>
-    );
-  }
+    </Alert.Container>
+  );
 }
 
-const Heading = styled('h3')`
-  display: flex;
-  align-items: center;
-
-  font-size: ${p => p.theme.headerFontSize};
-  font-weight: normal;
-
-  margin-bottom: ${space(1.5)};
+const Heading = styled('h1')`
+  font-size: ${p => p.theme.font.size.lg};
+  line-height: 1.4;
+  margin-bottom: ${p => p.theme.space.md};
 `;
-
-export default withRouter(RouteError);
-export {RouteError};

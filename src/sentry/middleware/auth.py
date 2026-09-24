@@ -1,10 +1,24 @@
+from __future__ import annotations
+
 from django.contrib.auth import get_user as auth_get_user
 from django.contrib.auth.models import AnonymousUser
+from django.http.request import HttpRequest
+from django.http.response import HttpResponseBase
+from django.utils.deprecation import MiddlewareMixin
 from django.utils.functional import SimpleLazyObject
+from rest_framework.authentication import get_authorization_header
+from rest_framework.exceptions import AuthenticationFailed
+from rest_framework.request import Request
 
-from sentry.models import UserIP
+from sentry.api.authentication import (
+    AgentTokenAuthentication,
+    ApiKeyAuthentication,
+    OrgAuthTokenAuthentication,
+    UserAuthTokenAuthentication,
+    ViewerContextAuthentication,
+)
+from sentry.users.models.userip import UserIP
 from sentry.utils.auth import AuthUserPasswordExpired, logger
-from sentry.utils.linksign import process_signature
 
 
 def get_user(request):
@@ -17,7 +31,7 @@ def get_user(request):
         # actions take place, this nonce will rotate causing a
         # mismatch here forcing the session to be logged out and
         # requiring re-validation.
-        if user.is_authenticated() and not user.is_sentry_app:
+        if user.is_authenticated and not user.is_sentry_app:
             # We only need to check the nonce if there is a nonce
             # currently set on the User. By default, the value will
             # be None until the first action has been taken, at
@@ -26,7 +40,10 @@ def get_user(request):
                 # If the nonces don't match, this session is anonymous.
                 logger.info(
                     "user.auth.invalid-nonce",
-                    extra={"ip_address": request.META["REMOTE_ADDR"], "user_id": user.id},
+                    extra={
+                        "ip_address": request.META["REMOTE_ADDR"],
+                        "user_id": user.id,
+                    },
                 )
                 user = AnonymousUser()
             else:
@@ -35,21 +52,55 @@ def get_user(request):
     return request._cached_user
 
 
-class AuthenticationMiddleware:
-    def process_request(self, request):
-        request.user_from_signed_request = False
+class AuthenticationMiddleware(MiddlewareMixin):
+    def process_request(self, request: Request) -> None:
+        if request.path.startswith("/api/0/internal/rpc/"):
+            # Avoid doing RPC authentication when we're already
+            # in an RPC request.
+            request.user, request.auth = AnonymousUser(), None
+            return
 
-        # If there is a valid signature on the request we override the
-        # user with the user contained within the signature.
-        user = process_signature(request)
-        if user is not None:
-            request.user = user
-            request.user_from_signed_request = True
-        else:
-            request.user = SimpleLazyObject(lambda: get_user(request))
+        auth = get_authorization_header(request).split()
 
-    def process_exception(self, request, exception):
+        if auth:
+            for authenticator_class in (
+                UserAuthTokenAuthentication,
+                OrgAuthTokenAuthentication,
+                AgentTokenAuthentication,
+                ApiKeyAuthentication,
+            ):
+                authenticator = authenticator_class()
+                if not authenticator.accepts_auth(auth):
+                    continue
+                try:
+                    result = authenticator.authenticate(request)
+                except AuthenticationFailed:
+                    result = None
+                if result:
+                    request.user, request.auth = result
+                else:
+                    # default to anonymous user and use IP ratelimit
+                    request.user, request.auth = SimpleLazyObject(lambda: get_user(request)), None  # type:ignore[assignment]
+                return
+
+        # Try viewer context authentication (signed headers from trusted services)
+        try:
+            result = ViewerContextAuthentication().authenticate(request)
+        except AuthenticationFailed:
+            result = None
+        if result:
+            request.user, request.auth = result
+            return
+
+        # default to anonymous user and use IP ratelimit
+        request.user, request.auth = SimpleLazyObject(lambda: get_user(request)), None  # type:ignore[assignment]
+
+    def process_exception(
+        self, request: HttpRequest, exception: Exception
+    ) -> HttpResponseBase | None:
         if isinstance(exception, AuthUserPasswordExpired):
-            from sentry.web.frontend.accounts import expired
+            from sentry.users.web.accounts import expired
 
             return expired(request, exception.user)
+        else:
+            return None

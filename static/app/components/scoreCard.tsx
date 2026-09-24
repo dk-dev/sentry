@@ -1,86 +1,108 @@
-import React from 'react';
+import type {Theme} from '@emotion/react';
 import styled from '@emotion/styled';
 
-import {Panel} from 'app/components/panels';
-import QuestionTooltip from 'app/components/questionTooltip';
-import overflowEllipsis from 'app/styles/overflowEllipsis';
-import space from 'app/styles/space';
-import {defined} from 'app/utils';
-import {Theme} from 'app/utils/theme';
+import {Flex, type FlexProps} from '@sentry/scraps/layout';
 
-type Props = {
+import {Panel} from 'sentry/components/panels/panel';
+import {QuestionTooltip} from 'sentry/components/questionTooltip';
+import {TextOverflow} from 'sentry/components/textOverflow';
+import {defined} from 'sentry/utils/defined';
+
+type ScoreCardProps = {
   title: React.ReactNode;
-  score?: React.ReactNode;
+  className?: string;
   help?: React.ReactNode;
+  score?: React.ReactNode;
   trend?: React.ReactNode;
   trendStatus?: 'good' | 'bad';
-  className?: string;
 };
 
-function ScoreCard({title, score, help, trend, trendStatus, className}: Props) {
+export function ScoreCard({
+  title,
+  score,
+  help,
+  trend,
+  trendStatus,
+  className,
+}: ScoreCardProps) {
+  const displayScore = score ?? '\u2014';
+
   return (
-    <StyledPanel className={className}>
-      <HeaderTitle>
-        <Title>{title}</Title>
-        {help && <QuestionTooltip title={help} size="sm" position="top" />}
-      </HeaderTitle>
+    <ScorePanel className={className}>
+      <Flex wrap="wrap" align="center" justify="between">
+        <HeaderTitle>
+          <Title>{title}</Title>
+          {help && <QuestionTooltip title={help} size="sm" position="top" />}
+        </HeaderTitle>
+      </Flex>
 
       <ScoreWrapper>
-        <Score>{score ?? '\u2014'}</Score>
-        {defined(trend) && <Trend trendStatus={trendStatus}>{trend}</Trend>}
+        <Score>{displayScore}</Score>
+        {defined(trend) && (
+          <Trend trendStatus={trendStatus}>
+            <TextOverflow>{trend}</TextOverflow>
+          </Trend>
+        )}
       </ScoreWrapper>
-    </StyledPanel>
+    </ScorePanel>
   );
 }
 
 function getTrendColor(p: TrendProps & {theme: Theme}) {
   switch (p.trendStatus) {
     case 'good':
-      return p.theme.green300;
+      return p.theme.tokens.content.success;
     case 'bad':
-      return p.theme.red300;
+      return p.theme.tokens.content.danger;
     default:
-      return p.theme.gray300;
+      return p.theme.tokens.content.secondary;
   }
 }
 
-const StyledPanel = styled(Panel)`
+export const ScorePanel = styled(Panel)`
   display: flex;
   flex-direction: column;
   justify-content: space-between;
-  padding: ${space(2)} ${space(3)};
+  padding: ${p => p.theme.space.xl} ${p => p.theme.space['2xl']};
   min-height: 96px;
 `;
 
 const HeaderTitle = styled('div')`
   display: inline-grid;
   grid-auto-flow: column;
-  grid-gap: ${space(1)};
+  gap: ${p => p.theme.space.md};
   align-items: center;
   width: fit-content;
 `;
 
-const Title = styled('div')`
-  ${overflowEllipsis};
+export const Title = styled('div')`
+  font-size: ${p => p.theme.font.size.lg};
+  color: ${p => p.theme.tokens.content.primary};
+  display: block;
+  width: 100%;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-weight: ${p => p.theme.font.weight.sans.medium};
 `;
 
-const ScoreWrapper = styled('div')`
-  display: flex;
-  align-items: baseline;
-`;
+export const ScoreWrapper = styled((props: FlexProps) => {
+  return <Flex align="baseline" maxWidth="100%" {...props} />;
+})``;
 
-const Score = styled('span')`
+export const Score = styled('span')`
+  flex-shrink: 1;
   font-size: 32px;
   line-height: 1;
+  color: ${p => p.theme.tokens.content.primary};
+  white-space: nowrap;
 `;
 
-type TrendProps = {trendStatus: Props['trendStatus']};
+type TrendProps = {trendStatus: ScoreCardProps['trendStatus']};
 
-const Trend = styled('span')<TrendProps>`
+export const Trend = styled('div')<TrendProps>`
   color: ${getTrendColor};
-  margin-left: ${space(1)};
+  margin-left: ${p => p.theme.space.md};
   line-height: 1;
-  ${overflowEllipsis};
+  overflow: hidden;
 `;
-
-export default ScoreCard;

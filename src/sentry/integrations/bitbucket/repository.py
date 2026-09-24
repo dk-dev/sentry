@@ -1,27 +1,31 @@
-import logging
+from __future__ import annotations
 
-from sentry.app import locks
-from sentry.models import Integration, OrganizationOption
+import logging
+from collections.abc import Mapping
+from typing import TYPE_CHECKING, Any
+
+from sentry.integrations.services.repository.model import RpcRepository
+from sentry.integrations.services.repository.service import repository_service
+from sentry.integrations.types import IntegrationProviderSlug
+from sentry.locks import locks
 from sentry.models.apitoken import generate_token
-from sentry.plugins import providers
-from sentry.shared_integrations.exceptions import ApiError, IntegrationError
+from sentry.models.options.organization_option import OrganizationOption
+from sentry.organizations.services.organization.model import RpcOrganization
+from sentry.plugins.providers import IntegrationRepositoryProvider
+from sentry.plugins.providers.integration_repository import RepositoryConfig
+from sentry.shared_integrations.exceptions import ApiError
+from sentry.utils.email import parse_email, parse_user_name
 from sentry.utils.http import absolute_uri
 
-from .webhook import parse_raw_user_email, parse_raw_user_name
+if TYPE_CHECKING:
+    from sentry.integrations.bitbucket.integration import BitbucketIntegration  # NOQA
+
+logger = logging.getLogger(__name__)
 
 
-class BitbucketRepositoryProvider(providers.IntegrationRepositoryProvider):
+class BitbucketRepositoryProvider(IntegrationRepositoryProvider["BitbucketIntegration"]):
     name = "Bitbucket"
-    logger = logging.getLogger("sentry.integrations.bitbucket")
-
-    def get_installation(self, integration_id, organization_id):
-        if integration_id is None:
-            raise IntegrationError("Bitbucket requires an integration id.")
-        integration_model = Integration.objects.get(
-            id=integration_id, organizations=organization_id, provider="bitbucket"
-        )
-
-        return integration_model.get_installation(organization_id)
+    repo_provider = IntegrationProviderSlug.BITBUCKET.value
 
     def get_repository_data(self, organization, config):
         installation = self.get_installation(config.get("installation"), organization.id)
@@ -31,13 +35,17 @@ class BitbucketRepositoryProvider(providers.IntegrationRepositoryProvider):
         except Exception as e:
             installation.raise_error(e)
         else:
-            config["external_id"] = str(repo["uuid"])
+            config["external_id"] = installation.get_repo_external_id(repo)
             config["name"] = repo["full_name"]
         return config
 
     def get_webhook_secret(self, organization):
         # TODO(LB): Revisit whether Integrations V3 should be using OrganizationOption for storage
-        lock = locks.get(f"bitbucket:webhook-secret:{organization.id}", duration=60)
+        lock = locks.get(
+            f"bitbucket:webhook-secret:{organization.id}",
+            duration=60,
+            name="bitbucket_webhook_secret",
+        )
         with lock.acquire():
             secret = OrganizationOption.objects.get_value(
                 organization=organization, key="bitbucket:webhook_secret"
@@ -49,31 +57,68 @@ class BitbucketRepositoryProvider(providers.IntegrationRepositoryProvider):
                 )
         return secret
 
-    def build_repository_config(self, organization, data):
-        installation = self.get_installation(data.get("installation"), organization.id)
+    def build_repository_config(
+        self, organization: RpcOrganization, data: Mapping[str, Any]
+    ) -> RepositoryConfig:
+        return {
+            "name": data["identifier"],
+            "external_id": data["external_id"],
+            "url": "https://bitbucket.org/{}".format(data["name"]),
+            "config": {"name": data["name"]},
+            "integration_id": data["installation"],
+        }
+
+    def on_create_repository(self, repo: RpcRepository, organization: RpcOrganization) -> None:
+        if repo.config.get("webhook_id"):
+            return
+        installation = self.get_installation(repo.integration_id, repo.organization_id)
         client = installation.get_client()
+        secret = installation.model.metadata.get("webhook_secret", "")
         try:
             resp = client.create_hook(
-                data["identifier"],
+                repo.config["name"],
                 {
                     "description": "sentry-bitbucket-repo-hook",
                     "url": absolute_uri(
                         f"/extensions/bitbucket/organizations/{organization.id}/webhook/"
                     ),
                     "active": True,
+                    "secret": secret,
                     "events": ["repo:push", "pullrequest:fulfilled"],
                 },
             )
         except Exception as e:
             installation.raise_error(e)
-        else:
-            return {
-                "name": data["identifier"],
-                "external_id": data["external_id"],
-                "url": "https://bitbucket.org/{}".format(data["name"]),
-                "config": {"name": data["name"], "webhook_id": resp["uuid"]},
-                "integration_id": data["installation"],
-            }
+        webhook_id = resp["uuid"]
+        if repository_service.update_repository_config(
+            organization_id=organization.id,
+            id=repo.id,
+            config_updates={"webhook_id": webhook_id},
+            expected_integration_id=repo.integration_id,
+            expected_config={"webhook_id": None},
+        ):
+            repo.config["webhook_id"] = webhook_id
+            return
+        # The repository changed while we created the hook, so nothing would ever
+        # reference or delete it.
+        logger.info(
+            "repository.webhook_discarded",
+            extra={"repository_id": repo.id, "organization_id": organization.id},
+        )
+        # The repository itself was linked fine, so a failed cleanup only leaves the hook
+        # orphaned; raising would report the link as failed.
+        try:
+            client.delete_hook(repo.config["name"], webhook_id)
+        except ApiError as e:
+            if e.code != 404:
+                logger.warning(
+                    "repository.webhook_discard_failed",
+                    extra={
+                        "repository_id": repo.id,
+                        "organization_id": organization.id,
+                        "status_code": e.code,
+                    },
+                )
 
     def on_delete_repository(self, repo):
         installation = self.get_installation(repo.integration_id, repo.organization_id)
@@ -91,8 +136,8 @@ class BitbucketRepositoryProvider(providers.IntegrationRepositoryProvider):
             {
                 "id": c["hash"],
                 "repository": repo.name,
-                "author_email": parse_raw_user_email(c["author"]["raw"]),
-                "author_name": parse_raw_user_name(c["author"]["raw"]),
+                "author_email": parse_email(c["author"]["raw"]),
+                "author_name": parse_user_name(c["author"]["raw"]),
                 "message": c["message"],
                 "timestamp": self.format_date(c["date"]),
                 "patch_set": c.get("patch_set"),

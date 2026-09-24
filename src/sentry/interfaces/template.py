@@ -42,9 +42,10 @@ class Template(Interface):
             "post_context",
         ):
             data.setdefault(key, None)
-        return cls(**data)
 
-    def to_string(self, event, is_public=False, **kwargs):
+        return super().to_python(data)
+
+    def to_string(self, event) -> str:
         context = get_context(
             lineno=self.lineno,
             context_line=self.context_line,

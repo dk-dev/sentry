@@ -1,0 +1,364 @@
+from sentry.api.serializers import serialize
+from sentry.incidents.endpoints.serializers.workflow_engine_data_condition import (
+    WorkflowEngineDataConditionSerializer,
+)
+from sentry.incidents.endpoints.utils import translate_data_condition_type
+from sentry.incidents.models.alert_rule import (
+    AlertRule,
+    AlertRuleThresholdType,
+    AlertRuleTrigger,
+    AlertRuleTriggerAction,
+)
+from sentry.workflow_engine.migration_helpers.alert_rule import (
+    migrate_alert_rule,
+    migrate_metric_action,
+    migrate_metric_data_conditions,
+    migrate_resolve_threshold_data_condition,
+)
+from sentry.workflow_engine.models import (
+    Action,
+    DataCondition,
+    DataConditionGroup,
+    DataConditionGroupAction,
+    WorkflowDataConditionGroup,
+)
+from sentry.workflow_engine.models.data_condition import Condition
+from sentry.workflow_engine.types import DetectorPriorityLevel
+from tests.sentry.incidents.serializers.test_workflow_engine_base import (
+    TestWorkflowEngineSerializer,
+)
+
+
+class TestDataConditionSerializer(TestWorkflowEngineSerializer):
+    def setUp(self) -> None:
+        super().setUp()
+        self.add_warning_trigger()
+
+    def create_rule_triggers_and_actions(
+        self,
+    ) -> tuple[
+        AlertRule,
+        AlertRuleTrigger,
+        AlertRuleTrigger,
+        AlertRuleTriggerAction,
+        AlertRuleTriggerAction,
+    ]:
+        alert_rule = self.create_alert_rule()
+        critical_trigger = self.create_alert_rule_trigger(
+            alert_rule=alert_rule, alert_threshold=500, label="critical"
+        )
+        critical_action = self.create_alert_rule_trigger_action(alert_rule_trigger=critical_trigger)
+        warning_trigger = self.create_alert_rule_trigger(
+            alert_rule=alert_rule, alert_threshold=200, label="warning"
+        )
+        warning_action = self.create_alert_rule_trigger_action(alert_rule_trigger=warning_trigger)
+
+        return (
+            alert_rule,
+            critical_trigger,
+            warning_trigger,
+            critical_action,
+            warning_action,
+        )
+
+    def test_simple(self) -> None:
+        serialized_data_condition = serialize(
+            self.critical_detector_trigger,
+            self.user,
+            WorkflowEngineDataConditionSerializer(),
+        )
+        assert serialized_data_condition == self.expected_triggers[0]
+
+    def test_warning_trigger(self) -> None:
+        serialized_data_condition = serialize(
+            self.warning_detector_trigger,
+            self.user,
+            WorkflowEngineDataConditionSerializer(),
+        )
+        assert serialized_data_condition == self.expected_triggers[1]
+
+    def test_multiple_actions(self) -> None:
+        self.critical_trigger_action_2 = self.create_alert_rule_trigger_action(
+            alert_rule_trigger=self.critical_trigger
+        )
+        self.critical_action_2, _, _ = migrate_metric_action(self.critical_trigger_action_2)
+        serialized_data_condition = serialize(
+            self.critical_detector_trigger,
+            self.user,
+            WorkflowEngineDataConditionSerializer(),
+        )
+        expected_actions = self.expected_critical_action.copy()
+        actions_2 = {
+            "id": str(self.critical_trigger_action_2.id),
+            "alertRuleTriggerId": str(self.critical_trigger.id),
+            "type": "email",
+            "targetType": "user",
+            "targetIdentifier": str(self.user.id),
+            "inputChannelId": None,
+            "integrationId": None,
+            "sentryAppId": None,
+            "dateCreated": self.critical_trigger_action.date_added,
+            "desc": f"Send a notification to {self.user.email}",
+            "priority": self.critical_action.data.get("priority"),
+        }
+        expected_actions.append(actions_2)
+        expected_trigger = self.expected_triggers[0].copy()
+        expected_trigger["actions"] = expected_actions
+        assert serialized_data_condition == expected_trigger
+
+    def test_targetless_webhook_action(self) -> None:
+        webhook_action = self.create_action(
+            type=Action.Type.WEBHOOK,
+            config={
+                "target_identifier": "webhooks",
+                "target_display": None,
+                "target_type": None,
+            },
+        )
+        action_filter = DataConditionGroupAction.objects.get(
+            action=self.critical_action
+        ).condition_group
+        self.create_data_condition_group_action(
+            action=webhook_action,
+            condition_group=action_filter,
+        )
+
+        serialized_data_condition = serialize(
+            self.critical_detector_trigger,
+            self.user,
+            WorkflowEngineDataConditionSerializer(),
+        )
+
+        serialized_webhook_action = next(
+            action
+            for action in serialized_data_condition["actions"]
+            if action["type"] == Action.Type.WEBHOOK
+        )
+        assert serialized_webhook_action["targetType"] is None
+
+    def test_action_filter_without_priority_condition(self) -> None:
+        """
+        A natively-created connected alert (workflow) seeds its action filter with no conditions
+        (see automationBuilderContext.tsx) if they don't include an Issue Priority WHEN clause.
+        Priority-less action filter should fire for any priority. Previously these actions were dropped,
+        producing an empty `triggers[].actions` in the metric_alert webhook payload
+        """
+        sentry_app = self.create_sentry_app(
+            organization=self.organization,
+            published=True,
+            verify_install=False,
+            name="Super Awesome App",
+            schema={"elements": [self.create_alert_rule_action_schema()]},
+        )
+        self.create_sentry_app_installation(
+            slug=sentry_app.slug, organization=self.organization, user=self.user
+        )
+        settings = [{"name": "title", "value": "An alert"}]
+        sentry_app_action = self.create_action(
+            type=Action.Type.SENTRY_APP,
+            config={
+                "target_type": AlertRuleTriggerAction.TargetType.SENTRY_APP,
+                "target_identifier": str(sentry_app.id),
+                "target_display": None,
+            },
+            data={"settings": settings},
+        )
+
+        # Connect a native workflow to the existing detector whose action filter has no
+        # priority (or any) condition, mirroring how the new Monitors UI creates connected alerts.
+        workflow = self.create_workflow(organization=self.organization)
+        self.create_detector_workflow(detector=self.detector, workflow=workflow)
+        action_filter = self.create_data_condition_group(
+            organization=self.organization, logic_type=DataConditionGroup.Type.ALL
+        )
+        self.create_workflow_data_condition_group(workflow=workflow, condition_group=action_filter)
+        self.create_data_condition_group_action(
+            action=sentry_app_action, condition_group=action_filter
+        )
+
+        serialized_data_condition = serialize(
+            self.critical_detector_trigger,
+            self.user,
+            WorkflowEngineDataConditionSerializer(),
+        )
+
+        serialized_sentry_app_actions = [
+            action
+            for action in serialized_data_condition["actions"]
+            if action["sentryAppId"] == sentry_app.id
+        ]
+        assert len(serialized_sentry_app_actions) == 1
+        serialized_sentry_app_action = serialized_sentry_app_actions[0]
+        assert serialized_sentry_app_action["type"] == "sentry_app"
+        assert serialized_sentry_app_action["targetType"] == "sentry_app"
+        assert serialized_sentry_app_action["settings"] == settings
+
+    def test_comparison_delta(self) -> None:
+        comparison_delta_rule = self.create_alert_rule(comparison_delta=60)
+        comparison_delta_trigger = self.create_alert_rule_trigger(
+            alert_rule=comparison_delta_rule, label="critical"
+        )
+        comparison_delta_trigger_action = self.create_alert_rule_trigger_action(
+            alert_rule_trigger=comparison_delta_trigger
+        )
+        _, _, _, detector, _, _, _, _ = migrate_alert_rule(comparison_delta_rule)
+        comparison_detector_trigger, _, _ = migrate_metric_data_conditions(comparison_delta_trigger)
+        migrate_resolve_threshold_data_condition(comparison_delta_rule)
+        action, _, _ = migrate_metric_action(comparison_delta_trigger_action)
+
+        serialized_data_condition = serialize(
+            comparison_detector_trigger,
+            self.user,
+            WorkflowEngineDataConditionSerializer(),
+        )
+        expected_actions = self.expected_critical_action.copy()
+        expected_actions[0]["id"] = str(comparison_delta_trigger_action.id)
+        expected_actions[0]["alertRuleTriggerId"] = str(comparison_delta_trigger.id)
+
+        expected_trigger = self.expected_triggers[0].copy()
+        expected_trigger["actions"] = expected_actions
+        expected_trigger["alertThreshold"] = translate_data_condition_type(
+            detector.config.get("comparison_delta"),
+            comparison_detector_trigger.type,
+            comparison_detector_trigger.comparison,
+        )
+        expected_trigger["resolveThreshold"] = expected_trigger["alertThreshold"]
+        expected_trigger["id"] = str(comparison_delta_trigger.id)
+        expected_trigger["alertRuleId"] = str(comparison_delta_rule.id)
+        assert serialized_data_condition == expected_trigger
+
+    def test_comparison_delta_with_gte_lte_conditions(self) -> None:
+        for condition_type, expected_threshold_type in (
+            (Condition.GREATER_OR_EQUAL, AlertRuleThresholdType.ABOVE),
+            (Condition.LESS_OR_EQUAL, AlertRuleThresholdType.BELOW),
+        ):
+            rule = self.create_alert_rule(comparison_delta=60)
+            trigger = self.create_alert_rule_trigger(alert_rule=rule, label="critical")
+            trigger_action = self.create_alert_rule_trigger_action(alert_rule_trigger=trigger)
+            _, _, _, detector, _, _, _, _ = migrate_alert_rule(rule)
+            detector_trigger, _, _ = migrate_metric_data_conditions(trigger)
+            migrate_resolve_threshold_data_condition(rule)
+            migrate_metric_action(trigger_action)
+
+            detector_trigger.update(type=condition_type)
+
+            serialized = serialize(
+                detector_trigger, self.user, WorkflowEngineDataConditionSerializer()
+            )
+            assert serialized["thresholdType"] == expected_threshold_type.value
+
+    def test_anomaly_detection(self) -> None:
+        dynamic_rule = self.create_dynamic_alert()
+        critical_trigger = self.create_alert_rule_trigger(
+            alert_rule=dynamic_rule, label="critical", alert_threshold=0
+        )
+        trigger_action = self.create_alert_rule_trigger_action(alert_rule_trigger=critical_trigger)
+        _, _, _, detector, _, _, _, _ = migrate_alert_rule(dynamic_rule)
+        detector_trigger, _, _ = migrate_metric_data_conditions(critical_trigger)
+        action, _, _ = migrate_metric_action(trigger_action)
+
+        serialized_data_condition = serialize(
+            detector_trigger,
+            self.user,
+            WorkflowEngineDataConditionSerializer(),
+        )
+        assert (
+            serialized_data_condition["thresholdType"]
+            == AlertRuleThresholdType.ABOVE_AND_BELOW.value
+        )
+        assert serialized_data_condition["alertThreshold"] == 0
+        assert serialized_data_condition["resolveThreshold"] is None
+
+    def test_anomaly_detection_with_workflow_actions(self) -> None:
+        dynamic_rule = self.create_dynamic_alert()
+        critical_trigger = self.create_alert_rule_trigger(
+            alert_rule=dynamic_rule, label="critical", alert_threshold=0
+        )
+        trigger_action = self.create_alert_rule_trigger_action(alert_rule_trigger=critical_trigger)
+        _, _, _, detector, _, _, _, _ = migrate_alert_rule(dynamic_rule)
+        detector_trigger, _, _ = migrate_metric_data_conditions(critical_trigger)
+        migrate_metric_action(trigger_action)
+
+        workflow_dcg = WorkflowDataConditionGroup.objects.filter(
+            workflow__detectorworkflow__detector=detector,
+        ).first()
+        assert workflow_dcg is not None
+        DataCondition.objects.create(
+            type=Condition.ANOMALY_DETECTION,
+            comparison={"sensitivity": "high", "seasonality": "auto", "threshold_type": 2},
+            condition_result=True,
+            condition_group=workflow_dcg.condition_group,
+        )
+
+        serialized = serialize(
+            detector_trigger,
+            self.user,
+            WorkflowEngineDataConditionSerializer(),
+        )
+        assert serialized["thresholdType"] == AlertRuleThresholdType.ABOVE_AND_BELOW.value
+        assert serialized["alertThreshold"] == 0
+        assert serialized["resolveThreshold"] is None
+        # The non-numeric ANOMALY_DETECTION condition is skipped during matching without dropping
+        # the DCG's action (which still matches via the priority condition) or duplicating it.
+        action_ids = [action["id"] for action in serialized["actions"]]
+        assert action_ids == [str(trigger_action.id)]
+
+    def test_multiple_rules(self) -> None:
+        # create another comprehensive alert rule in the DB
+        alert_rule, critical_trigger, warning_trigger, critical_action, warning_action = (
+            self.create_rule_triggers_and_actions()
+        )
+        migrate_alert_rule(alert_rule)
+        critical_detector_trigger, _, _ = migrate_metric_data_conditions(critical_trigger)
+        warning_detector_trigger, _, _ = migrate_metric_data_conditions(warning_trigger)
+        migrate_resolve_threshold_data_condition(alert_rule)
+        migrate_metric_action(critical_action)
+        migrate_metric_action(warning_action)
+
+        serialized_critical_condition = serialize(
+            critical_detector_trigger,
+            self.user,
+            WorkflowEngineDataConditionSerializer(),
+        )
+
+        assert serialized_critical_condition["id"] == str(critical_trigger.id)
+        assert serialized_critical_condition["alertRuleId"] == str(alert_rule.id)
+        assert len(serialized_critical_condition["actions"]) == 1
+        assert serialized_critical_condition["actions"][0]["id"] == str(critical_action.id)
+
+        serialized_warning_condition = serialize(
+            warning_detector_trigger,
+            self.user,
+            WorkflowEngineDataConditionSerializer(),
+        )
+
+        assert serialized_warning_condition["id"] == str(warning_trigger.id)
+        assert serialized_warning_condition["alertRuleId"] == str(alert_rule.id)
+        assert len(serialized_warning_condition["actions"]) == 1
+        assert serialized_warning_condition["actions"][0]["id"] == str(warning_action.id)
+
+    def test_missing_detector(self) -> None:
+        self.detector.delete()
+
+        serialized = serialize(
+            self.critical_detector_trigger,
+            self.user,
+            WorkflowEngineDataConditionSerializer(),
+        )
+        assert serialized["alertThreshold"] == float(self.critical_detector_trigger.comparison)
+        assert serialized["resolveThreshold"] is not None
+        assert serialized["alertRuleId"] is None
+
+    def test_missing_resolve_condition(self) -> None:
+        # Delete the resolve condition created during setUp
+        DataCondition.objects.filter(
+            condition_group=self.critical_detector_trigger.condition_group,
+            condition_result=DetectorPriorityLevel.OK,
+        ).delete()
+
+        serialized = serialize(
+            self.critical_detector_trigger,
+            self.user,
+            WorkflowEngineDataConditionSerializer(),
+        )
+        assert serialized["resolveThreshold"] is None

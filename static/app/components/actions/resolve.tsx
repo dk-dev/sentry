@@ -1,245 +1,384 @@
-import React from 'react';
+import {Fragment} from 'react';
+import {css} from '@emotion/react';
+import styled from '@emotion/styled';
 
-import {openModal} from 'app/actionCreators/modal';
-import ActionLink from 'app/components/actions/actionLink';
-import ButtonBar from 'app/components/buttonBar';
-import CustomResolutionModal from 'app/components/customResolutionModal';
-import DropdownLink from 'app/components/dropdownLink';
-import Tooltip from 'app/components/tooltip';
-import {IconCheckmark, IconChevron} from 'app/icons';
-import {t} from 'app/locale';
-import {
-  Release,
-  ResolutionStatus,
-  ResolutionStatusDetails,
-  UpdateResolutionStatus,
-} from 'app/types';
-import {formatVersion} from 'app/utils/formatters';
+import {Button, ButtonBar, LinkButton} from '@sentry/scraps/button';
+import type {MenuItemProps} from '@sentry/scraps/dropdownMenu';
+import {DropdownMenu} from '@sentry/scraps/dropdownMenu';
+import {Flex} from '@sentry/scraps/layout';
+import {useModal} from '@sentry/scraps/modal';
+import {Tooltip} from '@sentry/scraps/tooltip';
 
-import ActionButton from './button';
-import MenuHeader from './menuHeader';
-import MenuItemActionLink from './menuItemActionLink';
+import {openConfirmModal} from 'sentry/components/confirm';
+import {CustomCommitsResolutionModal} from 'sentry/components/customCommitsResolutionModal';
+import {CustomResolutionModal} from 'sentry/components/customResolutionModal';
+import {IconChevron, IconReleases} from 'sentry/icons';
+import {t} from 'sentry/locale';
+import type {GroupStatusResolution, ResolvedStatusDetails} from 'sentry/types/group';
+import {GroupStatus} from 'sentry/types/group';
+import type {Project} from 'sentry/types/project';
+import {trackAnalytics} from 'sentry/utils/analytics';
+import {useOrganization} from 'sentry/utils/useOrganization';
+import {formatVersion} from 'sentry/utils/versions/formatVersion';
+import {isSemverRelease} from 'sentry/utils/versions/isSemverRelease';
+import {useProjectLatestSemverRelease} from 'sentry/views/issueDetails/useProjectLatestSemverRelease';
 
-const defaultProps = {
-  isResolved: false,
-  isAutoResolved: false,
-  confirmLabel: t('Resolve'),
-  hasInbox: false,
-};
+function SetupReleasesPrompt() {
+  return (
+    <SetupReleases>
+      <IconReleases size="xl" />
+      <div>
+        <SetupReleasesHeader>
+          {t('Resolving is better with Releases')}
+        </SetupReleasesHeader>
+        {t(
+          'Set up Releases so Sentry can bother you when this problem comes back in a future release.'
+        )}
+      </div>
+      <LinkButton
+        variant="primary"
+        external
+        size="xs"
+        href="https://docs.sentry.io/product/releases/setup/"
+        analyticsEventName="Issue Actions: Resolve Release Setup Prompt Clicked"
+        analyticsEventKey="issue_actions.resolve_release_setup_prompt_clicked"
+      >
+        {t('Set up Releases Now')}
+      </LinkButton>
+    </SetupReleases>
+  );
+}
 
-type Props = {
+interface ResolveActionsProps {
   hasRelease: boolean;
-  onUpdate: (data: UpdateResolutionStatus) => void;
-  orgSlug: string;
-  latestRelease?: Release;
-  projectSlug?: string;
-  shouldConfirm?: boolean;
+  hasSemverReleaseFeature: boolean;
+  onUpdate: (data: GroupStatusResolution) => void;
+  project: Project | undefined;
+  confirmLabel?: string;
   confirmMessage?: React.ReactNode;
-  disabled?: boolean;
   disableDropdown?: boolean;
+  disableResolveInRelease?: boolean;
+  disabled?: boolean;
+  latestRelease?: Project['latestRelease'];
+  multipleProjectsSelected?: boolean;
+  priority?: 'primary';
   projectFetchError?: boolean;
-  hasInbox?: boolean;
-} & typeof defaultProps;
+  shouldConfirm?: boolean;
+  size?: 'xs' | 'sm';
+}
 
-class ResolveActions extends React.Component<Props> {
-  static defaultProps = defaultProps;
+export function ResolveActions({
+  size = 'xs',
+  confirmLabel = t('Resolve'),
+  project,
+  hasRelease,
+  latestRelease,
+  confirmMessage,
+  shouldConfirm,
+  disabled,
+  disableDropdown,
+  disableResolveInRelease,
+  priority,
+  projectFetchError,
+  multipleProjectsSelected,
+  hasSemverReleaseFeature,
+  onUpdate,
+}: ResolveActionsProps) {
+  const {openModal} = useModal();
+  const projectSlug = project?.slug;
 
-  onCustomResolution(statusDetails: ResolutionStatusDetails) {
-    this.props.onUpdate({
-      status: ResolutionStatus.RESOLVED,
+  const organization = useOrganization();
+
+  // resolve in semver release is eligible if the flag is enabled,
+  // only 1 project is selected,
+  // and resolve in release is not disabled
+  const latestSemverRelease = useProjectLatestSemverRelease({
+    enabled:
+      Boolean(hasSemverReleaseFeature) &&
+      !multipleProjectsSelected &&
+      !disableResolveInRelease,
+  });
+
+  function handleCommitResolution(statusDetails: ResolvedStatusDetails) {
+    onUpdate({
+      status: GroupStatus.RESOLVED,
       statusDetails,
+      substatus: null,
     });
   }
 
-  renderResolved() {
-    const {isAutoResolved, onUpdate} = this.props;
-
-    return (
-      <Tooltip
-        title={
-          isAutoResolved
-            ? t(
-                'This event is resolved due to the Auto Resolve configuration for this project'
-              )
-            : t('Unresolve')
-        }
-      >
-        <ActionButton
-          priority="primary"
-          icon={<IconCheckmark size="xs" />}
-          label={t('Unresolve')}
-          disabled={isAutoResolved}
-          onClick={() => onUpdate({status: ResolutionStatus.UNRESOLVED})}
-        />
-      </Tooltip>
-    );
+  function handleAnotherExistingReleaseResolution(statusDetails: ResolvedStatusDetails) {
+    onUpdate({
+      status: GroupStatus.RESOLVED,
+      statusDetails,
+      substatus: null,
+    });
+    trackAnalytics('resolve_issue', {
+      organization,
+      release: 'anotherExisting',
+    });
   }
 
-  renderDropdownMenu() {
-    const {
-      projectSlug,
-      isResolved,
-      hasRelease,
-      latestRelease,
-      onUpdate,
-      confirmMessage,
-      shouldConfirm,
-      disabled,
-      confirmLabel,
-      disableDropdown,
-      hasInbox,
-    } = this.props;
-
-    if (isResolved) {
-      return this.renderResolved();
+  function handleCurrentReleaseResolution({
+    isLatestSemverRelease,
+  }: {
+    isLatestSemverRelease: boolean;
+  }) {
+    if (hasRelease) {
+      onUpdate({
+        status: GroupStatus.RESOLVED,
+        statusDetails: {
+          inRelease: isLatestSemverRelease
+            ? latestSemverRelease?.version
+            : latestRelease
+              ? latestRelease.version
+              : 'latest',
+        },
+        substatus: null,
+      });
     }
 
-    const actionTitle = !hasRelease
+    trackAnalytics('resolve_issue', {
+      organization,
+      release: isLatestSemverRelease ? 'current-semver' : 'current',
+    });
+  }
+
+  function handleNextReleaseResolution() {
+    if (hasRelease) {
+      onUpdate({
+        status: GroupStatus.RESOLVED,
+        statusDetails: {
+          inNextRelease: true,
+        },
+        substatus: null,
+      });
+    }
+
+    trackAnalytics('resolve_issue', {
+      organization,
+      release: 'next',
+    });
+  }
+
+  function renderDropdownMenu() {
+    const shouldDisplayCta = !hasRelease && !multipleProjectsSelected;
+    const actionTitle = shouldDisplayCta
       ? t('Set up release tracking in order to use this feature.')
       : '';
 
-    const actionLinkProps = {
-      shouldConfirm,
-      message: confirmMessage,
-      confirmLabel,
-      disabled: disabled || !hasRelease,
+    const onActionOrConfirm = (onAction: () => void) => {
+      openConfirmModal({
+        bypass: !shouldConfirm,
+        onConfirm: onAction,
+        message: confirmMessage,
+        confirmText: confirmLabel,
+      });
     };
 
+    const isSemver = latestRelease ? isSemverRelease(latestRelease.version) : false;
+    const items: MenuItemProps[] = [
+      {
+        key: 'next-release',
+        label: t('The next release'),
+        details: actionTitle ? actionTitle : t('The next release after the current one'),
+        onAction: () => onActionOrConfirm(handleNextReleaseResolution),
+      },
+      ...(hasSemverReleaseFeature && latestSemverRelease?.version
+        ? [
+            {
+              key: 'semver-release',
+              label: t('The current semver release'),
+              details: (
+                <Flex align="center" gap="2xs">
+                  {actionTitle ? (
+                    actionTitle
+                  ) : (
+                    <Fragment>
+                      <div>
+                        <MaxReleaseWidthWrapper>
+                          {formatVersion(latestSemverRelease.version)}
+                        </MaxReleaseWidthWrapper>
+                      </div>{' '}
+                    </Fragment>
+                  )}
+                </Flex>
+              ),
+              onAction: () =>
+                onActionOrConfirm(() =>
+                  handleCurrentReleaseResolution({isLatestSemverRelease: true})
+                ),
+            },
+          ]
+        : [
+            {
+              key: 'current-release',
+              label: t('The current release'),
+              details: (
+                <Flex align="center" gap="2xs">
+                  {actionTitle ? (
+                    actionTitle
+                  ) : latestRelease ? (
+                    <Fragment>
+                      <div>
+                        <MaxReleaseWidthWrapper>
+                          {formatVersion(latestRelease.version)}
+                        </MaxReleaseWidthWrapper>
+                      </div>{' '}
+                      ({isSemver ? t('semver') : t('non-semver')})
+                    </Fragment>
+                  ) : null}
+                </Flex>
+              ),
+              onAction: () =>
+                onActionOrConfirm(() =>
+                  handleCurrentReleaseResolution({isLatestSemverRelease: false})
+                ),
+            },
+          ]),
+      {
+        key: 'another-release',
+        label: t('Another existing release\u2026'),
+        onAction: () => openCustomReleaseModal(),
+      },
+      {
+        key: 'a-commit',
+        label: t('A commit\u2026'),
+        onAction: () => openCustomCommitModal(),
+      },
+    ];
+
+    const isDisabled = projectSlug ? disableDropdown : disabled;
+
     return (
-      <DropdownLink
-        customTitle={
-          !hasInbox && (
-            <ActionButton
-              label={t('More resolve options')}
-              disabled={!projectSlug ? disabled : disableDropdown}
-              icon={<IconChevron direction="down" size="xs" />}
-            />
-          )
+      <StyledDropdownMenu
+        itemsHidden={shouldDisplayCta}
+        items={items}
+        trigger={(triggerProps, isOpen) => (
+          <Button
+            {...triggerProps}
+            size={size}
+            variant={priority}
+            aria-label={t('More resolve options')}
+            icon={<IconChevron direction={isOpen ? 'up' : 'down'} size="xs" />}
+            disabled={isDisabled}
+          />
+        )}
+        disabledKeys={
+          multipleProjectsSelected
+            ? ['next-release', 'current-release', 'another-release', 'a-commit']
+            : disabled || !hasRelease
+              ? [
+                  'next-release',
+
+                  ...(hasSemverReleaseFeature && latestSemverRelease?.version
+                    ? ['semver-release']
+                    : ['current-release']),
+                  'another-release',
+                ]
+              : []
         }
-        caret={false}
-        title={hasInbox && t('Resolve In\u2026')}
-        alwaysRenderMenu
-        disabled={!projectSlug ? disabled : disableDropdown}
-        anchorRight={hasInbox}
-        isNestedDropdown={hasInbox}
-      >
-        <MenuHeader>{t('Resolved In')}</MenuHeader>
-
-        <MenuItemActionLink
-          {...actionLinkProps}
-          title={t('The next release')}
-          onAction={() =>
-            hasRelease &&
-            onUpdate({
-              status: ResolutionStatus.RESOLVED,
-              statusDetails: {
-                inNextRelease: true,
-              },
-            })
-          }
-        >
-          <Tooltip disabled={hasRelease} title={actionTitle}>
-            {t('The next release')}
-          </Tooltip>
-        </MenuItemActionLink>
-
-        <MenuItemActionLink
-          {...actionLinkProps}
-          title={t('The current release')}
-          onAction={() =>
-            hasRelease &&
-            onUpdate({
-              status: ResolutionStatus.RESOLVED,
-              statusDetails: {
-                inRelease: latestRelease ? latestRelease.version : 'latest',
-              },
-            })
-          }
-        >
-          <Tooltip disabled={hasRelease} title={actionTitle}>
-            {latestRelease
-              ? t('The current release (%s)', formatVersion(latestRelease.version))
-              : t('The current release')}
-          </Tooltip>
-        </MenuItemActionLink>
-
-        <MenuItemActionLink
-          {...actionLinkProps}
-          title={t('Another version')}
-          onAction={() => hasRelease && this.openCustomReleaseModal()}
-          shouldConfirm={false}
-        >
-          <Tooltip disabled={hasRelease} title={actionTitle}>
-            {t('Another version\u2026')}
-          </Tooltip>
-        </MenuItemActionLink>
-      </DropdownLink>
+        menuTitle={shouldDisplayCta ? <SetupReleasesPrompt /> : t('Resolved In')}
+        isDisabled={isDisabled}
+      />
     );
   }
 
-  openCustomReleaseModal() {
-    const {orgSlug, projectSlug} = this.props;
-
+  function openCustomCommitModal() {
     openModal(deps => (
-      <CustomResolutionModal
+      <CustomCommitsResolutionModal
         {...deps}
-        onSelected={(statusDetails: ResolutionStatusDetails) =>
-          this.onCustomResolution(statusDetails)
+        onSelected={(statusDetails: ResolvedStatusDetails) =>
+          handleCommitResolution(statusDetails)
         }
-        orgSlug={orgSlug}
-        projectSlug={projectSlug}
+        orgSlug={organization.slug}
+        projectSlug={projectSlug!}
       />
     ));
   }
 
-  render() {
-    const {
-      isResolved,
-      onUpdate,
-      confirmMessage,
-      shouldConfirm,
-      disabled,
-      confirmLabel,
-      projectFetchError,
-      hasInbox,
-    } = this.props;
-
-    if (isResolved) {
-      return this.renderResolved();
-    }
-
-    const actionLinkProps = {
-      shouldConfirm,
-      message: confirmMessage,
-      confirmLabel,
-      disabled,
-    };
-
-    return (
-      <Tooltip disabled={!projectFetchError} title={t('Error fetching project')}>
-        {hasInbox ? (
-          <div style={{width: '100%'}}>
-            <div className="dropdown-submenu flex expand-left">
-              {this.renderDropdownMenu()}
-            </div>
-          </div>
-        ) : (
-          <ButtonBar merged>
-            <ActionLink
-              {...actionLinkProps}
-              type="button"
-              title={t('Resolve')}
-              icon={<IconCheckmark size="xs" />}
-              onAction={() => onUpdate({status: ResolutionStatus.RESOLVED})}
-            >
-              {t('Resolve')}
-            </ActionLink>
-            {this.renderDropdownMenu()}
-          </ButtonBar>
-        )}
-      </Tooltip>
-    );
+  function openCustomReleaseModal() {
+    openModal(deps => (
+      <CustomResolutionModal
+        {...deps}
+        onSelected={(statusDetails: ResolvedStatusDetails) =>
+          handleAnotherExistingReleaseResolution(statusDetails)
+        }
+        project={project}
+      />
+    ));
   }
+
+  return (
+    <Tooltip disabled={!projectFetchError} title={t('Error fetching project')}>
+      <ButtonBar>
+        <Button
+          variant={priority}
+          size={size}
+          tooltipProps={{
+            delay: 1000,
+            disabled,
+            title: t("We'll nag you with a notification if another event is seen."),
+          }}
+          onClick={() =>
+            openConfirmModal({
+              bypass: !shouldConfirm,
+              onConfirm: () =>
+                onUpdate({
+                  status: GroupStatus.RESOLVED,
+                  statusDetails: {},
+                  substatus: null,
+                }),
+              message: confirmMessage,
+              confirmText: confirmLabel,
+            })
+          }
+          disabled={disabled}
+        >
+          {t('Resolve')}
+        </Button>
+        {!disableResolveInRelease && renderDropdownMenu()}
+      </ButtonBar>
+    </Tooltip>
+  );
 }
 
-export default ResolveActions;
+/**
+ * Used to hide the list items when prompting to set up releases
+ */
+const StyledDropdownMenu = styled(DropdownMenu)<{itemsHidden: boolean}>`
+  ${p =>
+    p.itemsHidden &&
+    css`
+      ul {
+        display: none;
+      }
+    `}
+`;
+
+const SetupReleases = styled('div')`
+  display: flex;
+  flex-direction: column;
+  gap: ${p => p.theme.space.xl};
+  align-items: center;
+  padding: ${p => p.theme.space.xl} 0;
+  text-align: center;
+  color: ${p => p.theme.colors.gray500};
+  width: 250px;
+  white-space: normal;
+  font-weight: ${p => p.theme.font.weight.sans.regular};
+`;
+
+const SetupReleasesHeader = styled('h6')`
+  font-size: ${p => p.theme.font.size.md};
+  margin-bottom: ${p => p.theme.space.md};
+`;
+
+const MaxReleaseWidthWrapper = styled('div')`
+  display: block;
+  width: 100%;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 250px;
+`;

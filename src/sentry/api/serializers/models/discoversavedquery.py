@@ -1,13 +1,185 @@
-from sentry.api.serializers import Serializer, register, serialize
-from sentry.api.serializers.models.user import UserSerializer
+from collections import defaultdict
+from datetime import datetime
+from typing import TypedDict
+
+from sentry import features
+from sentry.api.serializers import Serializer, register
 from sentry.constants import ALL_ACCESS_PROJECTS
-from sentry.discover.models import DiscoverSavedQuery
+from sentry.discover.models import (
+    DatasetSourcesTypes,
+    DiscoverSavedQuery,
+    DiscoverSavedQueryLastVisited,
+    DiscoverSavedQueryStarred,
+    DiscoverSavedQueryTypes,
+)
+from sentry.explore.models import ExploreSavedQuery, ExploreSavedQueryDataset
+from sentry.users.api.serializers.user import UserSerializerResponse
+from sentry.users.services.user.service import user_service
 from sentry.utils.dates import outside_retention_with_modified_start, parse_timestamp
+
+DATASET_SOURCES = dict(DatasetSourcesTypes.as_choices())
+
+
+class DiscoverSavedQueryResponseOptional(TypedDict, total=False):
+    environment: list[str]
+    query: str
+    fields: list[str]
+    widths: list[str]
+    conditions: list[str]
+    aggregations: list[str]
+    range: str
+    start: str
+    end: str
+    orderby: str
+    limit: str
+    yAxis: list[str]
+    display: str
+    topEvents: int
+    interval: str
+    exploreQuery: dict
+    lastVisited: str
+    starred: bool
+    position: int | None
+
+
+class DiscoverSavedQueryResponse(DiscoverSavedQueryResponseOptional):
+    id: str
+    name: str
+    projects: list[int]
+    version: int
+    queryDataset: str
+    datasetSource: str
+    expired: bool
+    dateCreated: str
+    dateUpdated: str
+    createdBy: UserSerializerResponse
 
 
 @register(DiscoverSavedQuery)
-class DiscoverSavedQuerySerializer(Serializer):
-    def serialize(self, obj, attrs, user, **kwargs):
+class DiscoverSavedQueryModelSerializer(Serializer[DiscoverSavedQueryResponse]):
+    def partial_serialize_explore_query(self, query: ExploreSavedQuery) -> dict:
+        query_keys = [
+            "environment",
+            "query",
+            "range",
+            "start",
+            "end",
+            "interval",
+        ]
+        data = {
+            "id": str(query.id),
+            "name": query.name,
+            "projects": [project.id for project in query.projects.all()],
+            "dataset": ExploreSavedQueryDataset.get_type_name(query.dataset),
+            "expired": False,
+            "isPrebuilt": query.prebuilt_id is not None,
+            "changedReason": query.changed_reason,
+        }
+
+        for key in query_keys:
+            if query.query.get(key) is not None:
+                data[key] = query.query[key]
+
+        # expire queries that are beyond the retention period
+        if "start" in query.query:
+            start, end = parse_timestamp(query.query["start"]), parse_timestamp(query.query["end"])
+            if start and end:
+                expired, modified_start = outside_retention_with_modified_start(
+                    start, end, query.organization
+                )
+                data["expired"] = expired
+                data["start"] = modified_start.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+
+        if query.query.get("all_projects"):
+            data["projects"] = list(ALL_ACCESS_PROJECTS)
+
+        return data
+
+    def get_attrs(self, item_list, user, **kwargs):
+        result: defaultdict[str, dict] = defaultdict(
+            lambda: {"created_by": {}, "explore_query": None}
+        )
+
+        organization = item_list[0].organization if item_list else None
+        has_migrate_feature = (
+            organization is not None
+            and user.id is not None
+            and features.has(
+                "organizations:discover-queries-in-all-queries", organization, actor=user
+            )
+        )
+
+        user_last_visited: dict[int, datetime] = {}
+        if has_migrate_feature:
+            starred_queries = dict(
+                DiscoverSavedQueryStarred.objects.filter(
+                    discover_saved_query__in=item_list,
+                    user_id=user.id,
+                    organization=item_list[0].organization if item_list else None,
+                    starred=True,
+                ).values_list("discover_saved_query_id", "position")
+            )
+            user_last_visited = dict(
+                DiscoverSavedQueryLastVisited.objects.filter(
+                    discover_saved_query__in=item_list,
+                    user_id=user.id,
+                    organization=organization,
+                ).values_list("discover_saved_query_id", "last_visited")
+            )
+
+        service_serialized = user_service.serialize_many(
+            filter={
+                "user_ids": [
+                    discover_saved_query.created_by_id
+                    for discover_saved_query in item_list
+                    if discover_saved_query.created_by_id
+                ]
+            },
+            as_user=user if user.id else None,
+        )
+        serialized_users = {user["id"]: user for user in service_serialized}
+
+        # Batch fetch and serialize explore queries
+        explore_query_ids = [
+            discover_query.explore_query_id
+            for discover_query in item_list
+            if discover_query.explore_query_id is not None
+            and discover_query.dataset == DiscoverSavedQueryTypes.TRANSACTION_LIKE
+        ]
+        if explore_query_ids:
+            explore_queries = ExploreSavedQuery.objects.filter(
+                id__in=explore_query_ids
+            ).prefetch_related("projects")
+            serialized_explore_queries = {
+                query.id: self.partial_serialize_explore_query(query) for query in explore_queries
+            }
+        else:
+            serialized_explore_queries = {}
+
+        for discover_saved_query in item_list:
+            result[discover_saved_query]["created_by"] = serialized_users.get(
+                str(discover_saved_query.created_by_id)
+            )
+            if discover_saved_query.explore_query_id in serialized_explore_queries:
+                result[discover_saved_query]["explore_query"] = serialized_explore_queries.get(
+                    discover_saved_query.explore_query_id
+                )
+            if has_migrate_feature:
+                if discover_saved_query.id in starred_queries:
+                    result[discover_saved_query]["starred"] = True
+                    result[discover_saved_query]["position"] = starred_queries[
+                        discover_saved_query.id
+                    ]
+                else:
+                    result[discover_saved_query]["starred"] = False
+                    result[discover_saved_query]["position"] = None
+                result[discover_saved_query]["user_last_visited"] = user_last_visited.get(
+                    discover_saved_query.id
+                )
+
+        return result
+
+    def serialize(self, obj, attrs, user, **kwargs) -> DiscoverSavedQueryResponse:
         query_keys = [
             "environment",
             "query",
@@ -22,33 +194,49 @@ class DiscoverSavedQuerySerializer(Serializer):
             "limit",
             "yAxis",
             "display",
+            "topEvents",
+            "interval",
         ]
-        data = {
+        data: DiscoverSavedQueryResponse = {
             "id": str(obj.id),
             "name": obj.name,
             "projects": [project.id for project in obj.projects.all()],
             "version": obj.version or obj.query.get("version", 1),
+            "queryDataset": DiscoverSavedQueryTypes.get_type_name(obj.dataset),
+            "datasetSource": DATASET_SOURCES[obj.dataset_source],
             "expired": False,
             "dateCreated": obj.date_created,
             "dateUpdated": obj.date_updated,
-            "createdBy": serialize(obj.created_by, serializer=UserSerializer())
-            if obj.created_by
-            else None,
+            "createdBy": attrs.get("created_by"),
         }
+
+        if "user_last_visited" in attrs:
+            data["lastVisited"] = attrs["user_last_visited"]
+
+        if "starred" in attrs:
+            data["starred"] = attrs["starred"]
+
+        if "position" in attrs:
+            data["position"] = attrs["position"]
 
         for key in query_keys:
             if obj.query.get(key) is not None:
-                data[key] = obj.query[key]
+                data[key] = obj.query[key]  # type: ignore[literal-required]
 
         # expire queries that are beyond the retention period
         if "start" in obj.query:
             start, end = parse_timestamp(obj.query["start"]), parse_timestamp(obj.query["end"])
             if start and end:
-                data["expired"], data["start"] = outside_retention_with_modified_start(
+                expired, modified_start = outside_retention_with_modified_start(
                     start, end, obj.organization
                 )
+                data["expired"] = expired
+                data["start"] = modified_start.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 
         if obj.query.get("all_projects"):
             data["projects"] = list(ALL_ACCESS_PROJECTS)
+
+        if attrs.get("explore_query") is not None:
+            data["exploreQuery"] = attrs.get("explore_query")
 
         return data

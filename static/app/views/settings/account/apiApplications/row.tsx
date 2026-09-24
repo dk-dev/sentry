@@ -1,112 +1,88 @@
-import React from 'react';
-import styled from '@emotion/styled';
+import {useState} from 'react';
+
+import {Button} from '@sentry/scraps/button';
+import {Stack} from '@sentry/scraps/layout';
+import {Link} from '@sentry/scraps/link';
+import {Text} from '@sentry/scraps/text';
 
 import {
   addErrorMessage,
   addLoadingMessage,
   clearIndicators,
-} from 'app/actionCreators/indicator';
-import {Client} from 'app/api';
-import Button from 'app/components/button';
-import Link from 'app/components/links/link';
-import {PanelItem} from 'app/components/panels';
-import {IconDelete} from 'app/icons';
-import {t} from 'app/locale';
-import space from 'app/styles/space';
-import {ApiApplication} from 'app/types';
-import getDynamicText from 'app/utils/getDynamicText';
+} from 'sentry/actionCreators/indicator';
+import {ConfirmDelete} from 'sentry/components/confirmDelete';
+import {SimpleTable} from 'sentry/components/tables/simpleTable';
+import {TimeSince} from 'sentry/components/timeSince';
+import {IconDelete} from 'sentry/icons';
+import {t} from 'sentry/locale';
+import type {ApiApplication} from 'sentry/types/user';
+import {useApi} from 'sentry/utils/useApi';
 
 const ROUTE_PREFIX = '/settings/account/api/';
 
 type Props = {
-  api: Client;
   app: ApiApplication;
   onRemove: (app: ApiApplication) => void;
 };
 
-type State = {
-  loading: boolean;
-};
+export function Row({app, onRemove}: Props) {
+  const api = useApi();
+  const [isLoading, setLoading] = useState(false);
 
-class Row extends React.Component<Props, State> {
-  state = {
-    loading: false,
-  };
-
-  handleRemove = () => {
-    if (this.state.loading) {
+  async function handleRemove() {
+    if (isLoading) {
       return;
     }
 
-    const {api, app, onRemove} = this.props;
+    setLoading(true);
+    addLoadingMessage();
 
-    this.setState(
-      {
-        loading: true,
-      },
-      async () => {
-        addLoadingMessage();
+    try {
+      await api.requestPromise(`/api-applications/${app.id}/`, {
+        method: 'DELETE',
+      });
 
-        try {
-          await api.requestPromise(`/api-applications/${app.id}/`, {
-            method: 'DELETE',
-          });
-
-          clearIndicators();
-          onRemove(app);
-        } catch (_err) {
-          addErrorMessage(t('Unable to remove application. Please try again.'));
-        }
-      }
-    );
-  };
-
-  render() {
-    const {app} = this.props;
-
-    return (
-      <StyledPanelItem>
-        <ApplicationNameWrapper>
-          <ApplicationName to={`${ROUTE_PREFIX}applications/${app.id}/`}>
-            {getDynamicText({value: app.name, fixed: 'CI_APPLICATION_NAME'})}
-          </ApplicationName>
-          <ClientId>
-            {getDynamicText({value: app.clientID, fixed: 'CI_CLIENT_ID'})}
-          </ClientId>
-        </ApplicationNameWrapper>
-
-        <Button
-          aria-label="Remove"
-          onClick={this.handleRemove}
-          disabled={this.state.loading}
-          icon={<IconDelete />}
-        />
-      </StyledPanelItem>
-    );
+      clearIndicators();
+      onRemove(app);
+    } catch (_err) {
+      addErrorMessage(t('Unable to remove application. Please try again.'));
+    }
   }
+
+  return (
+    <SimpleTable.Row>
+      <SimpleTable.RowCell>
+        <Stack flex="1" minWidth="0">
+          <Link to={`${ROUTE_PREFIX}applications/${app.id}/`}>{app.name}</Link>
+          <Text as="span" variant="muted" size="sm" monospace ellipsis>
+            {app.clientID}
+          </Text>
+        </Stack>
+      </SimpleTable.RowCell>
+
+      <SimpleTable.RowCell>
+        {app.dateCreated ? (
+          <TimeSince date={app.dateCreated} suffix="" />
+        ) : (
+          <Text as="span" variant="muted">
+            -
+          </Text>
+        )}
+      </SimpleTable.RowCell>
+
+      <SimpleTable.RowCell justify="end" padding="lg xl lg 0">
+        <ConfirmDelete
+          message={t(
+            'Removing this API Application will break existing usages of the application!'
+          )}
+          confirmInput={app.name}
+          onConfirm={handleRemove}
+        >
+          <Button disabled={isLoading} size="sm" icon={<IconDelete />}>
+            {t('Remove')}
+          </Button>
+        </ConfirmDelete>
+      </SimpleTable.RowCell>
+    </SimpleTable.Row>
+  );
 }
-
-const StyledPanelItem = styled(PanelItem)`
-  padding: ${space(2)};
-  align-items: center;
-`;
-
-const ApplicationNameWrapper = styled('div')`
-  display: flex;
-  flex-direction: column;
-  flex: 1;
-  margin-right: ${space(1)};
-`;
-
-const ApplicationName = styled(Link)`
-  font-size: ${p => p.theme.headerFontSize};
-  font-weight: bold;
-  margin-bottom: ${space(0.5)};
-`;
-
-const ClientId = styled('div')`
-  color: ${p => p.theme.gray200};
-  font-size: ${p => p.theme.fontSizeMedium};
-`;
-
-export default Row;

@@ -1,7 +1,7 @@
 import 'echarts/lib/component/visualMap';
 
-import {EChartOption} from 'echarts';
+import type {VisualMapComponentOption} from 'echarts';
 
-export default function VisualMap(visualMap: EChartOption.VisualMap) {
+export function VisualMap(visualMap: VisualMapComponentOption): VisualMapComponentOption {
   return visualMap;
 }

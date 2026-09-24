@@ -1,86 +1,22 @@
 import styled from '@emotion/styled';
 
-import NavTabs from 'app/components/navTabs';
-import overflowEllipsis from 'app/styles/overflowEllipsis';
-import space from 'app/styles/space';
+import {
+  Container,
+  Grid,
+  Stack,
+  type ContainerProps,
+  type GridProps,
+} from '@sentry/scraps/layout';
+import {Tabs} from '@sentry/scraps/tabs';
+
+import {TopBar} from 'sentry/views/navigation/topBar';
 
 /**
- * Base container for 66/33 containers.
+ * Main container for a page.
  */
-export const Body = styled('div')`
-  padding: ${space(2)};
-  margin: 0;
-  background-color: ${p => p.theme.background};
-  flex-grow: 1;
-
-  @media (min-width: ${p => p.theme.breakpoints[0]}) {
-    padding: ${space(3)} ${space(4)};
-  }
-
-  @media (min-width: ${p => p.theme.breakpoints[1]}) {
-    display: grid;
-    grid-template-columns: 66% auto;
-    align-content: start;
-    grid-gap: ${space(3)};
-  }
-
-  @media (min-width: ${p => p.theme.breakpoints[2]}) {
-    grid-template-columns: minmax(100px, auto) 325px;
-  }
-`;
-
-/**
- * Use HeaderContent to create horizontal regions in the header
- * that contain a heading/breadcrumbs and a button group.
- */
-export const HeaderContent = styled('div')`
-  display: flex;
-  flex-direction: column;
-  justify-content: normal;
-  margin-bottom: ${space(2)};
-  overflow: hidden;
-  max-width: 100%;
-
-  @media (max-width: ${p => p.theme.breakpoints[1]}) {
-    margin-bottom: ${space(1)};
-  }
-`;
-
-/**
- * Container for action buttons and secondary information that
- * flows on the top right of the header.
- */
-export const HeaderActions = styled('div')`
-  display: flex;
-  flex-direction: column;
-  justify-content: normal;
-  min-width: max-content;
-
-  @media (max-width: ${p => p.theme.breakpoints[1]}) {
-    width: max-content;
-    margin-bottom: ${space(2)};
-  }
-`;
-
-/**
- * Heading container that includes margins.
- */
-export const Title = styled('h2')`
-  font-size: ${p => p.theme.headerFontSize};
-  font-weight: normal;
-  line-height: 1.2;
-  color: ${p => p.theme.textColor};
-  margin-top: ${space(3)};
-  /* TODO(bootstrap) Remove important when bootstrap headings are removed */
-  margin-bottom: 0 !important;
-  min-height: 30px;
-  align-self: center;
-  ${overflowEllipsis};
-
-  @media (max-width: ${p => p.theme.breakpoints[1]}) {
-    margin-top: ${space(1)};
-  }
-`;
+export function Page(props: {children: React.ReactNode}) {
+  return <Stack as="main" flex="1" background="primary" {...props} />;
+}
 
 /**
  * Header container for header content and header actions.
@@ -88,46 +24,131 @@ export const Title = styled('h2')`
  * Uses a horizontal layout in wide viewports to put space between
  * the headings and the actions container. In narrow viewports these elements
  * are stacked vertically.
+ *
+ * Use `noActionWrap` to disable wrapping if there are minimal actions.
  */
-export const Header = styled('div')`
-  display: grid;
-  padding: ${space(2)} ${space(2)} 0 ${space(2)};
-  background-color: transparent;
-  border-bottom: 1px solid ${p => p.theme.border};
+type HeaderProps = {
+  children: React.ReactNode;
+  noActionWrap?: boolean;
+  /**
+   * Whether to use the unified header variant. Unified headers have the
+   * same background color as the main content area and no border, thus
+   * "unifying" the two areas.
+   */
+  unified?: boolean;
+};
 
-  @media (min-width: ${p => p.theme.breakpoints[1]}) {
-    grid-template-columns: 1fr auto;
-    padding: ${space(2)} ${space(4)} 0 ${space(4)};
-  }
-`;
+export function Header({noActionWrap, unified, ...props}: HeaderProps) {
+  return (
+    <Grid
+      as="header"
+      columns={{
+        zero: noActionWrap ? 'minmax(0, 1fr) auto' : 'minmax(0, 1fr)',
+        '3xl': 'minmax(0, 1fr) auto',
+      }}
+      padding={{'screen:sm': 'md lg 0 lg', 'screen:md': 'lg xl 0 xl'}}
+      borderBottom={unified ? 'none' : 'primary'}
+      {...props}
+    />
+  );
+}
 
 /**
- * Styled Nav Tabs for use inside a Layout.Header component
+ * Use HeaderContent to create horizontal regions in the header
+ * that contain a heading/breadcrumbs and a button group.
  */
-export const HeaderNavTabs = styled(NavTabs)`
-  margin: 0;
-  border-bottom: 0 !important;
-
-  & > li {
-    margin-right: ${space(3)};
-  }
-  & > li > a {
-    padding: ${space(1)} 0;
-    font-size: ${p => p.theme.fontSizeLarge};
-    margin-bottom: 4px;
-  }
-  & > li.active > a {
-    margin-bottom: 0;
-  }
-`;
+export function HeaderContent(props: {children: React.ReactNode}) {
+  return <Stack justify="start" marginBottom="md" maxWidth="100%" {...props} />;
+}
 
 /**
- * Containers for two column 66/33 layout.
+ * Container for action buttons and secondary information that
+ * flows on the top right of the header.
  */
-export const Main = styled('section')<{fullWidth?: boolean}>`
-  grid-column: ${p => (p.fullWidth ? '1/3' : '1/2')};
-  max-width: 100%;
-`;
-export const Side = styled('aside')`
-  grid-column: 2/3;
-`;
+export function HeaderActions(props: {children: React.ReactNode}) {
+  return (
+    <Stack
+      justify="start"
+      width={{zero: '100%', xl: 'max-content', '3xl': 'auto'}}
+      minWidth={{zero: '100%', xl: 'max-content'}}
+      maxWidth={{zero: '100%', xl: 'none'}}
+      marginTop="2xs"
+      marginBottom={{zero: 'xl', '3xl': '0'}}
+      {...props}
+    />
+  );
+}
+
+export function Title(props: {children: React.ReactNode}) {
+  return <TopBar.Slot name="title">{props.children}</TopBar.Slot>;
+}
+
+/**
+ * Styled Tabs for use inside a Layout.Header component
+ */
+export const HeaderTabs = styled(Tabs)`
+  grid-column: 1 / -1;
+` as typeof Tabs;
+
+/**
+ * Base container for 66/33 containers.
+ */
+type BodyProps = GridProps & {noRowGap?: boolean};
+
+export function Body({noRowGap, ...props}: BodyProps) {
+  return (
+    <Grid
+      flexGrow={1}
+      columns={{zero: 'minmax(0, 1fr)', '4xl': 'minmax(100px, auto) 325px'}}
+      alignContent="start"
+      gap={noRowGap ? '0 2xl' : '2xl'}
+      background="primary"
+      padding={{'screen:sm': 'lg', 'screen:md': 'lg xl'}}
+      {...props}
+    />
+  );
+}
+
+interface MainProps extends Omit<ContainerProps<'section'>, 'width'> {
+  children: React.ReactNode;
+  /**
+   * Set the width of the main content.
+   * - 'twothirds': The main content will span the left two-thirds of the Body. Use this for layouts with a side column.
+   * - 'full': The main content will span the width of the container. Use when the layout does not have a side column.
+   * - 'full-constrained': The main content will span the width of the container and wrapped in a 1440px wide container.
+   * Defaults to 'twothirds'.
+   */
+  width?: 'twothirds' | 'full' | 'full-constrained';
+}
+
+/**
+ * Containers for left column of the 66/33 layout.
+ */
+export function Main({children, width = 'twothirds', ...props}: MainProps) {
+  // We need the extra DOM element when the width is constrained because Main is a part of a grid layout.
+  // If we apply the max width directly the right end of the page background will be missing
+  return (
+    <Container
+      column={{
+        zero: '1 / -1',
+        '4xl': width === 'twothirds' ? '1/2' : '1/3',
+      }}
+      as="section"
+      width="100%"
+      {...props}
+    >
+      {width === 'full-constrained' ? (
+        <Container maxWidth="1440px">{children}</Container>
+      ) : (
+        children
+      )}
+    </Container>
+  );
+}
+
+/**
+ * Container for the right column the 66/33 layout
+ */
+export function Side(props: ContainerProps<'aside'>) {
+  return <Container as="aside" column={{zero: '1 / -1', '4xl': '2/3'}} {...props} />;
+}

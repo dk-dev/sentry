@@ -1,99 +1,210 @@
-import React from 'react';
-import {RouteComponentProps} from 'react-router';
+import {useState} from 'react';
+import {useQueryClient} from '@tanstack/react-query';
+
+import {Button} from '@sentry/scraps/button';
+import {Grid} from '@sentry/scraps/layout';
+import {useModal} from '@sentry/scraps/modal';
+import type {TableColumnConfig} from '@sentry/scraps/table';
 
 import {
   addErrorMessage,
   addLoadingMessage,
   addSuccessMessage,
-} from 'app/actionCreators/indicator';
-import Button from 'app/components/button';
-import {Panel, PanelBody, PanelHeader} from 'app/components/panels';
-import {IconAdd} from 'app/icons';
-import {t} from 'app/locale';
-import {ApiApplication} from 'app/types';
-import AsyncView from 'app/views/asyncView';
-import Row from 'app/views/settings/account/apiApplications/row';
-import EmptyMessage from 'app/views/settings/components/emptyMessage';
-import SettingsPageHeader from 'app/views/settings/components/settingsPageHeader';
+} from 'sentry/actionCreators/indicator';
+import {type ModalRenderProps} from 'sentry/actionCreators/modal';
+import {RadioGroup} from 'sentry/components/forms/controls/radioGroup';
+import {LoadingError} from 'sentry/components/loadingError';
+import {LoadingIndicator} from 'sentry/components/loadingIndicator';
+import {SentryDocumentTitle} from 'sentry/components/sentryDocumentTitle';
+import {SimpleTable} from 'sentry/components/tables/simpleTable';
+import {IconAdd} from 'sentry/icons';
+import {t} from 'sentry/locale';
+import type {ApiApplication} from 'sentry/types/user';
+import {getApiUrl} from 'sentry/utils/api/getApiUrl';
+import {isDemoModeActive} from 'sentry/utils/demoMode';
+import {setApiQueryData, useApiQuery} from 'sentry/utils/queryClient';
+import {useApi} from 'sentry/utils/useApi';
+import {useNavigate} from 'sentry/utils/useNavigate';
+import {Row} from 'sentry/views/settings/account/apiApplications/row';
+import {SettingsPageHeader} from 'sentry/views/settings/components/settingsPageHeader';
 
 const ROUTE_PREFIX = '/settings/account/api/';
 
-type Props = RouteComponentProps<{}, {}>;
-type State = {
-  appList: ApiApplication[];
-} & AsyncView['state'];
+export default function ApiApplications() {
+  const {openModal} = useModal();
 
-class ApiApplications extends AsyncView<Props, State> {
-  getEndpoints(): ReturnType<AsyncView['getEndpoints']> {
-    return [['appList', '/api-applications/']];
+  const api = useApi();
+  const queryClient = useQueryClient();
+  const navigate = useNavigate();
+
+  const ENDPOINT = getApiUrl('/api-applications/');
+
+  const {
+    data: appList = [],
+    isLoading,
+    isError,
+    refetch,
+  } = useApiQuery<ApiApplication[]>([ENDPOINT], {
+    staleTime: 0,
+    enabled: !isDemoModeActive(),
+  });
+
+  if (isLoading) {
+    return <LoadingIndicator />;
   }
 
-  getTitle() {
-    return t('API Applications');
+  if (isError) {
+    return <LoadingError onRetry={refetch} />;
   }
 
-  handleCreateApplication = async () => {
+  const createApplication = async (isPublic: boolean) => {
     addLoadingMessage();
 
     try {
-      const app = await this.api.requestPromise('/api-applications/', {
+      const app = await api.requestPromise(ENDPOINT, {
         method: 'POST',
+        data: {isPublic},
       });
 
       addSuccessMessage(t('Created a new API Application'));
-      this.props.router.push(`${ROUTE_PREFIX}applications/${app.id}/`);
-    } catch (_err) {
-      addErrorMessage(t('Unable to remove application. Please try again.'));
+      navigate(`${ROUTE_PREFIX}applications/${app.id}/`);
+    } catch {
+      addErrorMessage(t('Unable to create application. Please try again.'));
     }
   };
 
-  handleRemoveApplication = (app: ApiApplication) => {
-    this.setState({
-      appList: this.state.appList.filter(a => a.id !== app.id),
-    });
+  const handleCreateApplication = () => {
+    openModal(({Body, Header, Footer, closeModal}) => (
+      <CreateApplicationModal
+        Body={Body}
+        Header={Header}
+        Footer={Footer}
+        closeModal={closeModal}
+        onSubmit={(isPublic: boolean) => {
+          closeModal();
+          createApplication(isPublic);
+        }}
+      />
+    ));
   };
 
-  renderBody() {
-    const action = (
-      <Button
-        priority="primary"
-        size="small"
-        onClick={this.handleCreateApplication}
-        icon={<IconAdd size="xs" isCircled />}
+  const handleRemoveApplication = (app: ApiApplication) => {
+    setApiQueryData<any>(queryClient, [ENDPOINT], (oldAppList: any) =>
+      oldAppList.filter((a: any) => a.id !== app.id)
+    );
+  };
+
+  const isEmpty = appList.length === 0;
+
+  const action = (
+    <Button
+      variant="primary"
+      size="sm"
+      onClick={handleCreateApplication}
+      icon={<IconAdd />}
+      aria-label={t('Create New Application')}
+    >
+      {t('Create New Application')}
+    </Button>
+  );
+
+  return (
+    <SentryDocumentTitle title={t('API Applications')}>
+      <SettingsPageHeader title="API Applications" action={action} />
+
+      <SimpleTable
+        columns={APPLICATION_COLUMNS}
+        header={
+          <SimpleTable.HeaderRow>
+            <SimpleTable.HeaderCell>{t('Application Name')}</SimpleTable.HeaderCell>
+            <SimpleTable.HeaderCell>{t('Age')}</SimpleTable.HeaderCell>
+            <SimpleTable.HeaderCell />
+          </SimpleTable.HeaderRow>
+        }
       >
-        {t('Create New Application')}
-      </Button>
-    );
-
-    const isEmpty = this.state.appList.length === 0;
-
-    return (
-      <div>
-        <SettingsPageHeader title="API Applications" action={action} />
-
-        <Panel>
-          <PanelHeader>{t('Application Name')}</PanelHeader>
-
-          <PanelBody>
-            {!isEmpty ? (
-              this.state.appList.map(app => (
-                <Row
-                  api={this.api}
-                  key={app.id}
-                  app={app}
-                  onRemove={this.handleRemoveApplication}
-                />
-              ))
-            ) : (
-              <EmptyMessage>
-                {t("You haven't created any applications yet.")}
-              </EmptyMessage>
-            )}
-          </PanelBody>
-        </Panel>
-      </div>
-    );
-  }
+        {isEmpty ? (
+          <SimpleTable.Empty data-test-id="empty-message">
+            {t("You haven't created any applications yet.")}
+          </SimpleTable.Empty>
+        ) : (
+          appList.map(app => (
+            <Row key={app.id} app={app} onRemove={handleRemoveApplication} />
+          ))
+        )}
+      </SimpleTable>
+    </SentryDocumentTitle>
+  );
 }
 
-export default ApiApplications;
+const APPLICATION_COLUMNS: TableColumnConfig[] = [
+  {key: 'name', width: {zero: 'minmax(0, 1fr)', xl: 'minmax(220px, 1fr)'}},
+  {key: 'age', visible: {xl: true}, width: 'minmax(100px, 160px)'},
+  {key: 'actions', width: 'max-content'},
+];
+
+interface CreateApplicationModalProps {
+  Body: ModalRenderProps['Body'];
+  Footer: ModalRenderProps['Footer'];
+  Header: ModalRenderProps['Header'];
+  closeModal: ModalRenderProps['closeModal'];
+  onSubmit: (isPublic: boolean) => void;
+}
+
+function CreateApplicationModal({
+  Header,
+  Body,
+  Footer,
+  closeModal,
+  onSubmit,
+}: CreateApplicationModalProps) {
+  const [clientType, setClientType] = useState<'confidential' | 'public'>('confidential');
+
+  return (
+    <form
+      onSubmit={e => {
+        e.preventDefault();
+        onSubmit(clientType === 'public');
+      }}
+    >
+      <Header closeButton>
+        <h4>{t('Create New Application')}</h4>
+      </Header>
+      <Body>
+        <p>
+          {t(
+            'Choose the type of OAuth application based on how it will authenticate with Sentry.'
+          )}
+        </p>
+        <RadioGroup
+          label={t('Client Type')}
+          value={clientType}
+          onChange={value => setClientType(value)}
+          choices={[
+            [
+              'confidential',
+              t('Confidential'),
+              t(
+                'For server-side applications that can securely store a client secret. Uses client credentials for authentication.'
+              ),
+            ],
+            [
+              'public',
+              t('Public'),
+              t(
+                'For CLIs, native apps, or SPAs that cannot securely store secrets. Uses PKCE, device authorization, and refresh token rotation for security.'
+              ),
+            ],
+          ]}
+        />
+      </Body>
+      <Footer>
+        <Grid flow="column" align="center" gap="sm">
+          <Button onClick={closeModal}>{t('Cancel')}</Button>
+          <Button variant="primary" type="submit">
+            {t('Create Application')}
+          </Button>
+        </Grid>
+      </Footer>
+    </form>
+  );
+}

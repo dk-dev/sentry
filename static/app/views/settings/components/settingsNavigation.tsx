@@ -1,10 +1,10 @@
-import React from 'react';
-import styled from '@emotion/styled';
+import {cloneElement, Component, Fragment} from 'react';
 import * as Sentry from '@sentry/react';
 
-import space from 'app/styles/space';
-import SettingsNavigationGroup from 'app/views/settings/components/settingsNavigationGroup';
-import {NavigationProps, NavigationSection} from 'app/views/settings/types';
+import {t} from 'sentry/locale';
+import {SecondaryNavigation} from 'sentry/views/navigation/secondary/components';
+import {SettingsNavigationGroup} from 'sentry/views/settings/components/settingsNavigationGroup';
+import type {NavigationProps, NavigationSection} from 'sentry/views/settings/types';
 
 type DefaultProps = {
   /**
@@ -29,7 +29,31 @@ type Props = DefaultProps &
     navigationObjects: NavigationSection[];
   };
 
-class SettingsNavigation extends React.Component<Props> {
+function SettingsSecondaryNavigation({
+  navigationObjects,
+  hookConfigs,
+  hooks,
+  ...otherProps
+}: Props) {
+  const navWithHooks = navigationObjects.concat(hookConfigs);
+
+  return (
+    <Fragment>
+      <SecondaryNavigation.Header>{t('Settings')}</SecondaryNavigation.Header>
+      <SecondaryNavigation.Body>
+        {navWithHooks.map((config, index) => (
+          <Fragment key={config.name}>
+            {index > 0 && <SecondaryNavigation.Separator />}
+            <SettingsNavigationGroup {...otherProps} {...config} />
+          </Fragment>
+        ))}
+        {hooks.map((Hook, i) => cloneElement(Hook, {key: `hook-${i}`}))}
+      </SecondaryNavigation.Body>
+    </Fragment>
+  );
+}
+
+export class SettingsNavigation extends Component<Props> {
   static defaultProps: DefaultProps = {
     hooks: [],
     hookConfigs: [],
@@ -39,6 +63,7 @@ class SettingsNavigation extends React.Component<Props> {
   componentDidCatch(error: Error, errorInfo: React.ErrorInfo) {
     Sentry.withScope(scope => {
       Object.keys(errorInfo).forEach(key => {
+        // @ts-expect-error TS(7053): Element implicitly has an 'any' type because expre... Remove this comment to see the full error message
         scope.setExtra(key, errorInfo[key]);
       });
       scope.setExtra('url', window.location.href);
@@ -47,35 +72,24 @@ class SettingsNavigation extends React.Component<Props> {
   }
 
   render() {
-    const {navigationObjects, hooks, hookConfigs, stickyTop, ...otherProps} = this.props;
-    const navWithHooks = navigationObjects.concat(hookConfigs);
+    const {
+      navigationObjects,
+      hooks,
+      hookConfigs,
+      stickyTop,
+      organization,
+      ...otherProps
+    } = this.props;
 
     return (
-      <PositionStickyWrapper stickyTop={stickyTop}>
-        {navWithHooks.map(config => (
-          <SettingsNavigationGroup key={config.name} {...otherProps} {...config} />
-        ))}
-        {hooks.map((Hook, i) => React.cloneElement(Hook, {key: `hook-${i}`}))}
-      </PositionStickyWrapper>
+      <SettingsSecondaryNavigation
+        navigationObjects={navigationObjects}
+        hooks={hooks}
+        hookConfigs={hookConfigs}
+        stickyTop={stickyTop}
+        organization={organization}
+        {...otherProps}
+      />
     );
   }
 }
-
-const PositionStickyWrapper = styled('div')<{stickyTop: string}>`
-  padding: ${space(4)};
-  padding-right: ${space(2)};
-
-  @media (min-width: ${p => p.theme.breakpoints[0]}) {
-    position: sticky;
-    top: ${p => p.stickyTop};
-    overflow: scroll;
-    -ms-overflow-style: none;
-    scrollbar-width: none;
-
-    &::-webkit-scrollbar {
-      display: none;
-    }
-  }
-`;
-
-export default SettingsNavigation;

@@ -1,58 +1,78 @@
-import React from 'react';
+import {css} from '@emotion/react';
 import styled from '@emotion/styled';
-import {Location} from 'history';
+import type {LocationDescriptor} from 'history';
 
-import {SectionHeading} from 'app/components/charts/styles';
-import GlobalSelectionLink from 'app/components/globalSelectionLink';
-import Tooltip from 'app/components/tooltip';
-import {IconLink} from 'app/icons';
-import {t} from 'app/locale';
-import overflowEllipsis from 'app/styles/overflowEllipsis';
-import space from 'app/styles/space';
-import {Organization, Project} from 'app/types';
-import {decodeScalar} from 'app/utils/queryString';
-import {stringifyQueryObject, tokenizeSearch} from 'app/utils/tokenizeSearch';
-import {FilterViews} from 'app/views/performance/landing';
-import {DEFAULT_MAX_DURATION} from 'app/views/performance/trends/utils';
-import {getPerformanceLandingUrl} from 'app/views/performance/utils';
+import {FeatureBadge} from '@sentry/scraps/badge';
+import {Flex} from '@sentry/scraps/layout';
+import type {LinkProps} from '@sentry/scraps/link';
+import {Link} from '@sentry/scraps/link';
+import {Tooltip} from '@sentry/scraps/tooltip';
+
+import {SectionHeading} from 'sentry/components/charts/styles';
+import {extractSelectionParameters} from 'sentry/components/pageFilters/parse';
+import {IconLink} from 'sentry/icons';
+import {t} from 'sentry/locale';
+import type {Organization} from 'sentry/types/organization';
+import type {Project} from 'sentry/types/project';
+import {useLocation} from 'sentry/utils/useLocation';
+import {BACKEND_LANDING_SUB_PATH} from 'sentry/views/insights/pages/backend/settings';
+import {FRONTEND_LANDING_SUB_PATH} from 'sentry/views/insights/pages/frontend/settings';
+import {DOMAIN_VIEW_BASE_URL} from 'sentry/views/insights/pages/settings';
+import {
+  getPerformanceBaseUrl,
+  platformToDomainView,
+} from 'sentry/views/performance/utils';
 
 import {SidebarSection} from './styles';
 
 type Props = {
   organization: Organization;
-  location: Location;
   project?: Project;
 };
 
-function ProjectQuickLinks({organization, project, location}: Props) {
-  function getTrendsLink() {
-    const queryString = decodeScalar(location.query.query);
-    const conditions = tokenizeSearch(queryString || '');
-    conditions.setTagValues('tpm()', ['>0.01']);
-    conditions.setTagValues('transaction.duration', ['>0', `<${DEFAULT_MAX_DURATION}`]);
-
-    return {
-      pathname: getPerformanceLandingUrl(organization),
-      query: {
-        project: project?.id,
-        cursor: undefined,
-        query: stringifyQueryObject(conditions),
-        view: FilterViews.TRENDS,
-      },
-    };
-  }
+export function ProjectQuickLinks({organization, project}: Props) {
+  const domainView = project
+    ? platformToDomainView([project], [parseInt(project.id, 10)])
+    : 'backend';
 
   const quickLinks = [
+    ...(project?.platform === 'php-laravel'
+      ? [
+          {
+            title: t('Laravel Insights'),
+            to: {
+              pathname: `/organizations/${organization.slug}/${DOMAIN_VIEW_BASE_URL}/${BACKEND_LANDING_SUB_PATH}/`,
+              query: {project: project.id},
+            },
+            showNewBadge: true,
+          },
+        ]
+      : []),
+    ...(project?.platform === 'javascript-nextjs'
+      ? [
+          {
+            title: t('Next.js Insights'),
+            to: {
+              pathname: `/organizations/${organization.slug}/${DOMAIN_VIEW_BASE_URL}/${FRONTEND_LANDING_SUB_PATH}/`,
+              query: {project: project.id},
+            },
+            showNewBadge: true,
+          },
+        ]
+      : []),
     {
       title: t('User Feedback'),
       to: {
-        pathname: `/organizations/${organization.slug}/user-feedback/`,
+        pathname: `/organizations/${organization.slug}/issues/feedback/`,
         query: {project: project?.id},
       },
     },
     {
-      title: t('Most Improved/Regressed Transactions'),
-      to: getTrendsLink(),
+      title: t('View Transactions'),
+      to: {
+        pathname: `${getPerformanceBaseUrl(organization.slug, domainView)}/`,
+        query: {project: project?.id},
+      },
       disabled: !organization.features.includes('performance-view'),
     },
   ];
@@ -63,7 +83,7 @@ function ProjectQuickLinks({organization, project, location}: Props) {
       {quickLinks
         // push disabled links to the bottom
         .sort((link1, link2) => Number(!!link1.disabled) - Number(!!link2.disabled))
-        .map(({title, to, disabled}) => (
+        .map(({title, to, disabled, showNewBadge}) => (
           <div key={title}>
             <Tooltip
               title={t("You don't have access to this feature")}
@@ -71,7 +91,10 @@ function ProjectQuickLinks({organization, project, location}: Props) {
             >
               <QuickLink to={to} disabled={disabled}>
                 <IconLink />
-                <QuickLinkText>{title}</QuickLinkText>
+                <Flex align="center" gap="xs">
+                  <QuickLinkText>{title}</QuickLinkText>
+                  {showNewBadge && <FeatureBadge type="new" />}
+                </Flex>
               </QuickLink>
             </Tooltip>
           </div>
@@ -80,32 +103,58 @@ function ProjectQuickLinks({organization, project, location}: Props) {
   );
 }
 
-const QuickLink = styled(p =>
-  p.disabled ? (
-    <span className={p.className}>{p.children}</span>
-  ) : (
-    <GlobalSelectionLink {...p} />
-  )
-)<{
+interface QuickLinkProps extends Omit<LinkProps, 'to'> {
+  to: LocationDescriptor;
+  disabled?: boolean;
+}
+
+function QuickLinkComponent({
+  disabled,
+  to,
+  className,
+  children,
+  ...props
+}: QuickLinkProps) {
+  const location = useLocation();
+
+  if (disabled) {
+    return <span className={className}>{children}</span>;
+  }
+
+  const toWithQuery =
+    typeof to === 'string'
+      ? {pathname: to, query: extractSelectionParameters(location.query)}
+      : {...to, query: {...extractSelectionParameters(location.query), ...to.query}};
+
+  return (
+    <Link to={toWithQuery} className={className} {...props}>
+      {children}
+    </Link>
+  );
+}
+
+const QuickLink = styled(QuickLinkComponent)<{
   disabled?: boolean;
 }>`
-  margin-bottom: ${space(1)};
+  margin-bottom: ${p => p.theme.space.md};
   display: grid;
   align-items: center;
-  gap: ${space(1)};
+  gap: ${p => p.theme.space.md};
   grid-template-columns: auto 1fr;
 
   ${p =>
     p.disabled &&
-    `
-    color: ${p.theme.gray200};
-    cursor: not-allowed;
-  `}
+    css`
+      color: ${p.theme.colors.gray200};
+      cursor: not-allowed;
+    `}
 `;
 
 const QuickLinkText = styled('span')`
-  font-size: ${p => p.theme.fontSizeMedium};
-  ${overflowEllipsis}
+  font-size: ${p => p.theme.font.size.md};
+  display: block;
+  width: 100%;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 `;
-
-export default ProjectQuickLinks;

@@ -1,47 +1,40 @@
-import React from 'react';
+import {useState} from 'react';
 import styled from '@emotion/styled';
 
-import {t} from 'app/locale';
-import overflowEllipsis from 'app/styles/overflowEllipsis';
-import space from 'app/styles/space';
+import {t} from 'sentry/locale';
+
+import {nullableValue} from './fieldRenderers';
 
 type Props = {
-  value: string[];
-};
-type State = {
-  expanded: boolean;
+  value: Array<string | null>;
 };
 
-class ArrayValue extends React.Component<Props, State> {
-  state: State = {
-    expanded: false,
-  };
-  handleToggle = () => {
-    this.setState(prevState => ({
-      expanded: !prevState.expanded,
-    }));
+export function ArrayValue(props: Props) {
+  const [expanded, setExpanded] = useState(false);
+  const {value} = props;
+
+  const handleToggle = () => {
+    setExpanded(!expanded);
   };
 
-  render() {
-    const {expanded} = this.state;
-    const {value} = this.props;
-    return (
-      <ArrayContainer expanded={expanded}>
-        {expanded &&
-          value
-            .slice(0, value.length - 1)
-            .map((item, i) => <ArrayItem key={`${i}:${item}`}>{item}</ArrayItem>)}
-        <ArrayItem>{value.slice(-1)[0]}</ArrayItem>
-        {value.length > 1 ? (
-          <ButtonContainer>
-            <button onClick={this.handleToggle}>
-              {expanded ? t('[collapse]') : t('[+%s more]', value.length - 1)}
-            </button>
-          </ButtonContainer>
-        ) : null}
-      </ArrayContainer>
-    );
-  }
+  return (
+    <ArrayContainer expanded={expanded}>
+      {expanded &&
+        value
+          .slice(0, -1)
+          .map((item, i) => (
+            <ArrayItem key={`${i}:${item}`}>{nullableValue(item)}</ArrayItem>
+          ))}
+      <ArrayItem>{nullableValue(value.slice(-1)[0]!)}</ArrayItem>
+      {value.length > 1 ? (
+        <ButtonContainer>
+          <button onClick={handleToggle}>
+            {expanded ? t('[collapse]') : t('[+%s more]', value.length - 1)}
+          </button>
+        </ButtonContainer>
+      ) : null}
+    </ArrayContainer>
+  );
 }
 
 const ArrayContainer = styled('div')<{expanded: boolean}>`
@@ -54,8 +47,8 @@ const ArrayContainer = styled('div')<{expanded: boolean}>`
     outline: none;
     padding: 0;
     cursor: pointer;
-    color: ${p => p.theme.blue300};
-    margin-left: ${space(0.5)};
+    color: ${p => p.theme.tokens.interactive.link.accent.rest};
+    margin-left: ${p => p.theme.space.xs};
   }
 `;
 
@@ -63,12 +56,12 @@ const ArrayItem = styled('span')`
   flex-shrink: 1;
   display: block;
 
-  ${overflowEllipsis};
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
   width: unset;
 `;
 
 const ButtonContainer = styled('div')`
   white-space: nowrap;
 `;
-
-export default ArrayValue;

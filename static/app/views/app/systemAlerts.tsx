@@ -1,45 +1,23 @@
-import React from 'react';
-import {ThemeProvider} from '@emotion/react';
+import {Container} from '@sentry/scraps/layout';
 
-import AlertStore from 'app/stores/alertStore';
-import {lightTheme} from 'app/utils/theme';
-
-import AlertMessage from './alertMessage';
+import {AlertMessage} from './alertMessage';
+import {useGlobalAlerts} from './globalAlerts';
 
 type Props = {className?: string};
-type Alert = React.ComponentProps<typeof AlertMessage>['alert'];
-type State = {
-  alerts: Array<Alert>;
-};
 
-class Alerts extends React.Component<Props, State> {
-  state = this.getInitialState();
+export function SystemAlerts(props: Props) {
+  const {alerts, closeAlert} = useGlobalAlerts();
 
-  getInitialState(): State {
-    return {
-      alerts: AlertStore.getInitialState() as Alert[],
-    };
-  }
-
-  componentWillUnmount() {
-    this.unlistener?.();
-  }
-
-  unlistener = AlertStore.listen((alerts: Alert[]) => this.setState({alerts}), undefined);
-
-  render() {
-    const {className} = this.props;
-    const {alerts} = this.state;
-    return (
-      <ThemeProvider theme={lightTheme}>
-        <div className={className}>
-          {alerts.map((alert, index) => (
-            <AlertMessage alert={alert} key={`${alert.id}-${index}`} system />
-          ))}
-        </div>
-      </ThemeProvider>
-    );
-  }
+  return (
+    <Container {...props}>
+      {alerts.map(alert => (
+        <AlertMessage
+          alert={alert}
+          key={alert.key}
+          onClose={() => closeAlert(alert)}
+          system
+        />
+      ))}
+    </Container>
+  );
 }
-
-export default Alerts;

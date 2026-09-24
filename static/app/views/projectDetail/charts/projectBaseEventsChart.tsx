@@ -1,32 +1,34 @@
-import React from 'react';
-import {withTheme} from '@emotion/react';
+import {Component} from 'react';
 import * as Sentry from '@sentry/react';
+import isEqual from 'lodash/isEqual';
 
-import {fetchTotalCount} from 'app/actionCreators/events';
-import EventsChart, {EventsChartProps} from 'app/components/charts/eventsChart';
-import {HeaderTitleLegend} from 'app/components/charts/styles';
-import {getParams} from 'app/components/organizations/globalSelectionHeader/getParams';
-import {isSelectionEqual} from 'app/components/organizations/globalSelectionHeader/utils';
-import QuestionTooltip from 'app/components/questionTooltip';
-import {t} from 'app/locale';
-import {GlobalSelection} from 'app/types';
-import {axisLabelFormatter} from 'app/utils/discover/charts';
-import getDynamicText from 'app/utils/getDynamicText';
-import {Theme} from 'app/utils/theme';
-import withGlobalSelection from 'app/utils/withGlobalSelection';
+import {InfoTip} from '@sentry/scraps/info';
+
+import {fetchTotalCount} from 'sentry/actionCreators/events';
+import type {EventsChartProps} from 'sentry/components/charts/eventsChart';
+import {EventsChart} from 'sentry/components/charts/eventsChart';
+import {HeaderTitleLegend} from 'sentry/components/charts/styles';
+import {normalizeDateTimeParams} from 'sentry/components/pageFilters/parse';
+import {t} from 'sentry/locale';
+import type {PageFilters, PageFilterDatetime} from 'sentry/types/core';
+import {axisLabelFormatter} from 'sentry/utils/discover/charts';
+import {aggregateOutputType} from 'sentry/utils/discover/fields';
+import {DiscoverDatasets} from 'sentry/utils/discover/types';
+import {getDynamicText} from 'sentry/utils/getDynamicText';
+import {withPageFilters} from 'sentry/utils/withPageFilters';
 
 type Props = Omit<
   EventsChartProps,
-  keyof Omit<GlobalSelection, 'datetime'> | keyof GlobalSelection['datetime']
+  keyof Omit<PageFilters, 'datetime'> | keyof PageFilterDatetime
 > & {
-  title: string;
-  selection: GlobalSelection;
   onTotalValuesChange: (value: number | null) => void;
-  theme: Theme;
+  selection: PageFilters;
+  title: string;
+  yAxis: string;
   help?: string;
 };
 
-class ProjectBaseEventsChart extends React.Component<Props> {
+class ProjectBaseEventsChart extends Component<Props> {
   componentDidMount() {
     this.fetchTotalCount();
   }
@@ -38,16 +40,24 @@ class ProjectBaseEventsChart extends React.Component<Props> {
   }
 
   async fetchTotalCount() {
-    const {api, organization, selection, onTotalValuesChange, query} = this.props;
+    const {
+      api,
+      organization,
+      selection,
+      onTotalValuesChange,
+      query,
+      dataset = DiscoverDatasets.SPANS,
+    } = this.props;
     const {projects, environments, datetime} = selection;
 
     try {
       const totals = await fetchTotalCount(api, organization.slug, {
         field: [],
         query,
+        dataset,
         environment: environments,
-        project: projects.map(proj => String(proj)),
-        ...getParams(datetime),
+        project: projects.map(String),
+        ...normalizeDateTimeParams(datetime),
       });
       onTotalValuesChange(totals);
     } catch (err) {
@@ -58,7 +68,7 @@ class ProjectBaseEventsChart extends React.Component<Props> {
 
   render() {
     const {
-      router,
+      location,
       organization,
       selection,
       api,
@@ -66,8 +76,8 @@ class ProjectBaseEventsChart extends React.Component<Props> {
       query,
       field,
       title,
-      theme,
       help,
+      dataset = DiscoverDatasets.SPANS,
       ...eventsChartProps
     } = this.props;
     const {projects, environments, datetime} = selection;
@@ -77,13 +87,14 @@ class ProjectBaseEventsChart extends React.Component<Props> {
       value: (
         <EventsChart
           {...eventsChartProps}
-          router={router}
+          location={location}
           organization={organization}
           showLegend
           yAxis={yAxis}
           query={query}
           api={api}
           projects={projects}
+          dataset={dataset}
           environments={environments}
           start={start}
           end={end}
@@ -96,7 +107,7 @@ class ProjectBaseEventsChart extends React.Component<Props> {
           chartHeader={
             <HeaderTitleLegend>
               {title}
-              {help && <QuestionTooltip size="sm" position="top" title={help} />}
+              {help && <InfoTip size="sm" position="top" title={help} />}
             </HeaderTitleLegend>
           }
           legendOptions={{right: 10, top: 0}}
@@ -104,8 +115,8 @@ class ProjectBaseEventsChart extends React.Component<Props> {
             grid: {left: '10px', right: '10px', top: '40px', bottom: '0px'},
             yAxis: {
               axisLabel: {
-                color: theme.gray200,
-                formatter: (value: number) => axisLabelFormatter(value, yAxis),
+                formatter: (value: number) =>
+                  axisLabelFormatter(value, aggregateOutputType(yAxis)),
               },
               scale: true,
             },
@@ -117,4 +128,32 @@ class ProjectBaseEventsChart extends React.Component<Props> {
   }
 }
 
-export default withGlobalSelection(withTheme(ProjectBaseEventsChart));
+/**
+ * Compare the non-utc values of two selections.
+ * Useful when re-fetching data based on page filters changing.
+ *
+ * utc is not compared as there is a problem somewhere in the selection
+ * data flow that results in it being undefined | null | boolean instead of null | boolean.
+ * The additional undefined state makes this function just as unreliable as isEqual(selection, other)
+ */
+function isSelectionEqual(selection: PageFilters, other: PageFilters): boolean {
+  if (
+    !isEqual(selection.projects, other.projects) ||
+    !isEqual(selection.environments, other.environments)
+  ) {
+    return false;
+  }
+
+  // Use string comparison as we aren't interested in the identity of the datetimes.
+  if (
+    selection.datetime.period !== other.datetime.period ||
+    selection.datetime.start?.toString() !== other.datetime.start?.toString() ||
+    selection.datetime.end?.toString() !== other.datetime.end?.toString()
+  ) {
+    return false;
+  }
+
+  return true;
+}
+
+export default withPageFilters(ProjectBaseEventsChart);

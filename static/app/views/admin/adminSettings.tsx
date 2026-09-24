@@ -1,9 +1,11 @@
-import React from 'react';
-import isUndefined from 'lodash/isUndefined';
-
-import {ApiForm} from 'app/components/forms';
-import {t} from 'app/locale';
-import AsyncView from 'app/views/asyncView';
+import {Form} from 'sentry/components/forms/form';
+import {LoadingError} from 'sentry/components/loadingError';
+import {LoadingIndicator} from 'sentry/components/loadingIndicator';
+import {Panel} from 'sentry/components/panels/panel';
+import {PanelHeader} from 'sentry/components/panels/panelHeader';
+import {t} from 'sentry/locale';
+import {getApiUrl} from 'sentry/utils/api/getApiUrl';
+import {useApiQuery} from 'sentry/utils/queryClient';
 
 import {getOption, getOptionField} from './options';
 
@@ -12,7 +14,6 @@ const optionsAvailable = [
   'system.admin-email',
   'system.support-email',
   'system.security-email',
-  'system.rate-limit',
   'auth.allow-registration',
   'auth.ip-rate-limit',
   'auth.user-rate-limit',
@@ -27,65 +28,67 @@ type FieldDef = {
   value: string | undefined;
 };
 
-type State = AsyncView['state'] & {
-  data: Record<string, FieldDef>;
-};
-
-export default class AdminSettings extends AsyncView<{}, State> {
-  get endpoint() {
-    return '/internal/options/';
-  }
-
-  getEndpoints(): ReturnType<AsyncView['getEndpoints']> {
-    return [['data', this.endpoint]];
-  }
-
-  renderBody() {
-    const {data} = this.state;
-
-    const initialData = {};
-    const fields = {};
-    for (const key of optionsAvailable) {
-      // TODO(dcramer): we should not be mutating options
-      const option = data[key] ?? {field: {}, value: undefined};
-
-      if (isUndefined(option.value) || option.value === '') {
-        const defn = getOption(key);
-        initialData[key] = defn.defaultValue ? defn.defaultValue() : '';
-      } else {
-        initialData[key] = option.value;
-      }
-      fields[key] = getOptionField(key, option.field);
+export default function AdminSettings() {
+  const {data, isPending, isError} = useApiQuery<Record<string, FieldDef>>(
+    [getApiUrl('/internal/options/')],
+    {
+      staleTime: 0,
     }
+  );
 
-    return (
-      <div>
-        <h3>{t('Settings')}</h3>
+  if (isError) {
+    return <LoadingError />;
+  }
 
-        <ApiForm
-          apiMethod="PUT"
-          apiEndpoint={this.endpoint}
-          initialData={initialData}
-          omitDisabled
-          requireChanges
-        >
-          <h4>General</h4>
+  if (isPending) {
+    return <LoadingIndicator />;
+  }
+
+  const initialData: Record<string, React.ReactNode> = {};
+  const fields: Record<string, React.ReactNode> = {};
+  for (const key of optionsAvailable) {
+    const option = data[key] ?? ({field: {}, value: undefined} as FieldDef);
+
+    if (option.value === undefined || option.value === '') {
+      const defn = getOption(key);
+      initialData[key] = defn.defaultValue ? defn.defaultValue() : '';
+    } else {
+      initialData[key] = option.value;
+    }
+    fields[key] = getOptionField(key, option.field);
+  }
+
+  return (
+    <div>
+      <h3>{t('Settings')}</h3>
+
+      <Form
+        apiMethod="PUT"
+        apiEndpoint="/internal/options/"
+        initialData={initialData}
+        saveOnBlur
+      >
+        <Panel>
+          <PanelHeader>{t('General')}</PanelHeader>
           {fields['system.url-prefix']}
           {fields['system.admin-email']}
           {fields['system.support-email']}
           {fields['system.security-email']}
-          {fields['system.rate-limit']}
+        </Panel>
 
-          <h4>Security & Abuse</h4>
+        <Panel>
+          <PanelHeader>{t('Security & Abuse')}</PanelHeader>
           {fields['auth.allow-registration']}
           {fields['auth.ip-rate-limit']}
           {fields['auth.user-rate-limit']}
           {fields['api.rate-limit.org-create']}
+        </Panel>
 
-          <h4>Beacon</h4>
+        <Panel>
+          <PanelHeader>{t('Beacon')}</PanelHeader>
           {fields['beacon.anonymous']}
-        </ApiForm>
-      </div>
-    );
-  }
+        </Panel>
+      </Form>
+    </div>
+  );
 }

@@ -1,14 +1,10 @@
-import React from 'react';
-import {browserHistory, RouteComponentProps} from 'react-router';
+import {useEffect} from 'react';
 
-import {DEFAULT_APP_ROUTE} from 'app/constants';
-import {Config} from 'app/types';
-import replaceRouterParams from 'app/utils/replaceRouterParams';
-import withConfig from 'app/utils/withConfig';
-
-type Props = {
-  config: Config;
-} & RouteComponentProps<{}, {}>;
+import {DEFAULT_APP_ROUTE} from 'sentry/constants';
+import {ConfigStore} from 'sentry/stores/configStore';
+import {useLegacyStore} from 'sentry/stores/useLegacyStore';
+import {replaceRouterParams} from 'sentry/utils/replaceRouterParams';
+import {useNavigate} from 'sentry/utils/useNavigate';
 
 /**
  * This view is used when a user lands on the route `/` which historically
@@ -21,20 +17,22 @@ type Props = {
  * TODO: There might be an edge case where user does not have `lastOrganization` set,
  * in which case we should load their list of organizations and make a decision
  */
-class AppRoot extends React.Component<Props> {
-  componentDidMount() {
-    const {config} = this.props;
+function AppRoot() {
+  const {lastOrganization} = useLegacyStore(ConfigStore);
+  const navigate = useNavigate();
 
-    if (config.lastOrganization) {
-      browserHistory.replace(
-        replaceRouterParams(DEFAULT_APP_ROUTE, {orgSlug: config.lastOrganization})
-      );
+  useEffect(() => {
+    if (!lastOrganization) {
+      return;
     }
-  }
 
-  render() {
-    return null;
-  }
+    const orgSlug = lastOrganization;
+    const url = replaceRouterParams(DEFAULT_APP_ROUTE, {orgSlug});
+
+    navigate(url, {replace: true});
+  }, [lastOrganization, navigate]);
+
+  return null;
 }
 
-export default withConfig(AppRoot);
+export default AppRoot;

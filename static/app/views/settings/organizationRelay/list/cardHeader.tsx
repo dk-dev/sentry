@@ -1,67 +1,74 @@
-import React from 'react';
 import styled from '@emotion/styled';
 
-import Button from 'app/components/button';
-import ButtonBar from 'app/components/buttonBar';
-import Clipboard from 'app/components/clipboard';
-import ConfirmDelete from 'app/components/confirmDelete';
-import DateTime from 'app/components/dateTime';
-import QuestionTooltip from 'app/components/questionTooltip';
-import {IconCopy, IconDelete, IconEdit} from 'app/icons';
-import {t, tct} from 'app/locale';
-import space from 'app/styles/space';
-import {Relay} from 'app/types';
+import {Button} from '@sentry/scraps/button';
+import {InfoTip} from '@sentry/scraps/info';
+import {Flex, Grid, Stack} from '@sentry/scraps/layout';
+
+import {ConfirmDelete} from 'sentry/components/confirmDelete';
+import {DateTime} from 'sentry/components/dateTime';
+import {IconCopyId, IconDelete, IconEdit} from 'sentry/icons';
+import {t, tct} from 'sentry/locale';
+import type {Relay} from 'sentry/types/relay';
+import {useCopyToClipboard} from 'sentry/utils/useCopyToClipboard';
 
 type Props = Relay & {
-  onEdit: (publicKey: Relay['publicKey']) => () => void;
-  onDelete: (publicKey: Relay['publicKey']) => () => void;
   disabled: boolean;
+  onDelete: (publicKey: Relay['publicKey']) => () => void;
+  onEdit: (publicKey: Relay['publicKey']) => () => void;
+  extraAction?: React.ReactNode;
 };
 
-const CardHeader = ({
+export function CardHeader({
   publicKey,
   name,
   description,
   created,
   disabled,
+  extraAction,
   onEdit,
   onDelete,
-}: Props) => {
+}: Props) {
+  const {copy} = useCopyToClipboard();
+
   const deleteButton = (
     <Button
-      size="small"
+      size="sm"
       icon={<IconDelete />}
-      label={t('Delete Key')}
+      aria-label={t('Delete Key')}
       disabled={disabled}
-      title={disabled ? t('You do not have permission to delete keys') : undefined}
+      tooltipProps={{
+        title: disabled ? t('You do not have permission to delete keys') : undefined,
+      }}
     />
   );
   return (
-    <Header>
-      <MainInfo>
-        <Name>
-          <div>{name}</div>
-          {description && (
-            <QuestionTooltip position="top" size="sm" title={description} />
-          )}
-        </Name>
-        <Date>
-          {tct('Created on [date]', {date: <DateTime date={created} timeAndDate />})}
-        </Date>
-      </MainInfo>
-      <ButtonBar gap={1}>
-        <Clipboard value={publicKey}>
-          <Button size="small" icon={<IconCopy />}>
-            {t('Copy Key')}
-          </Button>
-        </Clipboard>
+    <Grid columns={{zero: '1fr', md: '1fr max-content'}} align="center" gap="md">
+      <Stack gap="2xs">
+        <Flex align="center" gap="md">
+          {name}
+          {description && <InfoTip position="top" size="sm" title={description} />}
+        </Flex>
+        <DateCreated>
+          {tct('Created on [date]', {date: <DateTime date={created} />})}
+        </DateCreated>
+      </Stack>
+      <Flex align="center" gap="md" wrap="wrap" justify={{zero: 'start', md: 'end'}}>
         <Button
-          size="small"
+          size="sm"
+          icon={<IconCopyId />}
+          onClick={() => copy(publicKey, {successMessage: t('Copied key to clipboard')})}
+        >
+          {t('Copy Key')}
+        </Button>
+        <Button
+          size="sm"
           onClick={onEdit(publicKey)}
           icon={<IconEdit />}
-          label={t('Edit Key')}
+          aria-label={t('Edit Key')}
           disabled={disabled}
-          title={disabled ? t('You do not have permission to edit keys') : undefined}
+          tooltipProps={{
+            title: disabled ? t('You do not have permission to edit keys') : undefined,
+          }}
         />
         {disabled ? (
           deleteButton
@@ -76,36 +83,13 @@ const CardHeader = ({
             {deleteButton}
           </ConfirmDelete>
         )}
-      </ButtonBar>
-    </Header>
+        {extraAction}
+      </Flex>
+    </Grid>
   );
-};
+}
 
-export default CardHeader;
-
-const Name = styled('div')`
-  display: grid;
-  grid-template-columns: max-content 1fr;
-  grid-gap: ${space(0.5)};
-`;
-
-const MainInfo = styled('div')`
-  color: ${p => p.theme.textColor};
-  display: grid;
-  grid-gap: ${space(1)};
-`;
-
-const Date = styled('small')`
-  color: ${p => p.theme.gray300};
-  font-size: ${p => p.theme.fontSizeMedium};
-`;
-
-const Header = styled('div')`
-  display: grid;
-  grid-gap: ${space(1)};
-  align-items: flex-start;
-
-  @media (min-width: ${p => p.theme.breakpoints[0]}) {
-    grid-template-columns: 1fr max-content;
-  }
+const DateCreated = styled('div')`
+  color: ${p => p.theme.tokens.content.secondary};
+  font-size: ${p => p.theme.font.size.md};
 `;

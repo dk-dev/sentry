@@ -1,179 +1,69 @@
-import {Location} from 'history';
+import type {Location} from 'history';
 
-import {ALL_ACCESS_PROJECTS} from 'app/constants/globalSelectionHeader';
-import {backend, frontend} from 'app/data/platformCategories';
-import {t} from 'app/locale';
-import {LightWeightOrganization, Organization, Project} from 'app/types';
-import EventView from 'app/utils/discover/eventView';
-import {AggregationKey, Column} from 'app/utils/discover/fields';
-import {
-  formatAbbreviatedNumber,
-  formatFloat,
-  formatPercentage,
-  getDuration,
-} from 'app/utils/formatters';
-import {HistogramData} from 'app/utils/performance/histogram/types';
-import {decodeScalar} from 'app/utils/queryString';
-
-import {AxisOption, getTermHelp, PERFORMANCE_TERM} from '../data';
-import {Rectangle} from '../transactionVitals/types';
-
-export const LEFT_AXIS_QUERY_KEY = 'left';
-export const RIGHT_AXIS_QUERY_KEY = 'right';
-
-type LandingDisplay = {
-  label: string;
-  field: LandingDisplayField;
-};
+import {t} from 'sentry/locale';
+import type {EventView} from 'sentry/utils/discover/eventView';
+import {decodeScalar} from 'sentry/utils/queryString';
+import {MutableSearch} from 'sentry/utils/tokenizeSearch';
+import type {ReactRouter3Navigate} from 'sentry/utils/useNavigate';
 
 export enum LandingDisplayField {
   ALL = 'all',
   FRONTEND_PAGELOAD = 'frontend_pageload',
   FRONTEND_OTHER = 'frontend_other',
   BACKEND = 'backend',
+  MOBILE = 'mobile',
 }
 
-export const LANDING_DISPLAYS = [
+// TODO Abdullah Khan: Remove code for Web Vitals tab in performance landing
+// page when new starfish web vitals module is mature.
+const LANDING_DISPLAYS = [
   {
-    label: 'All Transactions',
+    label: t('All Transactions'),
     field: LandingDisplayField.ALL,
   },
   {
-    label: 'Frontend (Pageload)',
-    field: LandingDisplayField.FRONTEND_PAGELOAD,
-  },
-  {
-    label: 'Frontend (Other)',
+    label: t('Frontend'),
     field: LandingDisplayField.FRONTEND_OTHER,
   },
   {
-    label: 'Backend',
+    label: t('Backend'),
     field: LandingDisplayField.BACKEND,
+  },
+  {
+    label: t('Mobile'),
+    field: LandingDisplayField.MOBILE,
   },
 ];
 
-export function getCurrentLandingDisplay(
-  location: Location,
-  projects: Project[],
-  eventView?: EventView
-): LandingDisplay {
-  const landingField = decodeScalar(location?.query?.landingDisplay);
-  const display = LANDING_DISPLAYS.find(({field}) => field === landingField);
-  if (display) {
-    return display;
-  }
-
-  const defaultDisplayField = getDefaultDisplayFieldForPlatform(projects, eventView);
-  const defaultDisplay = LANDING_DISPLAYS.find(
-    ({field}) => field === defaultDisplayField
-  );
-  return defaultDisplay || LANDING_DISPLAYS[0];
-}
-
-export function getChartWidth(chartData: HistogramData, refPixelRect: Rectangle | null) {
-  const distance = refPixelRect ? refPixelRect.point2.x - refPixelRect.point1.x : 0;
-  const chartWidth = chartData.length * distance;
-
-  return {
-    chartWidth,
-  };
-}
-
-export function getBackendFunction(
-  functionName: AggregationKey,
-  organization: Organization
-): Column {
-  switch (functionName) {
-    case 'p75':
-      return {kind: 'function', function: ['p75', 'transaction.duration', undefined]};
-    case 'tpm':
-      return {kind: 'function', function: ['tpm', '', undefined]};
-    case 'failure_rate':
-      return {kind: 'function', function: ['failure_rate', '', undefined]};
-    case 'apdex':
-      return {
-        kind: 'function',
-        function: ['apdex', `${organization.apdexThreshold}`, undefined],
-      };
-    default:
-      throw new Error(`Unsupported backend function: ${functionName}`);
-  }
-}
-
-const VITALS_FRONTEND_PLATFORMS: string[] = [...frontend];
-const VITALS_BACKEND_PLATFORMS: string[] = [...backend];
-
-export function getDefaultDisplayFieldForPlatform(
-  projects: Project[],
-  eventView?: EventView
+export function excludeTransaction(
+  transaction: string | number,
+  props: {eventView: EventView; location: Location; navigate: ReactRouter3Navigate}
 ) {
-  if (!eventView) {
-    return LandingDisplayField.ALL;
-  }
-  const projectIds = eventView.project;
-  if (projectIds.length === 0 || projectIds[0] === ALL_ACCESS_PROJECTS) {
-    return LandingDisplayField.ALL;
-  }
-  const selectedProjects = projects.filter(p => projectIds.includes(parseInt(p.id, 10)));
-  if (selectedProjects.length === 0 || selectedProjects.some(p => !p.platform)) {
-    return LandingDisplayField.ALL;
-  }
+  const {eventView, location, navigate} = props;
 
-  if (
-    selectedProjects.every(project =>
-      VITALS_FRONTEND_PLATFORMS.includes(project.platform as string)
-    )
-  ) {
-    return LandingDisplayField.FRONTEND_PAGELOAD;
-  }
+  const searchConditions = new MutableSearch(eventView.query);
+  searchConditions.addFilterValues('!transaction', [`${transaction}`]);
 
-  if (
-    selectedProjects.every(project =>
-      VITALS_BACKEND_PLATFORMS.includes(project.platform as string)
-    )
-  ) {
-    return LandingDisplayField.BACKEND;
-  }
-
-  return LandingDisplayField.ALL;
+  navigate({
+    pathname: location.pathname,
+    query: {
+      ...location.query,
+      cursor: undefined,
+      query: searchConditions.formatString(),
+    },
+  });
 }
 
-export const backendCardDetails = (organization: LightWeightOrganization) => {
-  return {
-    p75: {
-      title: t('Duration (p75)'),
-      tooltip: getTermHelp(organization, PERFORMANCE_TERM.P75),
-      formatter: value => getDuration(value / 1000, value >= 1000 ? 3 : 0, true),
-    },
-    tpm: {
-      title: t('Throughput'),
-      tooltip: getTermHelp(organization, PERFORMANCE_TERM.THROUGHPUT),
-      formatter: formatAbbreviatedNumber,
-    },
-    failure_rate: {
-      title: t('Failure Rate'),
-      tooltip: getTermHelp(organization, PERFORMANCE_TERM.FAILURE_RATE),
-      formatter: value => formatPercentage(value, 2),
-    },
-    apdex: {
-      title: t('Apdex'),
-      tooltip: getTermHelp(organization, PERFORMANCE_TERM.APDEX),
-      formatter: value => formatFloat(value, 4),
-    },
-  };
-};
+export function getLandingDisplayFromParam(location: Location) {
+  const landingField = decodeScalar(location?.query?.landingDisplay);
 
-export function getDisplayAxes(options: AxisOption[], location: Location) {
-  const leftDefault = options.find(opt => opt.isLeftDefault) || options[0];
-  const rightDefault = options.find(opt => opt.isRightDefault) || options[1];
+  const display = LANDING_DISPLAYS.find(({field}) => field === landingField);
+  return display;
+}
 
-  const leftAxis =
-    options.find(opt => opt.value === location.query[LEFT_AXIS_QUERY_KEY]) || leftDefault;
-  const rightAxis =
-    options.find(opt => opt.value === location.query[RIGHT_AXIS_QUERY_KEY]) ||
-    rightDefault;
-  return {
-    leftAxis,
-    rightAxis,
-  };
+export function checkIsReactNative(eventView: EventView) {
+  // only react native should contain the stall percentage column
+  return eventView
+    .getFields()
+    .some(field => field.includes('measurements.stall_percentage'));
 }

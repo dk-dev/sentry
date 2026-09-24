@@ -1,90 +1,42 @@
-import React from 'react';
-import {Link} from 'react-router';
-import styled from '@emotion/styled';
+import {NavLink} from 'react-router-dom';
 import classNames from 'classnames';
-import {LocationDescriptor} from 'history';
-import omit from 'lodash/omit';
-import PropTypes from 'prop-types';
+import type {LocationDescriptor} from 'history';
 
-type DefaultProps = {
-  index: boolean;
-  activeClassName: string;
-  disabled: boolean;
-};
+import {locationDescriptorToTo} from 'sentry/utils/reactRouter6Compat/location';
+import {normalizeUrl} from 'sentry/utils/url/normalizeUrl';
+import {useLocation} from 'sentry/utils/useLocation';
 
-type Props = DefaultProps &
-  React.ComponentProps<typeof Link> & {
-    query?: string;
-    // If supplied by parent component, decides whether link element
-    // is "active" or not ... overriding default behavior of strict
-    // route matching
-    isActive?: (location: LocationDescriptor, indexOnly?: boolean) => boolean;
-  };
-
-class ListLink extends React.Component<Props> {
-  static displayName = 'ListLink';
-
-  static contextTypes = {
-    router: PropTypes.object.isRequired,
-  };
-
-  static defaultProps: DefaultProps = {
-    activeClassName: 'active',
-    index: false,
-    disabled: false,
-  };
-
-  isActive = () => {
-    const {isActive, to, query, index} = this.props;
-
-    // TODO(ts) Removing context here results in a TypeError because `to` is not compatible
-    // with LocationDescriptor.
-    return (isActive || this.context.router.isActive)({pathname: to, query}, index);
-  };
-
-  getClassName = () => {
-    const _classNames = {};
-    const {className, activeClassName} = this.props;
-
-    if (className) {
-      _classNames[className] = true;
-    }
-
-    if (this.isActive()) {
-      _classNames[activeClassName] = true;
-    }
-
-    return classNames(_classNames);
-  };
-
-  render() {
-    const {index, children, to, disabled, ...props} = this.props;
-    const carriedProps = omit(props, 'activeClassName', 'isActive', 'index');
-
-    return (
-      <StyledLi className={this.getClassName()} disabled={disabled}>
-        <Link {...carriedProps} onlyActiveOnIndex={index} to={disabled ? '' : to}>
-          {children}
-        </Link>
-      </StyledLi>
-    );
-  }
+interface ListLinkProps extends Omit<
+  React.DetailedHTMLProps<React.HTMLAttributes<HTMLAnchorElement>, HTMLAnchorElement>,
+  'href' | 'target' | 'as' | 'css' | 'ref'
+> {
+  /**
+   * Link target. We don't want to expose the ToLocationFunction on this component.
+   */
+  to: LocationDescriptor;
+  index?: boolean;
 }
 
-export default ListLink;
+export function ListLink({
+  children,
+  className,
+  to,
+  index: _index,
+  ...props
+}: ListLinkProps) {
+  const location = useLocation();
+  const target = normalizeUrl(to);
 
-const StyledLi = styled('li', {
-  shouldForwardProp: prop => prop !== 'disabled',
-})<{disabled?: boolean}>`
-  ${p =>
-    p.disabled &&
-    `
-   a {
-    color:${p.theme.disabled} !important;
-    pointer-events: none;
-    :hover {
-      color: ${p.theme.disabled}  !important;
-    }
-   }
-`}
-`;
+  const active =
+    // XXX(epurkhiser): This is carry over from the react-router 3 days.
+    // There's probably a better way to detect active
+    location.pathname === (typeof target === 'string' ? target : target.pathname);
+
+  return (
+    <li className={classNames({active}, className)}>
+      <NavLink {...props} to={locationDescriptorToTo(target)}>
+        {children}
+      </NavLink>
+    </li>
+  );
+}

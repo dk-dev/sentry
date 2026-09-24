@@ -1,0 +1,460 @@
+'use strict';
+
+import '@testing-library/jest-dom';
+
+import {webcrypto} from 'node:crypto';
+import {TextDecoder, TextEncoder} from 'node:util';
+
+import {type ReactElement} from 'react';
+import {act, configure as configureRtl} from '@testing-library/react'; // eslint-disable-line no-restricted-imports
+import {MotionGlobalConfig} from 'framer-motion';
+import {enableFetchMocks} from 'jest-fetch-mock';
+import {ConfigFixture} from 'sentry-fixture/config';
+
+import {MockResizeObserver, resetResizeObservers} from 'sentry-test/resizeObserver';
+import {resetMockDate} from 'sentry-test/utils';
+
+// eslint-disable-next-line jest/no-mocks-import
+import type {Client} from 'sentry/__mocks__/api';
+import {closeModal} from 'sentry/actionCreators/modal';
+// eslint-disable-next-line no-restricted-imports
+import {DEFAULT_LOCALE_DATA, setLocale} from 'sentry/locale';
+import {ConfigStore} from 'sentry/stores/configStore';
+import * as performanceForSentry from 'sentry/utils/performanceForSentry';
+
+/**
+ * Set locale to English
+ */
+setLocale(DEFAULT_LOCALE_DATA);
+
+/**
+ * Enable fetch mocks and provide fetch primitives missing from jsdom.
+ */
+enableFetchMocks();
+
+// @ts-expect-error XXX(epurkhiser): Gross hack to fix a bug in jsdom which makes testing of
+// framer-motion SVG components fail
+// See https://github.com/jsdom/jsdom/issues/1330
+SVGElement.prototype.getTotalLength ??= () => 1;
+
+/**
+ * Skip all framer-motion animations in tests so components render immediately
+ * without waiting for animation frames or transitions.
+ */
+MotionGlobalConfig.skipAnimations = true;
+
+/**
+ * React Testing Library configuration to override the default test id attribute
+ *
+ * See: https://testing-library.com/docs/queries/bytestid/#overriding-data-testid
+ */
+configureRtl({testIdAttribute: 'data-test-id'});
+
+/**
+ * Mock (current) date to always be National Pasta Day
+ * 2017-10-17T02:41:20.000Z
+ */
+resetMockDate();
+
+/**
+ * Global testing configuration
+ */
+
+/**
+ * Mocks
+ */
+// jsdom does not lay out elements. Skip Popper's geometry work and the React
+// updates it schedules; overlay interactions still use the real component code.
+// Positioning tests can opt back in with jest.unmock('react-popper').
+jest.mock('react-popper', () => {
+  const update = () => Promise.resolve({});
+  const forceUpdate = () => {};
+  const usePopper: typeof import('react-popper').usePopper = (
+    _reference,
+    _popper,
+    options = {}
+  ) => ({
+    styles: {
+      popper: {position: options.strategy ?? 'absolute', left: 0, top: 0},
+      arrow: {position: 'absolute'},
+    },
+    attributes: {},
+    state: null,
+    update,
+    forceUpdate,
+  });
+  return {...jest.requireActual('react-popper'), usePopper};
+});
+
+jest.mock('lodash/debounce', () =>
+  jest.fn(fn => {
+    fn.cancel = jest.fn();
+    return fn;
+  })
+);
+// Keep callback and value debounces synchronous by default in tests. Suites that
+// assert scheduling behavior can load the real Pacer implementations explicitly.
+jest.mock('@tanstack/react-pacer', () => ({
+  ...jest.requireActual('@tanstack/react-pacer'),
+  useAsyncDebouncedCallback: <TFn>(fn: TFn) => fn,
+  useDebouncedCallback: <TFn>(fn: TFn) => fn,
+  useDebouncedValue: <T>(value: T) => [value] as const,
+}));
+jest.mock('sentry/utils/recreateRoute');
+jest.mock('sentry/api');
+jest
+  .spyOn(performanceForSentry, 'VisuallyCompleteWithData')
+  .mockImplementation(props => props.children as ReactElement);
+
+jest.mock('@sentry-internal/global-search', () => ({
+  SentryGlobalSearch: jest.fn().mockImplementation(() => ({
+    query: jest.fn().mockResolvedValue([]),
+  })),
+}));
+
+jest.mock('@stripe/stripe-js', () => ({
+  loadStripe: jest.fn(() =>
+    Promise.resolve({
+      createToken: jest.fn(() => Promise.resolve({token: {id: 'test-token'}})),
+      confirmCardPayment: jest.fn(() =>
+        Promise.resolve({
+          error: undefined,
+          paymentIntent: {id: 'test-payment'},
+        })
+      ),
+      confirmCardSetup: jest.fn((secretKey: string) => {
+        if (secretKey === 'ERROR') {
+          return Promise.resolve({error: {message: 'card invalid'}});
+        }
+        return Promise.resolve({
+          error: undefined,
+          setupIntent: {payment_method: 'test-pm'},
+        });
+      }),
+      handleCardAction: jest.fn(() =>
+        Promise.resolve({setupIntent: {payment_method: 'test-pm'}})
+      ),
+      elements: jest.fn(() => ({
+        create: jest.fn(() => ({
+          mount: jest.fn(),
+          on: jest.fn(),
+          update: jest.fn(),
+        })),
+      })),
+    })
+  ),
+}));
+jest.mock('@stripe/react-stripe-js', () => {
+  const {useEffect} = jest.requireActual('react');
+  return {
+    Elements: jest.fn(({children}: {children: any}) => children),
+    AddressElement: jest.fn(({onReady}: any) => {
+      // Simulate AddressElement loading by calling onReady after mount
+      useEffect(() => {
+        if (onReady) {
+          // Use setTimeout to allow initial render assertions to run
+          setTimeout(() => onReady(), 0);
+        }
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+      }, []);
+      return null;
+    }),
+    CardElement: jest.fn(() => null),
+    PaymentElement: jest.fn(({onChange, onReady}: any) => {
+      // Simulate a completed Stripe form by calling onChange and onReady after mount
+      useEffect(() => {
+        // Use setTimeout to allow initial render assertions to run
+        setTimeout(() => {
+          if (onReady) {
+            onReady();
+          }
+          if (onChange) {
+            onChange({complete: true});
+          }
+        }, 0);
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+      }, []);
+      return null;
+    }),
+    useStripe: jest.fn(() => ({
+      confirmCardPayment: jest.fn(() =>
+        Promise.resolve({
+          error: undefined,
+          paymentIntent: {id: 'test-payment'},
+        })
+      ),
+      // Used to run a 3D Secure challenge on an intent created with
+      // confirmation_method=manual, which the server then confirms.
+      handleCardAction: jest.fn((clientSecret: string) => {
+        if (clientSecret === 'ERROR') {
+          return Promise.resolve({error: {message: 'authentication failed'}});
+        }
+        // Stripe rejects outright on some failures rather than resolving with
+        // an error, and callers have to survive both.
+        if (clientSecret === 'REJECT') {
+          return Promise.reject(new Error('authentication failed'));
+        }
+        return Promise.resolve({
+          error: undefined,
+          paymentIntent: {id: 'test-payment'},
+        });
+      }),
+      confirmCardSetup: jest.fn((secretKey: string) => {
+        if (secretKey === 'ERROR') {
+          return Promise.resolve({error: {message: 'card invalid'}});
+        }
+        return Promise.resolve({
+          error: undefined,
+          setupIntent: {payment_method: 'test-pm'},
+        });
+      }),
+      confirmSetup: jest.fn((options: any) => {
+        if (options?.clientSecret === 'ERROR') {
+          return Promise.resolve({error: {message: 'card invalid'}});
+        }
+        return Promise.resolve({
+          error: undefined,
+          setupIntent: {payment_method: 'test-pm'},
+        });
+      }),
+      confirmPayment: jest.fn((options: any) => {
+        if (options?.clientSecret === 'ERROR') {
+          return Promise.resolve({error: {message: 'payment failed'}});
+        }
+        return Promise.resolve({
+          error: undefined,
+          paymentIntent: {id: 'test-payment'},
+        });
+      }),
+    })),
+    useElements: jest.fn(() => ({
+      getElement: jest.fn(() => ({})),
+      submit: jest.fn(() => Promise.resolve({error: undefined})),
+    })),
+  };
+});
+jest.mock('getsentry/utils/trackMarketingEvent');
+jest.mock('getsentry/utils/trackAmplitudeEvent');
+jest.mock('getsentry/utils/trackReloadEvent');
+jest.mock('getsentry/utils/trackMetric');
+
+jest.mock('sentry/utils/testableWindowLocation', () => ({
+  /**
+   * Prefer using {@link import('sentry-test/utils').setWindowLocation} to change test location
+   * instead of mocking properties on the testableLocation object.
+   * Use this mock for checking if window.location.assign was called.
+   */
+  testableWindowLocation: {
+    assign: jest.fn(),
+    replace: jest.fn(),
+    reload: jest.fn(),
+  },
+}));
+
+// Close any open modals before each test
+beforeEach(closeModal);
+afterEach(() => {
+  const {toast} =
+    jest.requireActual<typeof import('@sentry/scraps/toast')>('@sentry/scraps/toast');
+  act(() => void toast.dismiss());
+  resetResizeObservers();
+});
+
+jest.mock('echarts-for-react/lib/core', function echartsMockFactory() {
+  // We need to do this because `jest.mock` gets hoisted before imports and `React` is not
+  // guaranteed to be in scope
+  const ReactActual = require('react');
+
+  // We need a class component here because `BaseChart` passes `ref` which will
+  // error if we return a stateless/functional component
+  return class extends ReactActual.Component {
+    render() {
+      return null;
+    }
+  };
+});
+
+jest.mock('@sentry/react', function sentryReact() {
+  const SentryReact = jest.requireActual('@sentry/react');
+  return {
+    ...SentryReact,
+    init: jest.fn(),
+    setTag: jest.fn(),
+    setTags: jest.fn(),
+    getReplay: jest.fn(),
+    setExtra: jest.fn(),
+    setExtras: jest.fn(),
+    captureBreadcrumb: jest.fn(),
+    addBreadcrumb: jest.fn(),
+    captureMessage: jest.fn(),
+    captureException: jest.fn(),
+    showReportDialog: jest.fn(),
+    getDefaultIntegrations: jest.spyOn(SentryReact, 'getDefaultIntegrations'),
+    startSpan: jest.spyOn(SentryReact, 'startSpan'),
+    finishSpan: jest.fn(),
+    lastEventId: jest.fn(),
+    getClient: jest.spyOn(SentryReact, 'getClient'),
+    getCurrentScope: jest.spyOn(SentryReact, 'getCurrentScope'),
+    withScope: jest.spyOn(SentryReact, 'withScope'),
+    withProfiler: SentryReact.withProfiler,
+    metrics: {
+      count: jest.fn(),
+      increment: jest.fn(),
+      gauge: jest.fn(),
+      set: jest.fn(),
+      distribution: jest.fn(),
+    },
+    reactRouterV6BrowserTracingIntegration: jest.fn().mockReturnValue({}),
+    browserTracingIntegration: jest.fn().mockReturnValue({}),
+    browserProfilingIntegration: jest.fn().mockReturnValue({}),
+    addEventProcessor: jest.fn(),
+    BrowserClient: jest.fn().mockReturnValue({
+      captureEvent: jest.fn(),
+    }),
+    startInactiveSpan: () => ({
+      end: jest.fn(),
+      setStatus: jest.fn(),
+      startChild: jest.fn().mockReturnValue({
+        end: jest.fn(),
+      }),
+      spanContext: jest.fn().mockReturnValue({
+        spanId: 'test-span-id',
+        traceId: 'test-trace-id',
+      }),
+    }),
+    logger: {
+      warn: jest.fn(),
+      error: jest.fn(),
+      fatal: jest.fn(),
+      info: jest.fn(),
+      debug: jest.fn(),
+      trace: jest.fn(),
+      fmt: jest.fn(),
+    },
+  };
+});
+
+ConfigStore.loadInitialData(ConfigFixture());
+
+// Default browser timezone to UTC
+jest.spyOn(Intl.DateTimeFormat.prototype, 'resolvedOptions').mockImplementation(() => ({
+  locale: 'en-US',
+  calendar: 'gregory',
+  numberingSystem: 'latn',
+  timeZone: 'UTC',
+  timeZoneName: 'short',
+}));
+
+/**
+ * Test Globals
+ */
+declare global {
+  /**
+   * Generates a promise that resolves on the next macro-task
+   */
+  var tick: () => Promise<void>;
+  /**
+   * Used to mock API requests
+   */
+  var MockApiClient: typeof Client;
+}
+
+// needed by cbor-web for webauthn
+window.TextEncoder = TextEncoder;
+window.TextDecoder = TextDecoder as typeof window.TextDecoder;
+
+// This is so we can use async/await in tests instead of wrapping with `setTimeout`.
+window.tick = () => new Promise(resolve => setTimeout(resolve));
+
+window.MockApiClient = jest.requireMock('sentry/api').Client;
+
+window.scrollTo = jest.fn();
+
+window.ra = {event: jest.fn()};
+
+// The full jsdom CSS cascade is too slow, especially for dropdown positioning.
+// Tests only need inline styles here, so reuse the element's declaration directly.
+// See https://github.com/jsdom/jsdom/issues/3234.
+Object.defineProperty(window, 'getComputedStyle', {
+  value: (element: HTMLElement) => element.style,
+  configurable: true,
+  writable: true,
+});
+
+Object.defineProperty(window, 'matchMedia', {
+  writable: true,
+  value: (query: string) => ({
+    matches: false,
+    media: query,
+    onchange: null,
+    addListener: jest.fn(), // Deprecated
+    removeListener: jest.fn(), // Deprecated
+    addEventListener: jest.fn(),
+    removeEventListener: jest.fn(),
+    dispatchEvent: jest.fn(),
+  }),
+});
+
+window.IntersectionObserver = class IntersectionObserver {
+  root = null;
+  rootMargin = '';
+  scrollMargin = '';
+  thresholds = [];
+  takeRecords = jest.fn();
+
+  observe() {}
+  unobserve() {}
+  disconnect() {}
+};
+
+HTMLElement.prototype.setPointerCapture ??= jest.fn();
+
+window.ResizeObserver = MockResizeObserver;
+
+// Mock the crypto.subtle API for Gravatar
+Object.defineProperty(global.self, 'crypto', {
+  value: {
+    subtle: webcrypto.subtle,
+  },
+});
+
+if (typeof globalThis.structuredClone !== 'function') {
+  const nodeUtil = require('node:util') as {
+    structuredClone?: typeof globalThis.structuredClone;
+  };
+  globalThis.structuredClone =
+    nodeUtil.structuredClone ?? ((value: unknown) => JSON.parse(JSON.stringify(value)));
+}
+
+if (globalThis.setImmediate === undefined) {
+  // @ts-expect-error setImmediate is not defined in jsdom, but we can use setTimeout as a polyfill
+  globalThis.setImmediate = setTimeout;
+  // @ts-expect-error clearImmediate is not defined in jsdom, but we can use clearTimeout as a polyfill
+  globalThis.clearImmediate = clearTimeout;
+}
+
+/**
+ * it.isKnownFlake — wraps a known-flaky test for stress-testing in CI.
+ *
+ * When RERUN_KNOWN_FLAKY_TESTS is "true" (set by the "Frontend: Rerun Flaky
+ * Tests" PR label), the test runs 50x inside a describe block. Otherwise it
+ * runs once, behaving identically to a normal `it()`.
+ */
+const FLAKY_RERUN_COUNT = 50;
+
+it.isKnownFlake = function isKnownFlake(
+  name: string,
+  fn: jest.ProvidesCallback,
+  timeout?: number
+) {
+  if (process.env.RERUN_KNOWN_FLAKY_TESTS !== 'true') {
+    it(name, fn, timeout);
+    return;
+  }
+
+  describe(`[flaky rerun x${FLAKY_RERUN_COUNT}] ${name}`, () => {
+    for (let i = 1; i <= FLAKY_RERUN_COUNT; i++) {
+      it(`run ${i}/${FLAKY_RERUN_COUNT}`, fn, timeout);
+    }
+  });
+};

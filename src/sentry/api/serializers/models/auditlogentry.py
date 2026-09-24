@@ -1,5 +1,13 @@
+import re
+from copy import copy
+
+from django.db.models import prefetch_related_objects
+from sentry_sdk import capture_exception
+
+from sentry import audit_log
 from sentry.api.serializers import Serializer, register, serialize
-from sentry.models import AuditLogEntry
+from sentry.audit_log.metadata import AGENT_DELEGATION_DATA_KEY, SEER_AGENT_DELEGATION
+from sentry.models.auditlogentry import AuditLogEntry
 
 
 def fix(data):
@@ -10,13 +18,31 @@ def fix(data):
         if hasattr(data["teams"][0], "id"):
             data["teams"] = [t.id for t in data["teams"]]
 
-    return data
+    # Only return fields in the `data` field that are actually used by the frontend
+    # Do not add fields to this list that contain sensitive information
+    required_fields = {"id", "slug", "old_slug", "new_slug", "name"}
+    return {k: v for k, v in data.items() if k in required_fields}
+
+
+def override_actor_id(user):
+    # overrides the usage of actor_id only to make SCIM token
+    # name more readable (for now)
+    scim_prefix = "scim-internal-integration-"
+    scim_regex = re.compile(
+        scim_prefix
+        + r"[0-9a-fA-F]{6}\-[0-9a-fA-F]{8}\-[0-9a-fA-F]{4}\-[0-9a-fA-F]{4}\-[0-9a-fA-F]{4}\-[0-9a-fA-F]{7}"
+    )
+    scim_match = re.match(scim_regex, user.get_display_name())
+    return scim_match
 
 
 @register(AuditLogEntry)
 class AuditLogEntrySerializer(Serializer):
-    def get_attrs(self, item_list, user):
+    def get_attrs(self, item_list, user, **kwargs):
         # TODO(dcramer); assert on relations
+        prefetch_related_objects(item_list, "actor")
+        prefetch_related_objects(item_list, "target_user")
+
         users = {
             d["id"]: d
             for d in serialize(
@@ -28,23 +54,44 @@ class AuditLogEntrySerializer(Serializer):
 
         return {
             item: {
-                "actor": users[str(item.actor_id)]
-                if item.actor_id
-                else {"name": item.get_actor_name()},
+                "actor": (
+                    users[str(item.actor_id)]
+                    if item.actor_id and not override_actor_id(item.actor)
+                    else {"name": item.get_actor_name()}
+                ),
                 "targetUser": users.get(str(item.target_user_id)) or item.target_user_id,
             }
             for item in item_list
         }
 
-    def serialize(self, obj, attrs, user):
+    def serialize(self, obj, attrs, user, **kwargs):
+        audit_log_event = audit_log.get(obj.event)
+        agent_delegation = obj.data.get(AGENT_DELEGATION_DATA_KEY)
+        render_obj = obj
+        if agent_delegation is not None:
+            render_obj = copy(obj)
+            render_obj.data = {
+                key: value for key, value in obj.data.items() if key != AGENT_DELEGATION_DATA_KEY
+            }
+
+        try:
+            note = audit_log_event.render(render_obj)
+        except KeyError as exc:
+            note = ""
+            capture_exception(exc)
+
+        if agent_delegation == SEER_AGENT_DELEGATION:
+            note = f"{note} (via Seer agent)" if note else "Performed via Seer agent"
+
         return {
             "id": str(obj.id),
             "actor": attrs["actor"],
-            "event": obj.get_event_display(),
+            "event": audit_log_event.api_name,
             "ipAddress": obj.ip_address,
-            "note": obj.get_note(),
+            "note": note,
             "targetObject": obj.target_object,
             "targetUser": attrs["targetUser"],
             "data": fix(obj.data),
+            "agentDelegation": agent_delegation,
             "dateCreated": obj.datetime,
         }

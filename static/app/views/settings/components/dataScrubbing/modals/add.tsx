@@ -1,32 +1,24 @@
-import React from 'react';
+import {t} from 'sentry/locale';
+import type {Rule} from 'sentry/views/settings/components/dataScrubbing/types';
 
-import {t} from 'app/locale';
+import {DataScrubFormModal, type DataScrubFormModalProps} from './dataScrubFormModal';
 
-import {ProjectId, Rule} from '../types';
+type Props = Omit<DataScrubFormModalProps, 'title' | 'onGetNewRules'> & {
+  savedRules: Rule[];
+};
 
-import ModalManager from './modalManager';
-
-type ModalManagerProps<T extends ProjectId> = ModalManager<T>['props'];
-type Props<T extends ProjectId> = Omit<
-  ModalManagerProps<T>,
-  'title' | 'initialValues' | 'onGetNewRules'
->;
-
-const Add = <T extends ProjectId = undefined>({savedRules, ...props}: Props<T>) => {
+export function Add({savedRules, ...props}: Props) {
   const handleGetNewRules = (
-    values: Parameters<ModalManagerProps<T>['onGetNewRules']>[0]
+    values: Parameters<DataScrubFormModalProps['onGetNewRules']>[0]
   ) => {
-    return [...savedRules, {...values, id: savedRules.length}] as Array<Rule>;
+    return [...savedRules, {...values, id: savedRules.length}] as Rule[];
   };
 
   return (
-    <ModalManager
+    <DataScrubFormModal
       {...props}
-      savedRules={savedRules}
       title={t('Add an advanced data scrubbing rule')}
       onGetNewRules={handleGetNewRules}
     />
   );
-};
-
-export default Add;
+}

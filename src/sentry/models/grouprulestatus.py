@@ -1,11 +1,13 @@
 from django.db import models
 from django.utils import timezone
 
-from sentry.db.models import FlexibleForeignKey, Model, sane_repr
+from sentry.backup.scopes import RelocationScope
+from sentry.db.models import FlexibleForeignKey, Model, cell_silo_model, sane_repr
 
 
+@cell_silo_model
 class GroupRuleStatus(Model):
-    __core__ = False
+    __relocation_scope__ = RelocationScope.Excluded
 
     ACTIVE = 0
     INACTIVE = 1

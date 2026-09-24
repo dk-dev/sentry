@@ -1,18 +1,8 @@
-import React from 'react';
+import {ExternalLink} from '@sentry/scraps/link';
 
-type AnchorProps = React.HTMLProps<HTMLAnchorElement>;
-
-type Props = {
-  className?: string;
-  openInNewTab?: boolean;
-} & Omit<AnchorProps, 'target'>;
-
-const ExternalLink = React.forwardRef<HTMLAnchorElement, Props>(function ExternalLink(
-  {openInNewTab = true, ...props},
-  ref
-) {
-  const anchorProps = openInNewTab ? {target: '_blank', rel: 'noreferrer noopener'} : {};
-  return <a ref={ref} {...anchorProps} {...props} />;
-});
-
-export default ExternalLink;
+export {
+  /**
+   * @deprecated Use `ExternalLink` from `@sentry/scraps/link` instead.
+   */
+  ExternalLink,
+};

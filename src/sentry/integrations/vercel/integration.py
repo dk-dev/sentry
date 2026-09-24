@@ -1,33 +1,46 @@
-import logging
-from urllib.parse import urlencode
-from uuid import uuid4
+from __future__ import annotations
 
-from django.utils.translation import ugettext_lazy as _
+import logging
+from collections.abc import Mapping
+from typing import Any, Self, TypedDict, cast
+from urllib.parse import urlencode
+
+import sentry_sdk
+from django.http.request import HttpRequest
+from django.utils.translation import gettext_lazy as _
+from rest_framework.fields import CharField
 from rest_framework.serializers import ValidationError
 
-from sentry import options
+from sentry import features, options
+from sentry.api.serializers.rest_framework.base import CamelSnakeSerializer
 from sentry.constants import ObjectStatus
-from sentry.identity.pipeline import IdentityProviderPipeline
-from sentry.integrations import (
+from sentry.identity.oauth2 import OAuth2ApiStep
+from sentry.identity.vercel.provider import VercelIdentityProvider
+from sentry.integrations.base import (
     FeatureDescription,
+    IntegrationData,
     IntegrationFeatures,
     IntegrationInstallation,
     IntegrationMetadata,
     IntegrationProvider,
 )
-from sentry.mediators.sentry_apps import InternalCreator
-from sentry.models import (
-    Integration,
-    Organization,
-    Project,
-    ProjectKey,
-    SentryAppInstallation,
+from sentry.integrations.models.integration import Integration
+from sentry.integrations.pipeline import IntegrationPipeline
+from sentry.integrations.services.integration import integration_service
+from sentry.organizations.services.organization.model import RpcOrganization
+from sentry.pipeline.base import Pipeline
+from sentry.pipeline.views.base import ApiPipelineSteps
+from sentry.projects.services.project.model import RpcProject
+from sentry.projects.services.project_key import project_key_service
+from sentry.projects.services.project_key.model import RpcProjectKey
+from sentry.sentry_apps.logic import SentryAppCreator
+from sentry.sentry_apps.models.sentry_app_installation import SentryAppInstallation
+from sentry.sentry_apps.models.sentry_app_installation_for_provider import (
     SentryAppInstallationForProvider,
-    User,
 )
-from sentry.pipeline import NestedPipelineView
+from sentry.sentry_apps.models.sentry_app_installation_token import SentryAppInstallationToken
 from sentry.shared_integrations.exceptions import ApiError, IntegrationError
-from sentry.utils.compat import map
+from sentry.users.models.user import User
 from sentry.utils.http import absolute_uri
 
 from .client import VercelClient
@@ -55,28 +68,33 @@ INSTALL_NOTICE_TEXT = _(
 )
 
 
-external_install = {
-    "url": "https://vercel.com/integrations/%s/add" % options.get("vercel.integration-slug"),
-    "buttonText": _("Vercel Marketplace"),
-    "noticeText": _(INSTALL_NOTICE_TEXT),
-}
-
-
 configure_integration = {"title": _("Connect Your Projects")}
-create_project_instruction = _("Don't have a project yet? Click [here]({}) to create one.")
 install_source_code_integration = _(
     "Install a [source code integration]({}) and configure your repositories."
 )
 
-metadata = IntegrationMetadata(
+
+class VercelIntegrationMetadata(IntegrationMetadata):
+    def asdict(self):
+        metadata = super().asdict()
+        # We have to calculate this here since fetching options at the module level causes us to skip the cache.
+        metadata["aspects"]["externalInstall"] = {
+            "url": f"https://vercel.com/integrations/{options.get('vercel.integration-slug')}/add",
+            "buttonText": _("Vercel Marketplace"),
+            "noticeText": INSTALL_NOTICE_TEXT,
+        }
+
+        return metadata
+
+
+metadata = VercelIntegrationMetadata(
     description=DESCRIPTION.strip(),
     features=FEATURES,
     author="The Sentry Team",
     noun=_("Installation"),
-    issue_url="https://github.com/getsentry/sentry/issues/new?assignees=&labels=Component:%20Integrations&template=bug_report.md&title=Vercel%20Integration%20Problem",
+    issue_url="https://github.com/getsentry/sentry/issues/new?assignees=&labels=Component:%20Integrations&template=bug.yml&title=Vercel%20Integration%20Problem",
     source_url="https://github.com/getsentry/sentry/tree/master/src/sentry/integrations/vercel",
     aspects={
-        "externalInstall": external_install,
         "configure_integration": configure_integration,
     },
 )
@@ -88,22 +106,124 @@ internal_integration_overview = (
 )
 
 
+class VercelEnvVarDefinition(TypedDict):
+    type: str
+    value: str | None
+    target: list[str]
+
+
+class VercelEnvVarMapBuilder:
+    """
+    Builder for creating Vercel environment variable maps.
+
+    env_var_map = (
+        VercelEnvVarMapBuilder()
+        .with_organization(organization)
+        .with_project(project)
+        .with_project_key(project_key)
+        .with_auth_token(auth_token)
+        .with_framework(framework)
+        .build()
+    )
+    """
+
+    def __init__(self) -> None:
+        self._organization: RpcOrganization | None = None
+        self._project: RpcProject | None = None
+        self._project_key: RpcProjectKey | None = None
+        self._auth_token: str | None = None
+        self._framework: str | None = None
+
+    def with_organization(self, organization: RpcOrganization) -> Self:
+        self._organization = organization
+        return self
+
+    def with_project(self, project: RpcProject) -> Self:
+        self._project = project
+        return self
+
+    def with_project_key(self, project_key: RpcProjectKey) -> Self:
+        self._project_key = project_key
+        return self
+
+    def with_auth_token(self, auth_token: str | None) -> Self:
+        self._auth_token = auth_token
+        return self
+
+    def with_framework(self, framework: str | None) -> Self:
+        self._framework = framework
+        return self
+
+    def build(self) -> dict[str, VercelEnvVarDefinition]:
+        if self._organization is None:
+            raise ValueError("organization is required")
+        if self._project is None:
+            raise ValueError("project is required")
+        if self._project_key is None:
+            raise ValueError("project_key is required")
+
+        is_next_js = self._framework == "nextjs"
+        dsn_env_name = "NEXT_PUBLIC_SENTRY_DSN" if is_next_js else "SENTRY_DSN"
+
+        return {
+            "SENTRY_ORG": {
+                "type": "encrypted",
+                "value": self._organization.slug,
+                "target": ["production", "preview"],
+            },
+            "SENTRY_PROJECT": {
+                "type": "encrypted",
+                "value": self._project.slug,
+                "target": ["production", "preview"],
+            },
+            dsn_env_name: {
+                "type": "encrypted",
+                "value": self._project_key.dsn_public,
+                "target": [
+                    "production",
+                    "preview",
+                    "development",  # The DSN is the only value that makes sense to have available locally via Vercel CLI's `vercel dev` command
+                ],
+            },
+            "SENTRY_AUTH_TOKEN": {
+                "type": "encrypted",
+                "value": self._auth_token,
+                "target": ["production", "preview"],
+            },
+            "VERCEL_GIT_COMMIT_SHA": {
+                "type": "system",
+                "value": "VERCEL_GIT_COMMIT_SHA",
+                "target": ["production", "preview"],
+            },
+            "SENTRY_VERCEL_LOG_DRAIN_URL": {
+                "type": "encrypted",
+                "value": f"{self._project_key.integration_endpoint}vercel/logs/",
+                "target": ["production", "preview"],
+            },
+            "SENTRY_OTLP_TRACES_URL": {
+                "type": "encrypted",
+                "value": f"{self._project_key.integration_endpoint}otlp/v1/traces",
+                "target": ["production", "preview"],
+            },
+            "SENTRY_PUBLIC_KEY": {
+                "type": "encrypted",
+                "value": self._project_key.public_key,
+                "target": ["production", "preview"],
+            },
+        }
+
+
 class VercelIntegration(IntegrationInstallation):
     @property
     def metadata(self):
         return self.model.metadata
 
     def get_dynamic_display_information(self):
-        organization = Organization.objects.get_from_cache(id=self.organization_id)
-        source_code_link = absolute_uri(
-            "/settings/%s/integrations/?%s"
-            % (organization.slug, urlencode({"category": "source code management"}))
-        )
-        add_project_link = absolute_uri("/organizations/%s/projects/new/" % (organization.slug))
+        qs = urlencode({"category": "source code management"})
+        source_code_link = absolute_uri(f"/settings/{self.organization.slug}/integrations/?{qs}")
         return {
             "configure_integration": {
                 "instructions": [
-                    create_project_instruction.format(add_project_link),
                     install_source_code_integration.format(source_code_link),
                 ]
             }
@@ -116,13 +236,20 @@ class VercelIntegration(IntegrationInstallation):
 
         return VercelClient(access_token)
 
-    # note this could return a different integration if the user has multiple
-    # installations with the same organization
     def get_configuration_id(self):
+        # XXX(meredith): The "configurations" in the metadata is no longer
+        # needed since Vercel restricted installation on their end to be
+        # once per user/team. Eventually we should be able to just use
+        # `self.metadata["installation_id"]`
+        if not self.metadata.get("configurations"):
+            return self.metadata["installation_id"]
+
+        # note this could return a different integration if the user has multiple
+        # installations with the same organization
         for configuration_id, data in self.metadata["configurations"].items():
             if data["organization_id"] == self.organization_id:
                 return configuration_id
-        logger.error(
+        logger.warning(
             "could not find matching org",
             extra={"organization_id": self.organization_id, "integration_id": self.model.id},
         )
@@ -141,23 +268,17 @@ class VercelIntegration(IntegrationInstallation):
         vercel_client = self.get_client()
         # TODO: add try/catch if we get API failure
         slug = self.get_slug()
-        base_url = "https://vercel.com/%s" % slug
+        base_url = f"https://vercel.com/{slug}"
         vercel_projects = [
             {"value": p["id"], "label": p["name"], "url": "{}/{}".format(base_url, p["name"])}
             for p in vercel_client.get_projects()
         ]
 
-        proj_fields = ["id", "platform", "name", "slug"]
-        sentry_projects = map(
-            lambda proj: {key: proj[key] for key in proj_fields},
-            (
-                Project.objects.filter(
-                    organization_id=self.organization_id, status=ObjectStatus.VISIBLE
-                )
-                .order_by("slug")
-                .values(*proj_fields)
-            ),
-        )
+        sentry_projects = [
+            {"id": proj.id, "platform": proj.platform, "name": proj.name, "slug": proj.slug}
+            for proj in sorted(self.organization.projects, key=(lambda proj: proj.slug))
+            if proj.status == ObjectStatus.ACTIVE
+        ]
 
         fields = [
             {
@@ -184,82 +305,137 @@ class VercelIntegration(IntegrationInstallation):
     def update_organization_config(self, data):
         # data = {"project_mappings": [[sentry_project_id, vercel_project_id]]}
 
-        vercel_client = self.get_client()
-        config = self.org_integration.config
+        sentry_project_id: int | None = None
+        vercel_project_id: str | None = None
         try:
-            new_mappings = data["project_mappings"]
-        except KeyError:
-            raise ValidationError("Failed to update configuration.")
+            vercel_client = self.get_client()
+            config = self.org_integration.config
+            try:
+                new_mappings = data["project_mappings"]
+            except KeyError:
+                raise ValidationError("Failed to update configuration.")
 
-        old_mappings = config.get("project_mappings") or []
+            old_mappings = config.get("project_mappings") or []
 
-        for mapping in new_mappings:
-            # skip any mappings that already exist
-            if mapping in old_mappings:
-                continue
-            [sentry_project_id, vercel_project_id] = mapping
-            sentry_project = Project.objects.get(id=sentry_project_id)
-            enabled_dsn = ProjectKey.get_default(project=sentry_project)
-            if not enabled_dsn:
-                raise ValidationError(
-                    {"project_mappings": ["You must have an enabled DSN to continue!"]}
+            sentry_projects = {proj.id: proj for proj in self.organization.projects}
+
+            for mapping in new_mappings:
+                # skip any mappings that already exist
+                if mapping in old_mappings:
+                    continue
+
+                [sentry_project_id, vercel_project_id] = mapping
+                sentry_project = sentry_projects[sentry_project_id]
+
+                project_key = project_key_service.get_default_project_key(
+                    organization_id=self.organization_id, project_id=sentry_project_id
                 )
-            vercel_project = vercel_client.get_project(vercel_project_id)
-            source_code_provider = vercel_project.get("link", {}).get("type")
+                if not project_key:
+                    raise ValidationError(
+                        {"project_mappings": ["You must have an enabled DSN to continue!"]}
+                    )
 
-            if not source_code_provider:
-                raise ValidationError(
-                    {
-                        "project_mappings": [
-                            "You must connect your Vercel project to a Git repository to continue!"
-                        ]
-                    }
+                vercel_project = vercel_client.get_project(vercel_project_id)
+                sentry_auth_token = SentryAppInstallationToken.objects.get_token(
+                    sentry_project.organization_id,
+                    "vercel",
                 )
-            sentry_project_dsn = enabled_dsn.get_dsn(public=True)
-            uuid = uuid4().hex
 
-            sentry_app_installation = SentryAppInstallationForProvider.objects.get(
-                organization=sentry_project.organization.id, provider="vercel"
+                env_var_map = (
+                    VercelEnvVarMapBuilder()
+                    .with_organization(self.organization)
+                    .with_project(sentry_project)
+                    .with_project_key(project_key)
+                    .with_auth_token(sentry_auth_token)
+                    .with_framework(vercel_project.get("framework"))
+                    .build()
+                )
+
+                for env_var, details in env_var_map.items():
+                    # We are logging a message because we potentially have a weird bug where auth tokens disappear from vercel
+                    if env_var == "SENTRY_AUTH_TOKEN" and details["value"] is None:
+                        sentry_sdk.capture_message(
+                            "Setting SENTRY_AUTH_TOKEN env var with None value in Vercel integration"
+                        )
+
+                    self.create_env_var(
+                        vercel_client,
+                        vercel_project_id,
+                        env_var,
+                        details["value"],
+                        details["type"],
+                        details["target"],
+                    )
+            config.update(data)
+            org_integration = integration_service.update_organization_integration(
+                org_integration_id=self.org_integration.id,
+                config=config,
             )
-            sentry_auth_token = sentry_app_installation.get_token(
-                self.organization_id, provider="vercel"
+            if org_integration is not None:
+                self.org_integration = org_integration
+        except Exception as e:
+            logger.exception(
+                "vercel.link_sentry_project.failed",
+                extra={
+                    "organization_id": self.organization_id,
+                    "integration_id": self.model.id,
+                    "sentry_project_id": sentry_project_id,
+                    "vercel_project_id": vercel_project_id,
+                    "error_type": type(e).__name__,
+                },
             )
+            raise
 
-            is_next_js = vercel_project.get("framework") == "nextjs"
-            dsn_env_name = "NEXT_PUBLIC_SENTRY_DSN" if is_next_js else "SENTRY_DSN"
-
-            env_var_map = {
-                "SENTRY_ORG": {"type": "plain", "value": sentry_project.organization.slug},
-                "SENTRY_PROJECT": {"type": "plain", "value": sentry_project.slug},
-                dsn_env_name: {"type": "plain", "value": sentry_project_dsn},
-                "SENTRY_AUTH_TOKEN": {"type": "secret", "value": sentry_auth_token},
-                "VERCEL_GIT_COMMIT_SHA": {"type": "system", "value": "VERCEL_GIT_COMMIT_SHA"},
-            }
-
-            for env_var, details in env_var_map.items():
-                if details["type"] == "secret":
-                    secret_name = env_var + "_%s" % uuid
-                    secret_value = vercel_client.create_secret(secret_name, details["value"])
-                    details["value"] = secret_value
-                self.create_env_var(
-                    vercel_client, vercel_project_id, env_var, details["value"], details["type"]
-                )
-
-        config.update(data)
-        self.org_integration.update(config=config)
-
-    def create_env_var(self, client, vercel_project_id, key, value, type):
+    def create_env_var(self, client, vercel_project_id, key, value, type, targets):
         data = {
             "key": key,
             "value": value,
-            "target": ["production"],
+            "target": targets,
             "type": type,
         }
+
+        use_upsert = features.has(
+            "organizations:integrations-vercel-upsert-env-var",
+            self.organization,
+        )
+
+        if use_upsert:
+            # Upsert one target at a time to avoid ENV_CONFLICT errors when the
+            # existing variable's target list doesn't match ours exactly.
+            for target in targets:
+                target_data = {
+                    "key": key,
+                    "value": value,
+                    "target": [target],
+                    "type": type,
+                }
+                try:
+                    client.create_env_variable(vercel_project_id, target_data, upsert=True)
+                except ApiError as e:
+                    error_message = (
+                        (e.json or {})
+                        .get("error", {})
+                        .get(
+                            "message",
+                            f"Could not create or update environment variable {key}.",
+                        )
+                    )
+                    raise ValidationError({"project_mappings": [error_message]})
+            return
+
         try:
             return client.create_env_variable(vercel_project_id, data)
         except ApiError as e:
             if e.json and e.json.get("error", {}).get("code") == "ENV_ALREADY_EXISTS":
-                return self.update_env_variable(client, vercel_project_id, data)
+                try:
+                    return self.update_env_variable(client, vercel_project_id, data)
+                except ApiError as e:
+                    error_message = (
+                        e.json.get("error", {}).get("message")
+                        if e.json
+                        else f"Could not update environment variable {key}."
+                    )
+                    raise ValidationError({"project_mappings": [error_message]})
             raise
 
     def update_env_variable(self, client, vercel_project_id, data):
@@ -276,46 +452,85 @@ class VercelIntegration(IntegrationInstallation):
 
     def uninstall(self):
         client = self.get_client()
-        client.uninstall(self.get_configuration_id())
+        try:
+            client.uninstall(self.get_configuration_id())
+        except ApiError as error:
+            if error.code == 403:
+                pass
+            else:
+                raise
+
+
+class VercelInitialDataSerializer(CamelSnakeSerializer):
+    """Initial pipeline data for marketplace-originated Vercel installs.
+
+    Vercel performs the OAuth grant on its side and redirects back to Sentry
+    with an authorization `code`. The frontend forwards it here so the pipeline
+    can exchange it for an access token without a second authorize round-trip.
+    """
+
+    code = CharField(required=True)
+
+
+class VercelAdvanceSerializer(CamelSnakeSerializer):
+    state = CharField(required=True)
+
+
+class VercelOAuthApiStep(OAuth2ApiStep):
+    """API-mode install step for Vercel.
+
+    Vercel installs are always initiated from the Vercel marketplace, which
+    performs the OAuth grant and forwards the authorization `code` as initialData
+    (bound to pipeline state). There is no authorize popup: the step signals the
+    frontend to auto-advance and reads the code back out of pipeline state to
+    exchange it, rather than opening an authorize URL and reading it from the
+    callback POST.
+    """
+
+    def get_step_data(self, pipeline: Pipeline[Any, Any], request: HttpRequest) -> dict[str, str]:
+        return {"state": pipeline.signature}
+
+    def get_serializer_cls(self) -> type:
+        return VercelAdvanceSerializer
+
+    def extract_code(self, validated_data: dict[str, str], pipeline: Pipeline[Any, Any]) -> str:
+        return cast(str, pipeline.fetch_state("code"))
 
 
 class VercelIntegrationProvider(IntegrationProvider):
     key = "vercel"
     name = "Vercel"
     can_add = False
+    can_add_externally = True
     can_disable = False
     metadata = metadata
     integration_cls = VercelIntegration
     features = frozenset([IntegrationFeatures.DEPLOYMENT])
-    oauth_redirect_url = "/extensions/vercel/configure/"
+    # feature flag handler is in getsentry
+    requires_feature_flag = True
 
-    def get_pipeline_views(self):
-        identity_pipeline_config = {"redirect_url": absolute_uri(self.oauth_redirect_url)}
+    def get_pipeline_api_steps(self) -> ApiPipelineSteps[IntegrationPipeline]:
+        provider = VercelIdentityProvider()
+        return [
+            VercelOAuthApiStep(
+                # No authorize popup: the marketplace already granted the code.
+                authorize_url="",
+                client_id=str(provider.get_oauth_client_id()),
+                client_secret=provider.get_oauth_client_secret(),
+                access_token_url=provider.get_oauth_access_token_url(),
+                scope="",
+                # The code is issued against the marketplace redirect URI, so the
+                # token exchange must send the same value back to Vercel.
+                redirect_url="/extensions/vercel/configure/",
+                bind_key="oauth_data",
+            ),
+        ]
 
-        identity_pipeline_view = NestedPipelineView(
-            bind_key="identity",
-            provider_key=self.key,
-            pipeline_cls=IdentityProviderPipeline,
-            config=identity_pipeline_config,
-        )
+    def get_initial_data_serializer_cls(self) -> type[VercelInitialDataSerializer]:
+        return VercelInitialDataSerializer
 
-        return [identity_pipeline_view]
-
-    def get_configuration_metadata(self, external_id):
-        # If a vercel team or user was already installed on another sentry org
-        # we want to make sure we don't overwrite the existing configurations. We
-        # keep all the configurations so that if one of them is deleted from vercel's
-        # side, the other sentry org will still have a working vercel integration.
-        try:
-            integration = Integration.objects.get(external_id=external_id, provider=self.key)
-        except Integration.DoesNotExist:
-            # first time setting up vercel team/user
-            return {}
-
-        return integration.metadata["configurations"]
-
-    def build_integration(self, state):
-        data = state["identity"]["data"]
+    def build_integration(self, state: Mapping[str, Any]) -> IntegrationData:
+        data = state["oauth_data"]
         access_token = data["access_token"]
         team_id = data.get("team_id")
         client = VercelClient(access_token, team_id)
@@ -330,51 +545,28 @@ class VercelIntegrationProvider(IntegrationProvider):
             installation_type = "user"
             user = client.get_user()
             name = user.get("name") or user["username"]
-        try:
-            webhook = client.create_deploy_webhook()
-        except ApiError as err:
-            logger.info(
-                "vercel.create_webhook.failed",
-                extra={"error": str(err), "external_id": external_id},
-            )
-            try:
-                details = list(err.json["messages"][0].values()).pop()
-            except Exception:
-                details = "Unknown Error"
-            message = f"Could not create deployment webhook in Vercel: {details}"
-            raise IntegrationError(message)
 
-        configurations = self.get_configuration_metadata(external_id)
-
-        integration = {
+        return {
             "name": name,
             "external_id": external_id,
             "metadata": {
                 "access_token": access_token,
                 "installation_id": data["installation_id"],
                 "installation_type": installation_type,
-                "webhook_id": webhook["id"],
-                "configurations": configurations,
             },
             "post_install_data": {"user_id": state["user_id"]},
         }
 
-        return integration
-
-    def post_install(self, integration, organization, extra=None):
-        # add new configuration information to metadata
-        configurations = integration.metadata.get("configurations") or {}
-        configurations[integration.metadata["installation_id"]] = {
-            "access_token": integration.metadata["access_token"],
-            "webhook_id": integration.metadata["webhook_id"],
-            "organization_id": organization.id,
-        }
-        integration.metadata["configurations"] = configurations
-        integration.save()
-
-        # check if we have an installation already
+    def post_install(
+        self,
+        integration: Integration,
+        organization: RpcOrganization,
+        *,
+        extra: dict[str, Any],
+    ) -> None:
+        # check if we have an Vercel internal installation already
         if SentryAppInstallationForProvider.objects.filter(
-            organization=organization, provider="vercel"
+            organization_id=organization.id, provider="vercel"
         ).exists():
             logger.info(
                 "vercel.post_install.installation_exists",
@@ -382,20 +574,23 @@ class VercelIntegrationProvider(IntegrationProvider):
             )
             return
 
-        user = User.objects.get(id=extra.get("user_id"))
-        data = {
-            "name": "Vercel Internal Integration",
-            "author": "Auto-generated by Sentry",
-            "organization": organization,
-            "overview": internal_integration_overview.strip(),
-            "user": user,
-            "scopes": ["project:releases", "project:read", "project:write"],
-        }
+        user_id = extra.get("user_id")
+        if user_id is None:
+            raise ValueError("user_id is required in post_install_data")
+        user = User.objects.get(id=user_id)
         # create the internal integration and link it to the join table
-        sentry_app = InternalCreator.run(**data)
+        sentry_app = SentryAppCreator(
+            name="Vercel Internal Integration",
+            author="Auto-generated by Sentry",
+            organization_id=organization.id,
+            is_internal=True,
+            verify_install=False,
+            overview=internal_integration_overview.strip(),
+            scopes=["org:ci"],
+        ).run(user=user)
         sentry_app_installation = SentryAppInstallation.objects.get(sentry_app=sentry_app)
         SentryAppInstallationForProvider.objects.create(
             sentry_app_installation=sentry_app_installation,
-            organization=organization,
+            organization_id=organization.id,
             provider="vercel",
         )

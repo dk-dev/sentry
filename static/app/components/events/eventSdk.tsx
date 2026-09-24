@@ -1,37 +1,55 @@
-import React from 'react';
+import {KeyValueTableDataList} from 'sentry/components/tables/keyValueTable';
+import {t} from 'sentry/locale';
+import type {Event} from 'sentry/types/event';
+import {isEmptyObject} from 'sentry/utils/object/isEmptyObject';
+import {SectionKey} from 'sentry/views/issueDetails/context';
+import {FoldSection} from 'sentry/views/issueDetails/foldSection';
 
-import EventDataSection from 'app/components/events/eventDataSection';
-import Annotated from 'app/components/events/meta/annotated';
-import {t} from 'app/locale';
-import {Event} from 'app/types/event';
+import {AnnotatedText} from './meta/annotatedText';
 
 type Props = {
-  sdk: NonNullable<Event['sdk']>;
+  meta?: Record<any, any>;
+  sdk?: Event['sdk'];
 };
 
-const EventSdk = ({sdk}: Props) => (
-  <EventDataSection type="sdk" title={t('SDK')}>
-    <table className="table key-value">
-      <tbody>
-        <tr key="name">
-          <td className="key">{t('Name')}</td>
-          <td className="value">
-            <Annotated object={sdk} objectKey="name">
-              {value => <pre className="val-string">{value}</pre>}
-            </Annotated>
-          </td>
-        </tr>
-        <tr key="version">
-          <td className="key">{t('Version')}</td>
-          <td className="value">
-            <Annotated object={sdk} objectKey="version">
-              {value => <pre className="val-string">{value}</pre>}
-            </Annotated>
-          </td>
-        </tr>
-      </tbody>
-    </table>
-  </EventDataSection>
-);
+export function EventSdk({sdk, meta}: Props) {
+  if (!sdk || isEmptyObject(sdk)) {
+    return null;
+  }
 
-export default EventSdk;
+  return (
+    <FoldSection title={t('SDK')} sectionKey={SectionKey.SDK} initialCollapse>
+      <KeyValueTableDataList
+        margin
+        data={[
+          {
+            key: 'name',
+            subject: t('Name'),
+            value: (
+              <pre className="val-string">
+                {meta?.name?.[''] ? (
+                  <AnnotatedText value={sdk.name} meta={meta?.name?.['']} />
+                ) : (
+                  sdk.name
+                )}
+              </pre>
+            ),
+          },
+          {
+            key: 'version',
+            subject: t('Version'),
+            value: (
+              <pre className="val-string">
+                {meta?.version?.[''] ? (
+                  <AnnotatedText value={sdk.version} meta={meta?.version?.['']} />
+                ) : (
+                  sdk.version
+                )}
+              </pre>
+            ),
+          },
+        ]}
+      />
+    </FoldSection>
+  );
+}

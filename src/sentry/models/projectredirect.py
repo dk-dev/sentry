@@ -1,13 +1,17 @@
 from django.db import models
 from django.utils import timezone
 
-from sentry.db.models import FlexibleForeignKey, Model
+from sentry.backup.scopes import RelocationScope
+from sentry.constants import PROJECT_SLUG_MAX_LENGTH
+from sentry.db.models import FlexibleForeignKey, Model, cell_silo_model
+from sentry.db.models.fields.slug import SentrySlugField
 
 
+@cell_silo_model
 class ProjectRedirect(Model):
-    __core__ = True
+    __relocation_scope__ = RelocationScope.Organization
 
-    redirect_slug = models.SlugField(db_index=True)
+    redirect_slug = SentrySlugField(max_length=PROJECT_SLUG_MAX_LENGTH, db_index=True)
     project = FlexibleForeignKey("sentry.Project")
     organization = FlexibleForeignKey("sentry.Organization")
     date_added = models.DateTimeField(default=timezone.now)

@@ -1,105 +1,105 @@
 import re
+from typing import TypedDict
 
-import sentry_sdk
+from drf_spectacular.utils import extend_schema
 from rest_framework.exceptions import ParseError
+from rest_framework.request import Request
 from rest_framework.response import Response
 
 from sentry import search
-from sentry.api.base import EnvironmentMixin
+from sentry.api.api_publish_status import ApiPublishStatus
+from sentry.api.base import cell_silo_endpoint
 from sentry.api.bases import NoProjects, OrganizationEventsEndpointBase
-from sentry.api.event_search import get_function_alias, parse_search_query
+from sentry.api.event_search import parse_search_query
+from sentry.api.helpers.environments import get_environment_func
 from sentry.api.helpers.group_index import build_query_params_from_request
 from sentry.api.serializers import serialize
 from sentry.api.serializers.models.group import GroupSerializer
-from sentry.snuba import discover
+from sentry.api.utils import handle_query_errors
+from sentry.apidocs.utils import inline_sentry_response_serializer
+from sentry.models.organization import Organization
+from sentry.search.eap.types import EAPResponse, SearchResolverConfig
+from sentry.search.events.types import EventsResponse, SnubaParams
+from sentry.snuba.referrer import Referrer
+from sentry.snuba.spans_rpc import Spans
+from sentry.snuba.utils import RPC_DATASETS
+from sentry.utils.tracing import set_span_data, start_span
 
 
+class OrganizationEventsMetaResponse(TypedDict):
+    count: int
+
+
+@cell_silo_endpoint
 class OrganizationEventsMetaEndpoint(OrganizationEventsEndpointBase):
-    def get(self, request, organization):
+    publish_status = {
+        "GET": ApiPublishStatus.PRIVATE,
+    }
+
+    @extend_schema(
+        responses={
+            200: inline_sentry_response_serializer(
+                "OrganizationEventsMetaResponse", OrganizationEventsMetaResponse
+            )
+        },
+    )
+    def get(
+        self, request: Request, organization: Organization
+    ) -> Response[OrganizationEventsMetaResponse]:
         try:
-            params = self.get_snuba_params(request, organization)
+            snuba_params = self.get_snuba_params(request, organization)
         except NoProjects:
             return Response({"count": 0})
 
-        with self.handle_query_errors():
-            result = discover.query(
-                selected_columns=["count()"],
-                params=params,
-                query=request.query_params.get("query"),
-                referrer="api.organization-events-meta",
-            )
+        dataset = self.get_dataset(request, organization)
 
-        return Response({"count": result["data"][0]["count"]})
-
-
-class OrganizationEventBaseline(OrganizationEventsEndpointBase):
-    def get(self, request, organization):
-        """ Find the event id with the closest value to an aggregate for a given query """
-        if not self.has_feature(organization, request):
-            return Response(status=404)
-
-        try:
-            params = self.get_snuba_params(request, organization)
-        except NoProjects:
-            return Response(status=404)
-
-        # Assumption is that users will want the 50th percentile
-        baseline_function = request.GET.get("baselineFunction", "p50()")
-        # If the baseline was calculated already save ourselves a query
-        baseline_value = request.GET.get("baselineValue")
-        baseline_alias = get_function_alias(baseline_function)
-
-        with self.handle_query_errors():
-            if baseline_value is None:
-                result = discover.query(
-                    selected_columns=[baseline_function],
-                    params=params,
-                    query=request.GET.get("query"),
+        with handle_query_errors():
+            if dataset in RPC_DATASETS:
+                result = dataset.run_table_query(
+                    params=snuba_params,
+                    query_string=request.query_params.get("query"),
+                    selected_columns=["count()"],
+                    orderby=None,
+                    offset=0,
                     limit=1,
-                    referrer="api.transaction-baseline.get_value",
+                    referrer=Referrer.API_ORGANIZATION_EVENTS_META,
+                    config=SearchResolverConfig(),
                 )
-                baseline_value = result["data"][0].get(baseline_alias) if "data" in result else None
-                if baseline_value is None:
-                    return Response(status=404)
 
-            delta_column = f"absolute_delta(transaction.duration,{baseline_value})"
+                return Response({"count": result["data"][0]["count()"]})
+            else:
+                result = dataset.query(
+                    selected_columns=["count()"],
+                    snuba_params=snuba_params,
+                    query=request.query_params.get("query"),
+                    referrer=Referrer.API_ORGANIZATION_EVENTS_META.value,
+                    has_metrics=True,
+                    # TODO: @athena - add query_source when all datasets support it
+                    # query_source=(
+                    #     QuerySource.FRONTEND if is_frontend_request(request) else QuerySource.API
+                    # ),
+                    fallback_to_transactions=True,
+                )
 
-            result = discover.query(
-                selected_columns=[
-                    "project",
-                    "timestamp",
-                    "id",
-                    "transaction.duration",
-                    delta_column,
-                ],
-                # Find the most recent transaction that's closest to the baseline value
-                # id is the last item of the orderby for consistent results
-                orderby=[get_function_alias(delta_column), "-timestamp", "id"],
-                params=params,
-                query=request.GET.get("query"),
-                limit=1,
-                referrer="api.transaction-baseline.get_id",
-            )
-            if len(result["data"]) == 0:
-                return Response(status=404)
-
-        baseline_data = result["data"][0]
-        baseline_data[baseline_alias] = baseline_value
-        return Response(baseline_data)
+                return Response({"count": result["data"][0]["count"]})
 
 
 UNESCAPED_QUOTE_RE = re.compile('(?<!\\\\)"')
 
 
-class OrganizationEventsRelatedIssuesEndpoint(OrganizationEventsEndpointBase, EnvironmentMixin):
-    def get(self, request, organization):
+@cell_silo_endpoint
+class OrganizationEventsRelatedIssuesEndpoint(OrganizationEventsEndpointBase):
+    publish_status = {
+        "GET": ApiPublishStatus.PRIVATE,
+    }
+
+    def get(self, request: Request, organization: Organization) -> Response:
         try:
-            # events-meta is still used by events v1 which doesn't require global views
-            params = self.get_snuba_params(request, organization, check_global_views=False)
+            snuba_params = self.get_snuba_params(request, organization)
         except NoProjects:
             return Response([])
 
-        with sentry_sdk.start_span(op="discover.endpoint", description="find_lookup_keys") as span:
+        with start_span(op="discover.endpoint", name="find_lookup_keys") as span:
             possible_keys = ["transaction"]
             lookup_keys = {key: request.query_params.get(key) for key in possible_keys}
 
@@ -111,16 +111,20 @@ class OrganizationEventsRelatedIssuesEndpoint(OrganizationEventsEndpointBase, En
                     status=400,
                 )
 
-        with self.handle_query_errors():
-            with sentry_sdk.start_span(op="discover.endpoint", description="filter_creation"):
+        with handle_query_errors():
+            with start_span(op="discover.endpoint", name="filter_creation"):
                 projects = self.get_projects(request, organization)
+                # Filter out None values from environments
+                environments = [e for e in snuba_params.environments if e is not None]
                 query_kwargs = build_query_params_from_request(
-                    request, organization, projects, params.get("environment")
+                    request, organization, projects, environments
                 )
                 query_kwargs["limit"] = 5
                 try:
                     # Need to escape quotes in case some "joker" has a transaction with quotes
-                    transaction_name = UNESCAPED_QUOTE_RE.sub('\\"', lookup_keys["transaction"])
+                    transaction_name = UNESCAPED_QUOTE_RE.sub(
+                        '\\"', lookup_keys["transaction"] or ""
+                    )
                     parsed_terms = parse_search_query(f'transaction:"{transaction_name}"')
                 except ParseError:
                     return Response({"detail": "Invalid transaction search"}, status=400)
@@ -130,18 +134,120 @@ class OrganizationEventsRelatedIssuesEndpoint(OrganizationEventsEndpointBase, En
                 else:
                     query_kwargs["search_filters"] = parsed_terms
 
-            with sentry_sdk.start_span(op="discover.endpoint", description="issue_search"):
-                results = search.query(**query_kwargs)
+                query_kwargs["actor"] = request.user
 
-        with sentry_sdk.start_span(op="discover.endpoint", description="serialize_results") as span:
-            results = list(results)
-            span.set_data("result_length", len(results))
+            with start_span(op="discover.endpoint", name="issue_search"):
+                results_cursor = search.backend.query(**query_kwargs)
+
+        with start_span(op="discover.endpoint", name="serialize_results") as span:
+            results = list(results_cursor)
+            set_span_data(span, "result_length", len(results))
             context = serialize(
                 results,
                 request.user,
-                GroupSerializer(
-                    environment_func=self._get_environment_func(request, organization.id)
-                ),
+                GroupSerializer(environment_func=get_environment_func(request, organization.id)),
             )
 
         return Response(context)
+
+
+@cell_silo_endpoint
+class OrganizationSpansSamplesEndpoint(OrganizationEventsEndpointBase):
+    publish_status = {
+        "GET": ApiPublishStatus.PRIVATE,
+    }
+
+    def get(self, request: Request, organization: Organization) -> Response:
+        try:
+            snuba_params = self.get_snuba_params(request, organization)
+        except NoProjects:
+            return Response({})
+
+        orderby = self.get_orderby(request) or ["timestamp"]
+
+        with handle_query_errors():
+            result: EAPResponse | EventsResponse = get_eap_span_samples(
+                request, snuba_params, orderby
+            )
+
+        return Response(
+            self.handle_results_with_meta(
+                request,
+                organization,
+                snuba_params.project_ids,
+                {"data": result["data"], "meta": result["meta"]},
+                True,
+                Spans,
+            )
+        )
+
+
+def get_eap_span_samples(
+    request: Request, snuba_params: SnubaParams, orderby: list[str] | None
+) -> EAPResponse:
+    lower_bound = request.GET.get("lowerBound", 0)
+    first_bound = request.GET.get("firstBound")
+    second_bound = request.GET.get("secondBound")
+    upper_bound = request.GET.get("upperBound")
+    column = request.GET.get("column", "span.self_time")
+
+    if first_bound is None or second_bound is None:
+        raise ParseError("Must provide first and second bounds")
+
+    selected_columns = request.GET.getlist("additionalFields", []) + [
+        "project",
+        "transaction.span_id",
+        column,
+        "timestamp",
+        "span_id",
+        "profile.id",
+        "trace",
+    ]
+
+    query_string = request.query_params.get("query") or ""
+    bounds_query_string = f"{column}:>{lower_bound}ms {column}:<{upper_bound}ms {query_string}"
+
+    rpc_res = Spans.run_table_query(
+        params=snuba_params,
+        query_string=bounds_query_string,
+        config=SearchResolverConfig(),
+        offset=0,
+        limit=100,
+        sampling_mode=snuba_params.sampling_mode,
+        orderby=["-profile.id"],
+        referrer=Referrer.API_SPAN_SAMPLE_GET_SPAN_IDS.value,
+        selected_columns=[
+            f"bounded_sample({column}, {lower_bound}, {first_bound}) as lower",
+            f"bounded_sample({column}, {first_bound}, {second_bound}) as middle",
+            f"bounded_sample({column}, {second_bound}{', ' if upper_bound else ''}{upper_bound}) as top",
+            "profile.id",
+            "id",
+        ],
+    )
+
+    span_ids = []
+
+    for row in rpc_res["data"]:
+        lower, middle, top = row["lower"], row["middle"], row["top"]
+        if lower:
+            span_ids.append(row["id"])
+        if middle:
+            span_ids.append(row["id"])
+        if top:
+            span_ids.append(row["id"])
+
+    samples_query_string = (
+        f"span_id:[{','.join(span_ids)}] {query_string}" if len(span_ids) > 0 else query_string
+    )
+
+    return Spans.run_table_query(
+        params=snuba_params,
+        config=SearchResolverConfig(use_aggregate_conditions=False),
+        offset=0,
+        limit=9,
+        sampling_mode=snuba_params.sampling_mode,
+        query_string=samples_query_string,
+        orderby=orderby,
+        referrer=Referrer.API_SPAN_SAMPLE_GET_SPAN_DATA.value,
+        selected_columns=selected_columns,
+    )

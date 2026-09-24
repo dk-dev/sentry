@@ -1,49 +1,20 @@
-import React from 'react';
+import {Fragment} from 'react';
 
-import {EventGroupComponent} from 'app/types';
+import type {EventGroupComponent} from 'sentry/types/event';
 
-import GroupingComponent from './groupingComponent';
-import GroupingComponentFrames from './groupingComponentFrames';
-import {groupingComponentFilter} from './utils';
-
-type FrameGroup = {
-  key: string;
-  data: EventGroupComponent[];
-};
+import {GroupingComponent} from './groupingComponent';
+import {GroupingComponentFrames} from './groupingComponentFrames';
+import {getFrameGroups} from './utils';
 
 type Props = {
   component: EventGroupComponent;
   showNonContributing: boolean;
 };
 
-const GroupingComponentStacktrace = ({component, showNonContributing}: Props) => {
-  const getFrameGroups = () => {
-    const frameGroups: FrameGroup[] = [];
-
-    (component.values as EventGroupComponent[])
-      .filter(value => groupingComponentFilter(value, showNonContributing))
-      .forEach(value => {
-        const key = (value.values as EventGroupComponent[])
-          .filter(v => groupingComponentFilter(v, showNonContributing))
-          .map(v => v.id)
-          .sort((a, b) => a.localeCompare(b))
-          .join('');
-
-        const lastGroup = frameGroups[frameGroups.length - 1];
-
-        if (lastGroup?.key === key) {
-          lastGroup.data.push(value);
-        } else {
-          frameGroups.push({key, data: [value]});
-        }
-      });
-
-    return frameGroups;
-  };
-
+export function GroupingComponentStacktrace({component, showNonContributing}: Props) {
   return (
-    <React.Fragment>
-      {getFrameGroups().map((group, index) => (
+    <Fragment>
+      {getFrameGroups(component, showNonContributing).map((group, index) => (
         <GroupingComponentFrames
           key={index}
           items={group.data.map((v, idx) => (
@@ -53,10 +24,9 @@ const GroupingComponentStacktrace = ({component, showNonContributing}: Props) =>
               showNonContributing={showNonContributing}
             />
           ))}
+          showNonContributing={showNonContributing}
         />
       ))}
-    </React.Fragment>
+    </Fragment>
   );
-};
-
-export default GroupingComponentStacktrace;
+}

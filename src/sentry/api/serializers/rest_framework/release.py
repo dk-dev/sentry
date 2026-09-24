@@ -1,9 +1,10 @@
 from rest_framework import serializers
 
 from sentry.api.fields.user import UserField
-from sentry.api.serializers.rest_framework import CommitSerializer, ListField
+from sentry.api.serializers.rest_framework import CommitSerializer
 from sentry.constants import COMMIT_RANGE_DELIMITER, MAX_COMMIT_LENGTH, MAX_VERSION_LENGTH
-from sentry.models import Release, ReleaseStatus
+from sentry.models.organizationmember import OrganizationMember
+from sentry.models.release import Release, ReleaseStatus
 
 
 class ReleaseHeadCommitSerializerDeprecated(serializers.Serializer):
@@ -51,13 +52,35 @@ class ReleaseHeadCommitSerializer(serializers.Serializer):
 
 class ReleaseSerializer(serializers.Serializer):
     ref = serializers.CharField(
-        max_length=MAX_VERSION_LENGTH, required=False, allow_null=True, allow_blank=True
+        max_length=MAX_VERSION_LENGTH,
+        required=False,
+        allow_null=True,
+        allow_blank=True,
+        help_text="An optional commit reference. This is useful if a tagged version has been provided.",
     )
-    url = serializers.URLField(required=False, allow_null=True, allow_blank=True)
-    dateReleased = serializers.DateTimeField(required=False, allow_null=True)
-    commits = ListField(child=CommitSerializer(), required=False, allow_null=False)
+    url = serializers.URLField(
+        required=False,
+        allow_null=True,
+        allow_blank=True,
+        help_text="A URL that points to the release. For instance, this can be the path to an online interface to the source code, such as a GitHub URL.",
+    )
+    dateReleased = serializers.DateTimeField(
+        required=False,
+        allow_null=True,
+        help_text="An optional date that indicates when the release went live.  If not provided the current time is used.",
+    )
+    commits = serializers.ListField(
+        child=CommitSerializer(),
+        required=False,
+        allow_null=False,
+        help_text="An optional list of commit data to be associated.",
+    )
 
-    status = serializers.CharField(required=False, allow_null=False)
+    status = serializers.CharField(
+        required=False,
+        allow_null=False,
+        help_text="The status of the release. Can be `open` or `archived`.",
+    )
 
     def validate_status(self, value):
         try:
@@ -68,11 +91,24 @@ class ReleaseSerializer(serializers.Serializer):
 
 class ReleaseWithVersionSerializer(ReleaseSerializer):
     version = serializers.CharField(
-        max_length=MAX_VERSION_LENGTH, trim_whitespace=False, required=True
+        max_length=MAX_VERSION_LENGTH,
+        trim_whitespace=False,
+        required=True,
+        help_text="A version identifier for this release. Can be a version number, a commit hash, and so on.",
     )
-    owner = UserField(required=False)
+    owner = UserField(
+        required=False,
+        help_text="The username of the user to set as the release owner.",
+    )
 
     def validate_version(self, value):
         if not Release.is_valid_version(value):
             raise serializers.ValidationError("Release with name %s is not allowed" % value)
         return value
+
+    def validate_owner(self, owner):
+        if not OrganizationMember.objects.filter(
+            organization=self.context["organization"], user_id=owner.id
+        ).exists():
+            raise serializers.ValidationError("User does not have access to this organization")
+        return owner

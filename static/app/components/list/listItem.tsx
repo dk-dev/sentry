@@ -1,30 +1,22 @@
-import React from 'react';
 import styled from '@emotion/styled';
 
-type Props = {
-  children?: React.ReactNode;
-  symbol?: React.ReactElement;
-  onClick?: (event: React.MouseEvent) => void;
-  className?: string;
-};
+import {Flex} from '@sentry/scraps/layout';
 
-const ListItem = styled(({children, className, symbol, onClick}: Props) => (
-  <li className={className} onClick={onClick}>
-    {symbol && <Symbol>{symbol}</Symbol>}
+export interface ListItemProps extends React.HTMLAttributes<HTMLLIElement> {
+  ref?: React.Ref<HTMLLIElement>;
+  symbol?: React.ReactElement;
+}
+
+export const ListItem = styled(({ref, symbol, children, ...props}: ListItemProps) => (
+  <li ref={ref} role={props.onClick ? 'button' : undefined} {...props}>
+    {symbol && (
+      <Flex align="center" minHeight="22.5px" position="absolute" top="0" left="0">
+        {symbol}
+      </Flex>
+    )}
     {children}
   </li>
 ))`
   position: relative;
-  ${p => p.symbol && `padding-left: 34px;`}
+  padding-left: ${p => (p.symbol ? p.theme.space['3xl'] : undefined)};
 `;
-
-const Symbol = styled('div')`
-  display: flex;
-  align-items: center;
-  position: absolute;
-  top: 0;
-  left: 0;
-  min-height: 22.5px;
-`;
-
-export default ListItem;

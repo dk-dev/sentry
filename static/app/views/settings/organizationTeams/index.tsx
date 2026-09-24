@@ -1,60 +1,83 @@
-import React from 'react';
-import {RouteComponentProps} from 'react-router';
+import {useCallback, useMemo} from 'react';
+import {useQueryClient} from '@tanstack/react-query';
 
-import {loadStats} from 'app/actionCreators/projects';
-import {Client} from 'app/api';
-import {Organization, Team} from 'app/types';
-import {sortArray} from 'app/utils';
-import withApi from 'app/utils/withApi';
-import withOrganization from 'app/utils/withOrganization';
-import withTeams from 'app/utils/withTeams';
+import {LoadingError} from 'sentry/components/loadingError';
+import {LoadingIndicator} from 'sentry/components/loadingIndicator';
+import {t} from 'sentry/locale';
+import {TeamStore} from 'sentry/stores/teamStore';
+import type {AccessRequest} from 'sentry/types/organization';
+import {getApiUrl} from 'sentry/utils/api/getApiUrl';
+import {setApiQueryData, useApiQuery} from 'sentry/utils/queryClient';
+import {useOrganization} from 'sentry/utils/useOrganization';
 
-import OrganizationTeams from './organizationTeams';
+import {OrganizationTeams} from './organizationTeams';
 
-type Props = {
-  api: Client;
-  organization: Organization;
-  teams: Team[];
-} & RouteComponentProps<{orgId: string}, {}>;
+export default function OrganizationTeamsContainer() {
+  const organization = useOrganization({allowNull: true});
+  const queryClient = useQueryClient();
 
-class OrganizationTeamsContainer extends React.Component<Props> {
-  componentDidMount() {
-    this.fetchStats();
+  const queryKey = useMemo(
+    () =>
+      [
+        getApiUrl('/organizations/$organizationIdOrSlug/access-requests/', {
+          path: {organizationIdOrSlug: organization?.slug!},
+        }),
+      ] as const,
+    [organization?.slug]
+  );
+
+  const {
+    isPending,
+    isError,
+    data: requestList = [],
+  } = useApiQuery<AccessRequest[]>(queryKey, {
+    staleTime: 0,
+    retry: false,
+    enabled: !!organization?.slug,
+  });
+
+  const handleRemoveAccessRequest = useCallback(
+    (id: string, isApproved: boolean) => {
+      const requestToRemove = requestList.find(request => request.id === id);
+      const newRequestList = requestList.filter(request => request.id !== id);
+
+      // Update the cache with the new value
+      setApiQueryData(queryClient, queryKey, newRequestList);
+
+      // To be safer, trigger a refetch to ensure data is correct
+      queryClient.invalidateQueries({queryKey});
+
+      if (isApproved && requestToRemove) {
+        const team = requestToRemove.team;
+        TeamStore.onUpdateSuccess(team.slug, {
+          ...team,
+          memberCount: team.memberCount + 1,
+        });
+      }
+    },
+    [requestList, queryKey, queryClient]
+  );
+
+  // Can't do anything if we don't have an organization
+  if (!organization) {
+    return <LoadingError message={t('Organization not found')} />;
   }
 
-  fetchStats() {
-    loadStats(this.props.api, {
-      orgId: this.props.params.orgId,
-      query: {
-        since: (new Date().getTime() / 1000 - 3600 * 24).toString(),
-        stat: 'generated',
-        group: 'project',
-      },
-    });
+  if (isPending) {
+    return <LoadingIndicator />;
   }
 
-  render() {
-    const {organization, teams} = this.props;
-
-    if (!organization) {
-      return null;
-    }
-    const allTeams = sortArray(teams, team => team.name);
-    const activeTeams = allTeams.filter(team => team.isMember);
-
-    return (
-      <OrganizationTeams
-        {...this.props}
-        access={new Set(organization.access)}
-        features={new Set(organization.features)}
-        organization={organization}
-        allTeams={allTeams}
-        activeTeams={activeTeams}
-      />
-    );
+  if (isError) {
+    return <LoadingError />;
   }
+
+  return (
+    <OrganizationTeams
+      organization={organization}
+      access={new Set(organization?.access)}
+      features={new Set(organization?.features)}
+      requestList={requestList}
+      onRemoveAccessRequest={handleRemoveAccessRequest}
+    />
+  );
 }
-
-export {OrganizationTeamsContainer};
-
-export default withApi(withOrganization(withTeams(OrganizationTeamsContainer)));

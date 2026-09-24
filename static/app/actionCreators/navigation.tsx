@@ -1,23 +1,35 @@
-import React from 'react';
-import {InjectedRouter} from 'react-router/lib/Router';
-import {Location} from 'history';
+import type {Location, Query} from 'history';
 
-import {openModal} from 'app/actionCreators/modal';
-import NavigationActions from 'app/actions/navigationActions';
-import ContextPickerModal from 'app/components/contextPickerModal';
-import ProjectsStore from 'app/stores/projectsStore';
+import {openModal} from 'sentry/actionCreators/modal';
+import {ContextPickerModalContainer as ContextPickerModal} from 'sentry/components/contextPickerModal';
+import {ProjectsStore} from 'sentry/stores/projectsStore';
+import {replaceRouterParams} from 'sentry/utils/replaceRouterParams';
+import {normalizeUrl} from 'sentry/utils/url/normalizeUrl';
+import type {ReactRouter3Navigate} from 'sentry/utils/useNavigate';
 
-// TODO(ts): figure out better typing for react-router here
-export function navigateTo(to: string, router: InjectedRouter & {location?: Location}) {
+export function navigateTo(
+  to: string | {pathname: string; query?: Query},
+  navigate: ReactRouter3Navigate,
+  location: Location | undefined
+) {
+  let pathname: string;
+  if (typeof to === 'string') {
+    pathname = to;
+  } else {
+    pathname = to.pathname;
+  }
   // Check for placeholder params
-  const needOrg = to.indexOf(':orgId') > -1;
-  const needProject = to.indexOf(':projectId') > -1;
-  const comingFromProjectId = router?.location?.query?.project;
+  const needOrg = pathname.includes(':orgId');
+  const needProject = pathname.includes(':projectId') || pathname.includes(':project');
+  const needTeam = pathname.includes(':teamId');
+  const comingFromProjectId = location?.query?.project;
   const needProjectId = !comingFromProjectId || Array.isArray(comingFromProjectId);
 
-  const projectById = ProjectsStore.getById(comingFromProjectId);
+  const projectById = ProjectsStore.getById(
+    typeof comingFromProjectId === 'string' ? comingFromProjectId : undefined
+  );
 
-  if (needOrg || (needProject && (needProjectId || !projectById))) {
+  if (needOrg || needTeam || (needProject && (needProjectId || !projectById))) {
     openModal(
       modalProps => (
         <ContextPickerModal
@@ -25,24 +37,23 @@ export function navigateTo(to: string, router: InjectedRouter & {location?: Loca
           nextPath={to}
           needOrg={needOrg}
           needProject={needProject}
-          comingFromProjectId={
-            Array.isArray(comingFromProjectId) ? '' : comingFromProjectId || ''
-          }
+          needTeam={needTeam}
           onFinish={path => {
             modalProps.closeModal();
-            setTimeout(() => router.push(path), 0);
+            return window.setTimeout(() => navigate(normalizeUrl(path)), 0);
           }}
         />
       ),
       {}
     );
   } else {
-    projectById
-      ? router.push(to.replace(':projectId', projectById.slug))
-      : router.push(to);
+    if (projectById) {
+      pathname = replaceRouterParams(pathname, {
+        projectId: projectById.slug,
+        project: projectById.id,
+      });
+    }
+    // Preserve query string
+    navigate(normalizeUrl(typeof to === 'string' ? pathname : {...to, pathname}));
   }
-}
-
-export function setLastRoute(route: string) {
-  NavigationActions.setLastRoute(route);
 }

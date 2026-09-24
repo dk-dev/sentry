@@ -1,88 +1,105 @@
-from collections import namedtuple
-from functools import partial
-from typing import Optional
-from urllib.parse import parse_qs, quote, urlencode, urljoin, urlparse
+from __future__ import annotations
 
+from collections.abc import Collection, Iterator
+from typing import TYPE_CHECKING, Any, NamedTuple, TypeGuard, overload
+from urllib.parse import quote, urljoin, urlparse
+
+from asgiref.sync import sync_to_async
 from django.conf import settings
+from django.http import HttpRequest
+from rest_framework.request import Request
 
 from sentry import options
-from sentry.utils import json
-from sentry.utils.compat import filter, map
 
-ParsedUriMatch = namedtuple("ParsedUriMatch", ["scheme", "domain", "path"])
+if TYPE_CHECKING:
+    from sentry.models.project import Project
+
+from ipaddress import ip_address, ip_interface, ip_network
+
+# User-agent prefix set by the official Sentry MCP server (source of truth:
+# getsentry/sentry-mcp). Used to attribute requests originating from the MCP.
+MCP_USER_AGENT_PREFIX = "sentry-mcp/"
+
+MCP_CLIENT_FAMILY_HEADER = "HTTP_X_SENTRY_MCP_CLIENT_FAMILY"
+
+# Standardized client families the MCP buckets its callers into and forwards via
+# X-Sentry-MCP-Client-Family (source of truth: client-family.ts in getsentry/sentry-mcp).
+KNOWN_MCP_CLIENT_FAMILIES = frozenset(
+    {"claude-code", "cursor", "copilot", "opencode", "claude-desktop", "codex"}
+)
+MCP_CATCHALL_CLIENT_FAMILIES = frozenset({"other", "unknown"})
+
+# Header Seer sets on the API calls it makes on a user's behalf. Shared so that
+# every caller-attribution site keys off the same signal (see `sentry.api.client_kind`
+# and `sentry.issues.action_log`).
+SEER_REFERRER_HEADER = "HTTP_X_SEER_REFERRER"
 
 
-def absolute_uri(url: Optional[str] = None) -> str:
-    prefix = options.get("system.url-prefix")
+class ParsedUriMatch(NamedTuple):
+    scheme: str
+    domain: str
+    path: str
+
+
+def absolute_uri(url: str | None = None, url_prefix: str | None = None) -> str:
+    if url_prefix is None:
+        url_prefix = options.get("system.url-prefix")
     if not url:
-        return prefix
-    return urljoin(prefix.rstrip("/") + "/", url.lstrip("/"))
+        return url_prefix
+    parsed = urlparse(url)
+    if parsed.hostname is not None:
+        url_prefix = origin_from_url(url)
+    return urljoin(url_prefix.rstrip("/") + "/", url.lstrip("/"))
 
 
-def origin_from_url(url):
+def query_string(request: HttpRequest) -> str:
+    qs = request.META.get("QUERY_STRING") or ""
+    if qs:
+        qs = f"?{qs}"
+    return qs
+
+
+def create_redirect_url(request: HttpRequest, redirect_url: str) -> str:
+    qs = query_string(request)
+    return f"{redirect_url}{qs}"
+
+
+@overload
+def origin_from_url(url: str) -> str: ...
+
+
+@overload
+def origin_from_url(url: None) -> None: ...
+
+
+def origin_from_url(url: str | None) -> str | None:
     if not url:
         return url
-    url = urlparse(url)
-    return f"{url.scheme}://{url.netloc}"
+    parsed = urlparse(url)
+    return f"{parsed.scheme}://{parsed.netloc}"
 
 
-def safe_urlencode(params, doseq=0):
-    """
-    UTF-8-safe version of safe_urlencode
-
-    The stdlib safe_urlencode prior to Python 3.x chokes on UTF-8 values
-    which can't fail down to ascii.
-    """
-    # Snippet originally from pysolr: https://github.com/toastdriven/pysolr
-
-    if hasattr(params, "items"):
-        params = params.items()
-
-    new_params = list()
-
-    for k, v in params:
-        k = k.encode("utf-8")
-
-        if isinstance(v, str):
-            new_params.append((k, v.encode("utf-8")))
-        elif isinstance(v, (list, tuple)):
-            new_params.append((k, [i.encode("utf-8") for i in v]))
+def get_origins(project: Project | None = None) -> frozenset[str]:
+    if not project:
+        if settings.SENTRY_ALLOW_ORIGIN in ("*", None):
+            result = ["*"]
+        elif settings.SENTRY_ALLOW_ORIGIN:
+            result = settings.SENTRY_ALLOW_ORIGIN.split(" ")
         else:
-            new_params.append((k, str(v)))
-
-    return urlencode(new_params, doseq)
-
-
-def is_same_domain(url1, url2):
-    """
-    Returns true if the two urls should be treated as if they're from the same
-    domain (trusted).
-    """
-    url1 = urlparse(url1)
-    url2 = urlparse(url2)
-    return url1.netloc == url2.netloc
-
-
-def get_origins(project=None):
-    if settings.SENTRY_ALLOW_ORIGIN == "*":
-        return frozenset(["*"])
-
-    if settings.SENTRY_ALLOW_ORIGIN:
-        result = settings.SENTRY_ALLOW_ORIGIN.split(" ")
+            result = []
     else:
-        result = []
-
-    if project:
         optval = project.get_option("sentry:origins", ["*"])
         if optval:
-            result.extend(optval)
+            result = optval
+        else:
+            result = []
 
     # lowercase and strip the trailing slash from all origin values
     # filter out empty values
     return frozenset(filter(bool, map(lambda x: (x or "").lower().rstrip("/"), result)))
 
 
-def parse_uri_match(value):
+def parse_uri_match(value: str) -> ParsedUriMatch:
     if "://" in value:
         scheme, value = value.split("://", 1)
     else:
@@ -100,9 +117,7 @@ def parse_uri_match(value):
 
     # we need to coerce our unicode inputs into proper
     # idna/punycode encoded representation for normalization.
-    if isinstance(domain, bytes):
-        domain = domain.decode("utf8")
-    domain = domain.encode("idna").decode("utf-8")
+    domain = domain.encode("idna").decode()
 
     if port:
         domain = f"{domain}:{port}"
@@ -110,7 +125,9 @@ def parse_uri_match(value):
     return ParsedUriMatch(scheme, domain, path)
 
 
-def is_valid_origin(origin, project=None, allowed=None):
+def is_valid_origin(
+    origin: str | None, project: Project | None = None, allowed: Collection[str] | None = None
+) -> bool:
     """
     Given an ``origin`` which matches a base URI (e.g. http://example.com)
     determine if a valid origin is present in the project settings.
@@ -147,15 +164,6 @@ def is_valid_origin(origin, project=None, allowed=None):
     if origin == "null":
         return False
 
-    if isinstance(origin, bytes):
-        try:
-            origin = origin.decode("utf-8")
-        except UnicodeDecodeError:
-            try:
-                origin = origin.decode("windows-1252")
-            except UnicodeDecodeError:
-                return False
-
     parsed = urlparse(origin)
 
     if parsed.hostname is None:
@@ -168,7 +176,7 @@ def is_valid_origin(origin, project=None, allowed=None):
             parsed_hostname = parsed.hostname
 
     if parsed.port:
-        domain_matches = (
+        domain_matches: tuple[str, ...] = (
             "*",
             parsed_hostname,
             # Explicit hostname + port name
@@ -209,12 +217,12 @@ def is_valid_origin(origin, project=None, allowed=None):
     return False
 
 
-def origin_from_request(request):
+def origin_from_request(request: HttpRequest) -> str | None:
     """
     Returns either the Origin or Referer value from the request headers,
     ignoring "null" Origins.
     """
-    rv = request.META.get("HTTP_ORIGIN", "null")
+    rv: str | None = request.META.get("HTTP_ORIGIN", "null")
     # In some situation, an Origin header may be the literal value
     # "null". This means that the Origin header was stripped for
     # privacy reasons, but we should ignore this value entirely.
@@ -225,36 +233,117 @@ def origin_from_request(request):
     return rv
 
 
-def heuristic_decode(data, possible_content_type=None):
+def is_mcp_request(request: HttpRequest | Request) -> bool:
     """
-    Attempt to decode a HTTP body by trying JSON and Form URL decoders,
-    returning the decoded body (if decoding was successful) and the inferred
-    content type.
+    Whether the request originated from the official Sentry MCP server, identified
+    by its `sentry-mcp/` user-agent prefix.
     """
-    inferred_content_type = possible_content_type
-
-    form_encoded_parser = partial(parse_qs, strict_parsing=True, keep_blank_values=True)
-
-    decoders = [
-        ("application/json", json.loads),
-        ("application/x-www-form-urlencoded", form_encoded_parser),
-    ]
-
-    # Prioritize the decoder which supports the possible content type first.
-    decoders.sort(key=lambda d: d[0] == possible_content_type, reverse=True)
-
-    for decoding_type, decoder in decoders:
-        try:
-            return (decoder(data), decoding_type)
-        except Exception:
-            # Try another decoder
-            continue
-
-    return (data, inferred_content_type)
+    return request.META.get("HTTP_USER_AGENT", "").startswith(MCP_USER_AGENT_PREFIX)
 
 
-def percent_encode(val):
+def get_mcp_client_family(request: HttpRequest | Request) -> str | None:
+    """The client family (`claude-code`, `cursor`, ...) the MCP server declares for its caller.
+
+    Returns None when the header is absent or the MCP bucketed the caller into a catch-all.
+    A value outside `KNOWN_MCP_CLIENT_FAMILIES` is still returned: this set can lag
+    client-family.ts upstream, so callers decide whether to log the unrecognized value.
+
+    Declared by the client, so untrusted -- unlike `is_mcp_request`, which is derived.
+    """
+    family = request.META.get(MCP_CLIENT_FAMILY_HEADER, "").strip().lower()
+    if not family or family in MCP_CATCHALL_CLIENT_FAMILIES:
+        return None
+    return family
+
+
+def percent_encode(val: str) -> str:
     # see https://en.wikipedia.org/wiki/Percent-encoding
-    if isinstance(val, str):
-        val = val.encode("utf8", errors="replace")
     return quote(val).replace("%7E", "~").replace("/", "%2F")
+
+
+class _HttpRequestWithSubdomain(HttpRequest):
+    """typing-only: to help with hinting for `.subdomain`"""
+
+    subdomain: str
+
+
+def is_using_customer_domain(request: HttpRequest) -> TypeGuard[_HttpRequestWithSubdomain]:
+    return bool(hasattr(request, "subdomain") and request.subdomain)
+
+
+def is_valid_ip(maybe_ip_str: str) -> bool:
+    # Validate the string by attempting to pass it to the three built-in factory functions for
+    # creating different types of ip address objects. If any of them succeeds, it's a valid IP. If
+    # all three raise an error, it's not.
+    for fn, kwargs in (
+        (ip_address, {}),
+        (ip_interface, {}),
+        (ip_network, {"strict": False}),  # `strict: False` allows host bits
+    ):
+        try:
+            fn(maybe_ip_str, **kwargs)
+        except ValueError:
+            pass
+        else:
+            return True
+
+    return False
+
+
+class BodyAsyncWrapper:
+    def __init__(self, body: Any):
+        self._bool = bool(body)
+        self.body = [body] if isinstance(body, bytes) else body
+
+    def __bool__(self) -> bool:
+        return self._bool
+
+    def __aiter__(self):
+        return BodyAsyncIter(self)
+
+
+class BodyAsyncIter:
+    def __init__(self, parent: BodyAsyncWrapper):
+        self.biter = iter(parent.body)
+
+    def _anext(self):
+        try:
+            return self.biter.__next__()
+        except StopIteration:
+            raise StopAsyncIteration
+
+    async def __anext__(self) -> bytes:
+        return await sync_to_async(self._anext)()
+
+
+class BodyWithLength:
+    """Wraps an HttpRequest with a __len__ so that the requests library does not assume length=0 in all cases"""
+
+    def __init__(self, request: HttpRequest):
+        self.request = request
+
+    def __iter__(self) -> Iterator[bytes]:
+        return iter(self.request)
+
+    def __aiter__(self) -> BodyWithLengthAiter:
+        return BodyWithLengthAiter(self)
+
+    def __len__(self) -> int:
+        return int(self.request.headers.get("Content-Length", "0"))
+
+    def read(self, size: int | None = None) -> bytes:
+        return self.request.read(size)
+
+
+class BodyWithLengthAiter:
+    def __init__(self, parent: BodyWithLength):
+        self.biter = iter(parent.request)
+
+    def _anext(self):
+        try:
+            return self.biter.__next__()
+        except StopIteration:
+            raise StopAsyncIteration
+
+    async def __anext__(self) -> bytes:
+        return await sync_to_async(self._anext)()

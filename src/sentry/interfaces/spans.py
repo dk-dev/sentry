@@ -43,7 +43,8 @@ class Span(Interface):
     def to_python(cls, data):
         for key in SPAN_KEYS:
             data.setdefault(key, None)
-        return cls(**data)
+
+        return super().to_python(data)
 
 
 class Spans(Interface):
@@ -57,8 +58,8 @@ class Spans(Interface):
 
     @classmethod
     def to_python(cls, data):
-        spans = [Span.to_python(span) for span in data]
-        return cls(spans=spans)
+        spans = [Span.to_python(span) for span in data if span is not None]
+        return super().to_python({"spans": spans})
 
     def __iter__(self):
         return iter(self.spans)

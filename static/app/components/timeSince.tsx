@@ -1,179 +1,146 @@
-import React from 'react';
-import isNumber from 'lodash/isNumber';
-import isString from 'lodash/isString';
-import moment from 'moment-timezone';
+import {useEffect, useMemo, useState} from 'react';
 
-import {t} from 'app/locale';
-import ConfigStore from 'app/stores/configStore';
-import {getDuration} from 'app/utils/formatters';
-import getDynamicText from 'app/utils/getDynamicText';
+import {InfoText, type InfoTextProps} from '@sentry/scraps/info';
+import {
+  getDateObj,
+  getRelativeDate,
+  type RelaxedDateType,
+  RELATIVE_TIME_MAX_WIDTH,
+  RelativeTime,
+  type UnitStyle,
+} from '@sentry/scraps/relativeTime';
 
-import Tooltip from './tooltip';
+import {t} from 'sentry/locale';
 
-const ONE_MINUTE_IN_MS = 60000;
+export {getRelativeDate};
 
-type RelaxedDateType = string | number | Date;
-
-type DefaultProps = {
-  /**
-   * Suffix after elapsed time
-   * e.g. "ago" in "5 minutes ago"
-   */
-  suffix: string;
-};
-
-type TimeProps = React.HTMLProps<HTMLTimeElement>;
-
-type Props = DefaultProps & {
+interface Props extends Omit<
+  React.TimeHTMLAttributes<HTMLTimeElement>,
+  'color' | 'title'
+> {
   /**
    * The date value, can be string, number (e.g. timestamp), or instance of Date
+   *
+   * May be in the future
    */
   date: RelaxedDateType;
-
   /**
-   * By default we show tooltip with absolute date on hover, this prop disables that
+   * By default we show tooltip with absolute date on hover, this prop disables
+   * that
    */
   disabledAbsoluteTooltip?: boolean;
-
   /**
-   * For relative time shortens minutes to min, hour to hr etc.
+   * How often should the component live update the timestamp.
+   *
+   * You may specify a custom interval in milliseconds if necissary.
+   *
+   * @default minute
    */
-  shorten?: boolean;
+  liveUpdateInterval?: 'minute' | 'second' | number;
   /**
-   * Shortens the shortened relative time
-   * min to m, hr to h
+   * Max width of the tooltip
    */
-  extraShort?: boolean;
-
-  tooltipTitle?: React.ReactNode;
-
-  className?: string;
-} & TimeProps;
-
-type State = {
-  relative: string;
-};
-
-class TimeSince extends React.PureComponent<Props, State> {
-  static defaultProps: DefaultProps = {
-    suffix: 'ago',
-  };
-
-  state = {
-    relative: '',
-  };
-
-  // TODO(ts) TODO(emotion): defining the props type breaks emotion's typings
-  // See: https://github.com/emotion-js/emotion/pull/1514
-  static getDerivedStateFromProps(props) {
-    return {
-      relative: getRelativeDate(
-        props.date,
-        props.suffix,
-        props.shorten,
-        props.extraShort
-      ),
-    };
-  }
-
-  componentDidMount() {
-    this.setRelativeDateTicker();
-  }
-
-  componentWillUnmount() {
-    if (this.ticker) {
-      window.clearTimeout(this.ticker);
-      this.ticker = null;
-    }
-  }
-
-  ticker: number | null = null;
-
-  setRelativeDateTicker = () => {
-    this.ticker = window.setTimeout(() => {
-      this.setState({
-        relative: getRelativeDate(
-          this.props.date,
-          this.props.suffix,
-          this.props.shorten,
-          this.props.extraShort
-        ),
-      });
-      this.setRelativeDateTicker();
-    }, ONE_MINUTE_IN_MS);
-  };
-
-  render() {
-    const {
-      date,
-      suffix: _suffix,
-      disabledAbsoluteTooltip,
-      className,
-      tooltipTitle,
-      shorten: _shorten,
-      extraShort: _extraShort,
-      ...props
-    } = this.props;
-    const dateObj = getDateObj(date);
-    const user = ConfigStore.get('user');
-    const options = user ? user.options : null;
-    const format = options?.clock24Hours ? 'MMMM D, YYYY HH:mm z' : 'LLL z';
-    const tooltip = getDynamicText({
-      fixed: options?.clock24Hours
-        ? 'November 3, 2020 08:57 UTC'
-        : 'November 3, 2020 8:58 AM UTC',
-      value: moment.tz(dateObj, options?.timezone ?? '').format(format),
-    });
-
-    return (
-      <Tooltip
-        disabled={disabledAbsoluteTooltip}
-        title={
-          <div>
-            <div>{tooltipTitle}</div>
-            {tooltip}
-          </div>
-        }
-      >
-        <time dateTime={dateObj.toISOString()} className={className} {...props}>
-          {this.state.relative}
-        </time>
-      </Tooltip>
-    );
-  }
+  maxWidth?: InfoTextProps<'time'>['maxWidth'];
+  /**
+   * Suffix after elapsed time e.g. "ago" in "5 minutes ago"
+   *
+   * @default "ago"
+   */
+  suffix?: string;
+  /**
+   * Customize the tooltip content. This replaces the `RelativeTime` card
+   * completely, so `tooltipPrefix` has nothing left to label and is ignored.
+   */
+  tooltipBody?: React.ReactNode;
+  /**
+   * What the timestamp refers to, e.g. "Last Seen". Becomes the card's header,
+   * alongside the same relative time the trigger shows. Without one the card is
+   * the timezone rows on their own.
+   *
+   * Has no effect alongside `tooltipBody`, which replaces the card it heads.
+   */
+  tooltipPrefix?: React.ReactNode;
+  /**
+   * Include seconds in the tooltip
+   */
+  tooltipShowSeconds?: boolean;
+  /**
+   * How much text should be used for the suffix.
+   *
+   * @default human
+   */
+  unitStyle?: UnitStyle;
+  /**
+   * Change the color of the underline
+   */
+  variant?: InfoTextProps<'time'>['variant'];
 }
 
-export default TimeSince;
+export function TimeSince({
+  date,
+  disabledAbsoluteTooltip,
+  tooltipShowSeconds,
+  tooltipPrefix,
+  tooltipBody,
+  variant = 'inherit',
+  maxWidth,
+  unitStyle,
+  suffix = t('ago'),
+  liveUpdateInterval = 'minute',
+  ...props
+}: Props) {
+  // Counter to trigger periodic re-computation of relative time
+  const [tick, setTick] = useState(0);
 
-function getDateObj(date: RelaxedDateType): Date {
-  if (isString(date) || isNumber(date)) {
-    date = new Date(date);
-  }
-  return date;
-}
+  const relative = useMemo(() => {
+    void tick; // Ensure recomputation when tick changes
+    return getRelativeDate(date, suffix, t('in'), unitStyle);
+    // oxlint-disable-next-line react/memo-dependencies
+  }, [date, suffix, unitStyle, tick]);
 
-export function getRelativeDate(
-  currentDateTime: RelaxedDateType,
-  suffix?: string,
-  shorten?: boolean,
-  extraShort?: boolean
-): string {
-  const date = getDateObj(currentDateTime);
+  useEffect(() => {
+    const interval =
+      liveUpdateInterval === 'minute'
+        ? 60 * 1000
+        : liveUpdateInterval === 'second'
+          ? 1000
+          : liveUpdateInterval;
 
-  if ((shorten || extraShort) && suffix) {
-    return t('%(time)s %(suffix)s', {
-      time: getDuration(moment().diff(moment(date), 'seconds'), 0, shorten, extraShort),
-      suffix,
-    });
-  } else if ((shorten || extraShort) && !suffix) {
-    return getDuration(moment().diff(moment(date), 'seconds'), 0, shorten, extraShort);
-  } else if (!suffix) {
-    return moment(date).fromNow(true);
-  } else if (suffix === 'ago') {
-    return moment(date).fromNow();
-  } else if (suffix === 'old') {
-    return t('%(time)s old', {time: moment(date).fromNow(true)});
-  } else {
-    throw new Error('Unsupported time format suffix');
-  }
+    // Start a ticker to update the relative time
+    const ticker = window.setInterval(() => setTick(prev => prev + 1), interval);
+
+    return () => window.clearInterval(ticker);
+  }, [liveUpdateInterval]);
+
+  const dateObj = getDateObj(date);
+
+  // A caller that supplies its own body owns the whole overlay, so the card's
+  // width does not apply to it.
+  const showsCard = !tooltipBody;
+
+  return (
+    <InfoText
+      as="time"
+      dateTime={dateObj?.toISOString()}
+      variant={variant}
+      maxWidth={maxWidth ?? (showsCard ? RELATIVE_TIME_MAX_WIDTH : undefined)}
+      title={
+        disabledAbsoluteTooltip
+          ? null
+          : (tooltipBody ?? (
+              <RelativeTime
+                date={date}
+                label={tooltipPrefix}
+                prefix={t('in')}
+                suffix={suffix}
+                unitStyle={unitStyle}
+                showSeconds={tooltipShowSeconds}
+              />
+            ))
+      }
+      {...props}
+    >
+      {relative}
+    </InfoText>
+  );
 }

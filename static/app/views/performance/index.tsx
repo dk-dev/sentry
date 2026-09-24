@@ -1,39 +1,48 @@
-import React from 'react';
+import {Outlet} from 'react-router-dom';
 
-import Feature from 'app/components/acl/feature';
-import Alert from 'app/components/alert';
-import {t} from 'app/locale';
-import {PageContent} from 'app/styles/organization';
-import {Organization} from 'app/types';
-import withOrganization from 'app/utils/withOrganization';
+import {Alert} from '@sentry/scraps/alert';
+import {Stack} from '@sentry/scraps/layout';
 
-type Props = {
-  organization: Organization;
-};
+import Feature from 'sentry/components/acl/feature';
+import {NoProjectMessage} from 'sentry/components/noProjectMessage';
+import {t} from 'sentry/locale';
+import {MetricsCardinalityProvider} from 'sentry/utils/performance/contexts/metricsCardinality';
+import {MEPSettingProvider} from 'sentry/utils/performance/contexts/metricsEnhancedSetting';
+import {useLocation} from 'sentry/utils/useLocation';
+import {useOrganization} from 'sentry/utils/useOrganization';
 
-class PerformanceContainer extends React.Component<Props> {
-  renderNoAccess() {
+function PerformanceContainer() {
+  const organization = useOrganization();
+  const location = useLocation();
+
+  function renderNoAccess() {
     return (
-      <PageContent>
-        <Alert type="warning">{t("You don't have access to this feature")}</Alert>
-      </PageContent>
+      <Stack flex={1} padding="2xl 3xl">
+        <Alert.Container>
+          <Alert variant="warning" showIcon={false}>
+            {t("You don't have access to this feature")}
+          </Alert>
+        </Alert.Container>
+      </Stack>
     );
   }
 
-  render() {
-    const {organization, children} = this.props;
-
-    return (
-      <Feature
-        hookName="feature-disabled:performance-page"
-        features={['performance-view']}
-        organization={organization}
-        renderDisabled={this.renderNoAccess}
-      >
-        {children}
-      </Feature>
-    );
-  }
+  return (
+    <Feature
+      overrideName="feature-disabled:performance-page"
+      features="performance-view"
+      organization={organization}
+      renderDisabled={renderNoAccess}
+    >
+      <NoProjectMessage organization={organization}>
+        <MetricsCardinalityProvider location={location} organization={organization}>
+          <MEPSettingProvider>
+            <Outlet />
+          </MEPSettingProvider>
+        </MetricsCardinalityProvider>
+      </NoProjectMessage>
+    </Feature>
+  );
 }
 
-export default withOrganization(PerformanceContainer);
+export default PerformanceContainer;

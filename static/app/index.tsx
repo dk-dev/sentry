@@ -1,35 +1,106 @@
-// These imports (core-js and regenerator-runtime) are replacements for deprecated `@babel/polyfill`
-import 'core-js/stable';
-import 'regenerator-runtime/runtime';
+// This is the entry point of Sentry's frontend application. Want to
+// understand how app boots? Read on!
+//
+// 1. Load the `bootstrap` and `initializeMain` functions
+//
+//   a. Execute and wait for `bootstrap` to complete.
+//
+//      Bootstrapping loads early-runtime configuration. See the
+//      client_config.py backend view for more details.
+//
+//      Bootstrapping will do different things depending on if the app is
+//      running in SPA mode vs being booted from the django rendered layout
+//      template.
+//
+//      - SPA mode loads client-config via a HTTP request.
+//      - Django rendered mode loads client-config from a window global.
+//
+// 2. Once the app has been bootstrapped with the client-config data we can
+//    initialize the app.
+//
+//   a. The locale module will be initialized using `initializeLocale`. See this
+//      function in app/bootstrap/initializeLocale to understand the priority
+//      for how it determines the locale
+//
+//      This also handles lazily loading non English locale files if needed.
+//      There is no English locale file as our locale strings are keyed using
+//      the English strings.
+//
+//   b. Call `initalizeApp`, which starts most everything else
+//
+// 3. App initialization does the following...
+//
+//   a. Initialize the ConfigStore with client-config data.
+//
+//   b. Initialize the Sentry SDK. This includes setting up integrations for
+//      routing and tracing.
+//
+//   c. The <Main /> component is rendered. See step 4 for more details.
+//
+//   d. Run global init-queue tasks. These are essentially functions registered
+//      in the `window.__onSentryInit` array from outside of the app. This is
+//      specifically for old-style pages rendered as django templates, but
+//      still need React frontend components.
+//
+//      This also includes exporting some globals into the window.
+//
+// 4. Once the app is fully initialized we begin rendering React components. To
+//    understand the rendering tree from this point forward it's best to follow
+//    the component tree from <Main />
+//
+//    For a quick overview, here's what most render trees will look like:
+//
+//    <ThemeAndStyleProvider>  <-- Provides emotions theme in context
+//    |
+//    <Router>                 <-- Matches URLs and renders nested views
+//    |
+//    <App>                    <-- The App view handles initializing basic
+//    |                            parts of the application (such as loading
+//    |                            your org list)
+//    |
+//    <OrganizationLayout>     <-- Most routes live within the
+//                                 OrganizationLayout, which handles loading
+//                                 details for the org, projects, and teams.
+//
+//
+// Did you read through this whole thing and don't even work here? [1]
+//
+// [1]: https://sentry.io/careers/
 
-import {Config} from 'app/types';
+async function app() {
+  // We won't need initalizeMainImport until we complete bootstrapping.
+  // Initaite the fetch, just don't await it until we need it.
+  const initalizeMainImport = import('sentry/bootstrap/initializeMain');
+  const bootstrapImport = import('sentry/bootstrap');
 
-const BOOTSTRAP_URL = '/api/client-config/';
+  const {bootstrap} = await bootstrapImport;
+  const config = await bootstrap();
 
-const bootApplication = (data: Config) => {
-  window.csrfCookieName = data.csrfCookieName;
+  if (config.sentryMode === 'SELF_HOSTED') {
+    const {initializeMain} = await initalizeMainImport;
+    initializeMain(config);
+    return;
+  }
 
-  // Once data hydration is done we can initialize the app
-  const {initializeMain} = require('./bootstrap/initializeMain');
-  initializeMain(data);
-};
+  // We have split up the imports this way so that locale is initialized as
+  // early as possible, (e.g. before `registerOverrides` is imported otherwise the
+  // imports in `registerOverrides` will not be in the correct locale.
+  // eslint-disable-next-line boundaries/dependencies -- getsentry entrypoint
+  const registerOverridesImport = import('getsentry/registerOverrides');
+  // eslint-disable-next-line boundaries/dependencies -- getsentry entrypoint
+  const initalizeBundleMetricsImport = import('getsentry/initializeBundleMetrics');
 
-async function bootWithHydration() {
-  const response = await fetch(BOOTSTRAP_URL);
-  const data: Config = await response.json();
+  // getsentry augments Sentry's application through a 'hook' mechanism. Sentry
+  // provides various hooks into parts of its application. Thus all getsentry
+  // functionality is initialized by registering its hook functions.
+  const {registerGsAppOverrides} = await registerOverridesImport;
+  registerGsAppOverrides();
 
-  window.__initialData = data;
+  const {initializeMain} = await initalizeMainImport;
+  initializeMain(config);
 
-  bootApplication(data);
+  const {initializeBundleMetrics} = await initalizeBundleMetricsImport;
+  initializeBundleMetrics();
 }
 
-const bootstrapData = window.__initialData;
-
-// If __initialData is not already set on the window, we are likely running in
-// pure SPA mode, meaning django is not serving our frontend application and we
-// need to make an API request to hydrate the bootstrap data to boot the app.
-if (bootstrapData === undefined) {
-  bootWithHydration();
-} else {
-  bootApplication(bootstrapData);
-}
+app();

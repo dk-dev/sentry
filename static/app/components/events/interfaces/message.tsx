@@ -1,63 +1,84 @@
-import React from 'react';
+import styled from '@emotion/styled';
 
-import EventDataSection from 'app/components/events/eventDataSection';
-import KeyValueList from 'app/components/events/interfaces/keyValueList';
-import Annotated from 'app/components/events/meta/annotated';
-import {getMeta} from 'app/components/events/meta/metaProxy';
-import {t} from 'app/locale';
-import {objectIsEmpty} from 'app/utils';
+import {renderLinksInText} from 'sentry/components/events/interfaces/crashContent/exception/utils';
+import {AnnotatedText} from 'sentry/components/events/meta/annotatedText';
+import {KeyValueTableDataList} from 'sentry/components/tables/keyValueTable';
+import {t} from 'sentry/locale';
+import type {Event} from 'sentry/types/event';
+import {EntryType} from 'sentry/types/event';
+import {isEmptyObject} from 'sentry/utils/object/isEmptyObject';
+import {SectionKey} from 'sentry/views/issueDetails/context';
+import {FoldSection} from 'sentry/views/issueDetails/foldSection';
 
 type Props = {
   data: {
-    formatted: string;
-    params?: Record<string, any> | any[];
+    formatted: string | null;
+    params?: Record<string, any> | any[] | null;
   };
+  event: Event;
 };
 
-const Message = ({data}: Props) => {
-  const renderParams = () => {
-    const params = data?.params;
+function renderParams(params: Props['data']['params'], meta: any) {
+  if (!params || (Array.isArray(params) ? params.length === 0 : isEmptyObject(params))) {
+    return null;
+  }
 
-    if (!params || objectIsEmpty(params)) {
-      return null;
-    }
+  // NB: Always render params, regardless of whether they appear in the
+  // formatted string due to structured logging frameworks, like Serilog. They
+  // only format some parameters into the formatted string, but we want to
+  // display all of them.
 
-    // NB: Always render params, regardless of whether they appear in the
-    // formatted string due to structured logging frameworks, like Serilog. They
-    // only format some parameters into the formatted string, but we want to
-    // display all of them.
+  if (Array.isArray(params)) {
+    const arrayData = params.map((value, i) => {
+      const key = `#${i}`;
+      return {
+        key,
+        value,
+        subject: key,
+        meta: meta?.data?.params?.[i]?.[''],
+      };
+    });
 
-    if (Array.isArray(params)) {
-      const arrayData = params.map((value, i) => {
-        const key = `#${i}`;
-        return {
-          key,
-          value,
-          subject: key,
-        };
-      });
+    return (
+      <KeyValueTableDataList margin data={arrayData} shouldSort={false} isContextData />
+    );
+  }
 
-      return <KeyValueList data={arrayData} isSorted={false} isContextData />;
-    }
-
-    const objectData = Object.entries(params).map(([key, value]) => ({
-      key,
-      value,
-      subject: key,
-      meta: getMeta(params, key),
-    }));
-
-    return <KeyValueList data={objectData} isSorted={false} isContextData />;
-  };
+  const objectData = Object.entries(params).map(([key, value]) => ({
+    key,
+    value,
+    subject: key,
+    meta: meta?.data?.params?.[key]?.[''],
+  }));
 
   return (
-    <EventDataSection type="message" title={t('Message')}>
-      <Annotated object={data} objectKey="formatted">
-        {value => <pre className="plain">{value}</pre>}
-      </Annotated>
-      {renderParams()}
-    </EventDataSection>
+    <KeyValueTableDataList margin data={objectData} shouldSort={false} isContextData />
   );
-};
+}
 
-export default Message;
+export function Message({data, event}: Props) {
+  const entryIndex = event.entries.findIndex(entry => entry.type === EntryType.MESSAGE);
+  const meta = event?._meta?.entries?.[entryIndex] ?? {};
+  const messageData = data.formatted
+    ? renderLinksInText({exceptionText: data.formatted})
+    : null;
+
+  return (
+    <FoldSection title={t('Message')} sectionKey={SectionKey.MESSAGE}>
+      <PlainPre>
+        <AnnotatedText value={messageData} meta={meta?.data?.formatted?.['']} />
+      </PlainPre>
+      {renderParams(data.params, meta)}
+    </FoldSection>
+  );
+}
+
+const PlainPre = styled('pre')`
+  background-color: inherit;
+  padding: 0;
+  border: 0;
+  margin-bottom: 0;
+  white-space: pre-wrap;
+  overflow-x: unset;
+  word-break: break-all;
+`;

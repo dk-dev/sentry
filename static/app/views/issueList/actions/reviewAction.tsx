@@ -1,26 +1,22 @@
-import React from 'react';
-
-import ActionLink from 'app/components/actions/actionLink';
-import {IconIssues} from 'app/icons';
-import {t} from 'app/locale';
+import {ActionLink} from 'sentry/components/actions/actionLink';
+import {IconIssues} from 'sentry/icons';
+import {t} from 'sentry/locale';
+import type {IssueUpdateData} from 'sentry/views/issueList/types';
 
 type Props = {
-  onUpdate: (data?: any) => void;
+  onUpdate: (data: IssueUpdateData) => void;
   disabled?: boolean;
 };
 
-function ReviewAction({disabled, onUpdate}: Props) {
+export function ReviewAction({disabled, onUpdate}: Props) {
   return (
     <ActionLink
       type="button"
       disabled={disabled}
       onAction={() => onUpdate({inbox: false})}
-      title={t('Mark Reviewed')}
       icon={<IconIssues size="xs" />}
     >
       {t('Mark Reviewed')}
     </ActionLink>
   );
 }
-
-export default ReviewAction;

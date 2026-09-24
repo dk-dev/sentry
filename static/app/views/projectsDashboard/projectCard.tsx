@@ -1,256 +1,333 @@
-import React from 'react';
+import {Fragment} from 'react';
 import styled from '@emotion/styled';
+import round from 'lodash/round';
 
-import {loadStatsForProject} from 'app/actionCreators/projects';
-import {Client} from 'app/api';
-import IdBadge from 'app/components/idBadge';
-import Link from 'app/components/links/link';
-import BookmarkStar from 'app/components/projects/bookmarkStar';
-import QuestionTooltip from 'app/components/questionTooltip';
-import {t, tn} from 'app/locale';
-import ProjectsStatsStore from 'app/stores/projectsStatsStore';
-import space from 'app/styles/space';
-import {Organization, Project} from 'app/types';
-import {callIfFunction} from 'app/utils/callIfFunction';
-import {formatAbbreviatedNumber} from 'app/utils/formatters';
-import withApi from 'app/utils/withApi';
-import withOrganization from 'app/utils/withOrganization';
+import {LinkButton} from '@sentry/scraps/button';
+import {InfoTip} from '@sentry/scraps/info';
+import {Grid, Container} from '@sentry/scraps/layout';
+import {Link} from '@sentry/scraps/link';
 
-import Chart from './chart';
-import Deploys from './deploys';
+import {IdBadge} from 'sentry/components/idBadge';
+import {Panel} from 'sentry/components/panels/panel';
+import {Placeholder} from 'sentry/components/placeholder';
+import {BookmarkStar} from 'sentry/components/projects/bookmarkStar';
+import {
+  Score,
+  ScoreCard,
+  ScorePanel,
+  ScoreWrapper,
+  Title,
+  Trend,
+} from 'sentry/components/scoreCard';
+import {IconArrow, IconSettings} from 'sentry/icons';
+import {t} from 'sentry/locale';
+import type {Project} from 'sentry/types/project';
+import {defined} from 'sentry/utils/defined';
+import {formatAbbreviatedNumber} from 'sentry/utils/formatters';
+import {useOrganization} from 'sentry/utils/useOrganization';
+import {
+  CRASH_FREE_DECIMAL_THRESHOLD,
+  displayCrashFreePercent,
+} from 'sentry/views/explore/releases/utils';
+import {
+  getPerformanceBaseUrl,
+  platformToDomainView,
+} from 'sentry/views/performance/utils';
+import {MissingReleasesButtons} from 'sentry/views/projectDetail/missingFeatureButtons/missingReleasesButtons';
 
-type Props = {
-  api: Client;
-  organization: Organization;
-  project: Project;
+import {Deploys} from './deploys';
+import {ProjectChart} from './projectChart';
+import {useProjectStats} from './useProjectStats';
+
+interface ProjectCardProps {
   hasProjectAccess: boolean;
-};
+  project: Project;
+}
 
-class ProjectCard extends React.Component<Props> {
-  componentDidMount() {
-    const {organization, project, api} = this.props;
+export function ProjectCard({
+  project: simpleProject,
+  hasProjectAccess,
+}: ProjectCardProps) {
+  const organization = useOrganization();
+  const hasPerformance = organization.features.includes('performance-view');
+  const {getOne: getProjectStats} = useProjectStats({
+    organization,
+    hasPerformance,
+  });
 
-    // fetch project stats
-    loadStatsForProject(api, project.id, {
-      orgId: organization.slug,
-      projectId: project.id,
-      query: {
-        transactionStats: this.hasPerformance ? '1' : undefined,
-      },
-    });
-  }
+  const {stats, transactionStats, sessionStats, latestDeploys} =
+    getProjectStats(simpleProject);
+  const {slug} = simpleProject;
+  const {hasHealthData, currentCrashFreeRate, previousCrashFreeRate} = sessionStats || {};
 
-  get hasPerformance() {
-    return this.props.organization.features.includes('performance-view');
-  }
+  const crashFreeTrend =
+    defined(currentCrashFreeRate) && defined(previousCrashFreeRate)
+      ? round(
+          currentCrashFreeRate - previousCrashFreeRate,
+          currentCrashFreeRate > CRASH_FREE_DECIMAL_THRESHOLD ? 3 : 0
+        )
+      : undefined;
 
-  render() {
-    const {organization, project, hasProjectAccess} = this.props;
-    const {stats, slug, transactionStats} = project;
-    const totalErrors =
-      stats !== undefined
-        ? formatAbbreviatedNumber(stats.reduce((sum, [_, value]) => sum + value, 0))
-        : '0';
+  const missingFeatureCard = (
+    <ScoreCard
+      title={t('Crash Free Sessions')}
+      score={
+        <MissingReleasesButtons
+          organization={organization}
+          health
+          platform={simpleProject.platform}
+        />
+      }
+    />
+  );
 
-    const totalTransactions =
-      transactionStats !== undefined
-        ? formatAbbreviatedNumber(
-            transactionStats.reduce((sum, [_, value]) => sum + value, 0)
-          )
-        : '0';
-    const zeroTransactions = totalTransactions === '0';
-    const hasFirstEvent = Boolean(project.firstEvent || project.firstTransactionEvent);
-
-    return (
-      <div data-test-id={slug}>
-        {stats ? (
-          <StyledProjectCard>
-            <CardHeader>
-              <HeaderRow>
-                <StyledIdBadge
-                  project={project}
-                  avatarSize={18}
-                  hideOverflow
-                  disableLink={!hasProjectAccess}
-                />
-                <BookmarkStar organization={organization} project={project} />
-              </HeaderRow>
-              <SummaryLinks>
-                <Link
-                  data-test-id="project-errors"
-                  to={`/organizations/${organization.slug}/issues/?project=${project.id}`}
-                >
-                  {tn('%s error', '%s errors', totalErrors)}
-                </Link>
-                {this.hasPerformance && (
-                  <React.Fragment>
-                    <em>|</em>
-                    <TransactionsLink
-                      data-test-id="project-transactions"
-                      to={`/organizations/${organization.slug}/performance/?project=${project.id}`}
-                    >
-                      {tn('%s transaction', '%s transactions', totalTransactions)}
-
-                      {zeroTransactions && (
-                        <QuestionTooltip
-                          title={t(
-                            'Click here to learn more about performance monitoring'
-                          )}
-                          position="top"
-                          size="xs"
-                        />
-                      )}
-                    </TransactionsLink>
-                  </React.Fragment>
-                )}
-              </SummaryLinks>
-            </CardHeader>
-            <ChartContainer>
-              <Chart
-                firstEvent={hasFirstEvent}
-                stats={stats}
-                transactionStats={transactionStats}
-              />
-            </ChartContainer>
-            <Deploys project={project} />
-          </StyledProjectCard>
+  const trendCard =
+    defined(currentCrashFreeRate) && defined(crashFreeTrend) ? (
+      <div>
+        {crashFreeTrend >= 0 ? (
+          <IconArrow size="xs" />
         ) : (
-          <LoadingCard />
+          <IconArrow direction="down" size="xs" />
         )}
+        {`${formatAbbreviatedNumber(Math.abs(crashFreeTrend))}\u0025`}
       </div>
-    );
-  }
+    ) : undefined;
+
+  const totalErrors = stats?.reduce((sum, [_, value]) => sum + value, 0) ?? 0;
+  const totalTransactions =
+    transactionStats?.reduce((sum, [_, value]) => sum + value, 0) ?? 0;
+
+  const hasFirstEvent = !!simpleProject.firstEvent || simpleProject.firstTransactionEvent;
+  const domainView = simpleProject
+    ? platformToDomainView([simpleProject], [parseInt(simpleProject.id, 10)])
+    : 'backend';
+
+  return (
+    <CardPanel data-test-id={slug}>
+      <Container height="32px">
+        <HeaderRow>
+          <AlignedIdBadge
+            project={simpleProject}
+            avatarSize={32}
+            hideOverflow
+            disableLink={!hasProjectAccess}
+          />
+          <Grid flow="column" align="center" gap="xs">
+            <SettingsButton
+              variant="transparent"
+              size="zero"
+              icon={<IconSettings variant="muted" />}
+              tooltipProps={{title: t('Settings')}}
+              aria-label={t('Settings')}
+              to={`/settings/${organization.slug}/projects/${slug}/`}
+            />
+            <BookmarkStar organization={organization} project={simpleProject} />
+          </Grid>
+        </HeaderRow>
+        <SummaryLinks data-test-id="summary-links">
+          {stats ? (
+            <Fragment>
+              <Link
+                data-test-id="project-errors"
+                to={`/organizations/${organization.slug}/issues/?project=${simpleProject.id}`}
+              >
+                {t('Errors: %s', formatAbbreviatedNumber(totalErrors))}
+              </Link>
+              {hasPerformance && (
+                <TransactionsLink
+                  data-test-id="project-transactions"
+                  to={`${getPerformanceBaseUrl(organization.slug, domainView)}/?project=${simpleProject.id}`}
+                >
+                  {t('Transactions: %s', formatAbbreviatedNumber(totalTransactions))}
+                  {totalTransactions === 0 && (
+                    <InfoTip
+                      title={t('Click here to learn more about performance monitoring')}
+                      position="top"
+                      size="xs"
+                    />
+                  )}
+                </TransactionsLink>
+              )}
+            </Fragment>
+          ) : (
+            <SummaryLinkPlaceholder />
+          )}
+        </SummaryLinks>
+      </Container>
+      <ChartContainer data-test-id="chart-container">
+        {stats ? (
+          <ProjectChart
+            firstEvent={hasFirstEvent}
+            stats={stats}
+            transactionStats={transactionStats}
+            project={simpleProject}
+          />
+        ) : (
+          <Placeholder height="150px" />
+        )}
+      </ChartContainer>
+      <CardFooter>
+        <ScoreCardWrapper>
+          {stats ? (
+            hasHealthData ? (
+              <ScoreCard
+                title={t('Crash Free Sessions')}
+                score={
+                  defined(currentCrashFreeRate)
+                    ? displayCrashFreePercent(currentCrashFreeRate)
+                    : '\u2014'
+                }
+                trend={trendCard}
+                trendStatus={
+                  crashFreeTrend ? (crashFreeTrend > 0 ? 'good' : 'bad') : undefined
+                }
+              />
+            ) : (
+              missingFeatureCard
+            )
+          ) : (
+            <Fragment>
+              <SubHeading>{t('Crash Free Sessions')}</SubHeading>
+              <FooterPlaceholder />
+            </Fragment>
+          )}
+        </ScoreCardWrapper>
+        <div>
+          <SubHeading>{t('Latest Deploys')}</SubHeading>
+          {stats ? (
+            <Deploys project={simpleProject} latestDeploys={latestDeploys} />
+          ) : (
+            <FooterPlaceholder />
+          )}
+        </div>
+      </CardFooter>
+    </CardPanel>
+  );
 }
 
-type ContainerProps = {
-  api: Client;
-  project: Project;
-  organization: Organization;
-  hasProjectAccess: boolean;
-};
+const CardPanel = styled(Panel)`
+  display: flex;
+  flex-direction: column;
+  gap: ${p => p.theme.space.xl};
+  height: 100%;
+  padding: ${p => p.theme.space.xl};
+  margin: 0;
+`;
 
-type ContainerState = {
-  projectDetails: Project | null;
-};
-
-class ProjectCardContainer extends React.Component<ContainerProps, ContainerState> {
-  state = this.getInitialState();
-
-  getInitialState(): ContainerState {
-    const {project} = this.props;
-    const initialState = ProjectsStatsStore.getInitialState() || {};
-    return {
-      projectDetails: initialState[project.slug] || null,
-    };
-  }
-
-  componentWillUnmount() {
-    this.listeners.forEach(callIfFunction);
-  }
-
-  listeners = [
-    ProjectsStatsStore.listen(itemsBySlug => {
-      this.onProjectStoreUpdate(itemsBySlug);
-    }, undefined),
-  ];
-
-  onProjectStoreUpdate(itemsBySlug: typeof ProjectsStatsStore['itemsBySlug']) {
-    const {project} = this.props;
-
-    // Don't update state if we already have stats
-    if (!itemsBySlug[project.slug]) {
-      return;
-    }
-    if (itemsBySlug[project.slug] === this.state.projectDetails) {
-      return;
-    }
-
-    this.setState({
-      projectDetails: itemsBySlug[project.slug],
-    });
-  }
-
-  render() {
-    const {project, ...props} = this.props;
-    const {projectDetails} = this.state;
-    return (
-      <ProjectCard
-        {...props}
-        project={{
-          ...project,
-          ...(projectDetails || {}),
-        }}
-      />
-    );
-  }
-}
+const CardFooter = styled('div')`
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: ${p => p.theme.space.md};
+`;
 
 const ChartContainer = styled('div')`
   position: relative;
-  background: ${p => p.theme.backgroundSecondary};
-`;
-
-const CardHeader = styled('div')`
-  margin: ${space(1.5)} ${space(2)};
+  margin: 0 -${p => p.theme.space.xl};
+  background: ${p => p.theme.tokens.background.secondary};
 `;
 
 const HeaderRow = styled('div')`
-  display: grid;
-  grid-template-columns: 1fr auto;
+  display: flex;
   justify-content: space-between;
-  align-items: center;
+  gap: 0 ${p => p.theme.space.xs};
+  color: ${p => p.theme.tokens.content.primary};
+
+  /* @TODO(jonasbadalic) This should be a title component and not a div */
+  font-size: 1rem;
+  font-weight: ${p => p.theme.font.weight.sans.medium};
+  line-height: 1.2;
 `;
 
-const StyledProjectCard = styled('div')`
-  background-color: ${p => p.theme.background};
-  border: 1px solid ${p => p.theme.border};
-  border-radius: ${p => p.theme.borderRadius};
-  box-shadow: ${p => p.theme.dropShadowLight};
-`;
-
-const LoadingCard = styled('div')`
-  border: 1px solid transparent;
-  background-color: ${p => p.theme.backgroundSecondary};
-  height: 334px;
-`;
-
-const StyledIdBadge = styled(IdBadge)`
+const AlignedIdBadge = styled(IdBadge)`
   overflow: hidden;
   white-space: nowrap;
   flex-shrink: 1;
+  & div {
+    align-items: flex-start;
+  }
+
+  & span {
+    padding: 0;
+    position: relative;
+    top: -1px;
+  }
 `;
 
 const SummaryLinks = styled('div')`
-  display: flex;
-  align-items: center;
+  display: inline-flex;
+  gap: ${p => p.theme.space.md};
+  position: relative;
+  top: -${p => p.theme.space.xl};
+  font-weight: ${p => p.theme.font.weight.sans.regular};
 
-  color: ${p => p.theme.subText};
-  font-size: ${p => p.theme.fontSizeMedium};
+  color: ${p => p.theme.tokens.content.secondary};
+  font-size: ${p => p.theme.font.size.sm};
 
   /* Need to offset for the project icon and margin */
-  margin-left: 26px;
+  margin-left: 40px;
 
-  a {
-    color: ${p => p.theme.formText};
-    :hover {
-      color: ${p => p.theme.subText};
-    }
+  a:not(:hover) {
+    color: ${p => p.theme.tokens.content.secondary};
   }
-  em {
-    font-style: normal;
-    margin: 0 ${space(0.5)};
+
+  & > *:not(:last-child)::after {
+    content: '|';
+    position: relative;
+    left: ${p => p.theme.space.xs};
+    color: ${p => p.theme.tokens.content.secondary};
   }
+`;
+
+const SummaryLinkPlaceholder = styled(Placeholder)`
+  height: 15px;
+  width: 180px;
+  margin-top: ${p => p.theme.space['2xs']};
+  margin-bottom: ${p => p.theme.space.xs};
 `;
 
 const TransactionsLink = styled(Link)`
   display: flex;
+  gap: ${p => p.theme.space.xs};
   align-items: center;
-  justify-content: space-between;
+`;
 
-  > span {
-    margin-left: ${space(0.5)};
+const SettingsButton = styled(LinkButton)`
+  border-radius: 50%;
+`;
+
+const ScoreCardWrapper = styled('div')`
+  ${ScorePanel} {
+    min-height: auto;
+    border: none;
+    padding: 0;
+    margin: 0;
+  }
+  ${Title} {
+    font-size: ${p => p.theme.font.size.md};
+    color: ${p => p.theme.tokens.content.secondary};
+    margin-bottom: ${p => p.theme.space.xs};
+  }
+  ${ScoreWrapper} {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+  ${Score} {
+    font-size: 28px;
+  }
+  ${Trend} {
+    margin-left: 0;
+    margin-top: ${p => p.theme.space.xs};
   }
 `;
 
-export {ProjectCard};
-export default withOrganization(withApi(ProjectCardContainer));
+const SubHeading = styled('div')`
+  color: ${p => p.theme.tokens.content.secondary};
+  font-weight: ${p => p.theme.font.weight.sans.medium};
+  margin-bottom: ${p => p.theme.space.xs};
+`;
+
+const FooterPlaceholder = styled(Placeholder)`
+  height: 40px;
+  width: auto;
+  margin-right: ${p => p.theme.space.xl};
+`;

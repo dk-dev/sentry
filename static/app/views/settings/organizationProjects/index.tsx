@@ -1,157 +1,137 @@
-import React from 'react';
-import {RouteComponentProps} from 'react-router';
+import {Fragment, useMemo} from 'react';
 import styled from '@emotion/styled';
-import {Location} from 'history';
+import {useQuery} from '@tanstack/react-query';
+import debounce from 'lodash/debounce';
 
-import Button from 'app/components/button';
-import LoadingIndicator from 'app/components/loadingIndicator';
-import Pagination from 'app/components/pagination';
-import {Panel, PanelBody, PanelHeader, PanelItem} from 'app/components/panels';
-import Placeholder from 'app/components/placeholder';
-import {IconAdd} from 'app/icons';
-import {t} from 'app/locale';
-import space from 'app/styles/space';
-import {Organization, Project} from 'app/types';
-import {sortProjects} from 'app/utils';
-import {decodeScalar} from 'app/utils/queryString';
-import routeTitleGen from 'app/utils/routeTitle';
-import withOrganization from 'app/utils/withOrganization';
-import AsyncView from 'app/views/asyncView';
-import EmptyMessage from 'app/views/settings/components/emptyMessage';
-import SettingsPageHeader from 'app/views/settings/components/settingsPageHeader';
-import ProjectListItem from 'app/views/settings/components/settingsProjectItem';
+import {Container, Flex} from '@sentry/scraps/layout';
+import {Pagination} from '@sentry/scraps/pagination';
 
-import ProjectStatsGraph from './projectStatsGraph';
+import {EmptyMessage} from 'sentry/components/emptyMessage';
+import {LoadingError} from 'sentry/components/loadingError';
+import {LoadingIndicator} from 'sentry/components/loadingIndicator';
+import {Panel} from 'sentry/components/panels/panel';
+import {PanelBody} from 'sentry/components/panels/panelBody';
+import {PanelHeader} from 'sentry/components/panels/panelHeader';
+import {PanelItem} from 'sentry/components/panels/panelItem';
+import {SearchBar} from 'sentry/components/searchBar';
+import {SentryDocumentTitle} from 'sentry/components/sentryDocumentTitle';
+import {DEFAULT_DEBOUNCE_DURATION} from 'sentry/constants';
+import {t} from 'sentry/locale';
+import type {Project, ProjectStats} from 'sentry/types/project';
+import {apiOptions, selectJsonWithHeaders} from 'sentry/utils/api/apiOptions';
+import {sortProjects} from 'sentry/utils/project/sortProjects';
+import {decodeScalar} from 'sentry/utils/queryString';
+import {routeTitleGen} from 'sentry/utils/routeTitle';
+import {useLocation} from 'sentry/utils/useLocation';
+import {useNavigate} from 'sentry/utils/useNavigate';
+import {useOrganization} from 'sentry/utils/useOrganization';
+import {SettingsPageHeader} from 'sentry/views/settings/components/settingsPageHeader';
+import {ProjectItem} from 'sentry/views/settings/components/settingsProjectItem';
+import {CreateProjectButton} from 'sentry/views/settings/organizationProjects/createProjectButton';
+
+import {ProjectStatsGraph} from './projectStatsGraph';
 
 const ITEMS_PER_PAGE = 50;
+type ProjectListItem = Project & {stats?: ProjectStats};
 
-type Props = {
-  organization: Organization;
-  location: Location;
-} & RouteComponentProps<{orgId: string}, {}>;
+function OrganizationProjects() {
+  const organization = useOrganization();
+  const navigate = useNavigate();
+  const location = useLocation();
+  const query = decodeScalar(location.query.query, '');
 
-type ProjectStats = Record<string, Required<Project['stats']>>;
-
-type State = AsyncView['state'] & {
-  projectList: Project[] | null;
-  projectListPageLinks: string | null;
-  projectStats: ProjectStats | null;
-};
-
-class OrganizationProjects extends AsyncView<Props, State> {
-  getEndpoints(): ReturnType<AsyncView['getEndpoints']> {
-    const {orgId} = this.props.params;
-    const {location} = this.props;
-    const query = decodeScalar(location.query.query);
-    return [
-      [
-        'projectList',
-        `/organizations/${orgId}/projects/`,
-        {
-          query: {
-            query,
-            per_page: ITEMS_PER_PAGE,
-          },
+  const {
+    data: projectListResponse,
+    isPending,
+    isError,
+  } = useQuery({
+    ...apiOptions.as<ProjectListItem[]>()(
+      '/organizations/$organizationIdOrSlug/projects/',
+      {
+        path: {organizationIdOrSlug: organization.slug},
+        query: {
+          ...location.query,
+          query,
+          per_page: ITEMS_PER_PAGE,
+          statsPeriod: '24h',
+          collapse: ['latestDeploys', 'unusedFeatures'],
         },
-      ],
-      [
-        'projectStats',
-        `/organizations/${orgId}/stats/`,
-        {
-          query: {
-            since: new Date().getTime() / 1000 - 3600 * 24,
-            stat: 'generated',
-            group: 'project',
-            per_page: ITEMS_PER_PAGE,
-          },
-        },
-      ],
-    ];
-  }
+        staleTime: 0,
+      }
+    ),
+    select: selectJsonWithHeaders,
+  });
 
-  getTitle(): string {
-    const {organization} = this.props;
-    return routeTitleGen(t('Projects'), organization.slug, false);
-  }
+  const projectList = projectListResponse?.json;
+  const projectListPageLinks = projectListResponse?.headers.Link;
+  const action = <CreateProjectButton />;
 
-  renderLoading(): React.ReactNode {
-    return this.renderBody();
-  }
+  const debouncedSearch = useMemo(
+    () =>
+      debounce(
+        (searchQuery: string) =>
+          navigate(
+            {
+              query: {...location.query, query: searchQuery, cursor: undefined},
+            },
+            {replace: true}
+          ),
+        DEFAULT_DEBOUNCE_DURATION
+      ),
+    [location.query, navigate]
+  );
 
-  renderBody(): React.ReactNode {
-    const {projectList, projectListPageLinks, projectStats} = this.state;
-    const {organization} = this.props;
-    const canCreateProjects = new Set(organization.access).has('project:admin');
-
-    const action = (
-      <Button
-        priority="primary"
-        size="small"
-        disabled={!canCreateProjects}
-        title={
-          !canCreateProjects
-            ? t('You do not have permission to create projects')
-            : undefined
-        }
-        to={`/organizations/${organization.slug}/projects/new/`}
-        icon={<IconAdd size="xs" isCircled />}
-      >
-        {t('Create Project')}
-      </Button>
-    );
-
-    return (
-      <React.Fragment>
-        <SettingsPageHeader title="Projects" action={action} />
-        <SearchWrapper>
-          {this.renderSearchInput({
-            updateRoute: true,
-            placeholder: t('Search Projects'),
-            className: 'search',
-          })}
-        </SearchWrapper>
-        <Panel>
-          <PanelHeader>{t('Projects')}</PanelHeader>
-          <PanelBody>
-            {projectList ? (
-              sortProjects(projectList).map(project => (
-                <GridPanelItem key={project.id}>
-                  <ProjectListItemWrapper>
-                    <ProjectListItem project={project} organization={organization} />
-                  </ProjectListItemWrapper>
-                  <ProjectStatsGraphWrapper>
-                    {projectStats ? (
-                      <ProjectStatsGraph
-                        key={project.id}
-                        project={project}
-                        stats={projectStats[project.id]}
-                      />
-                    ) : (
-                      <Placeholder height="25px" />
-                    )}
-                  </ProjectStatsGraphWrapper>
-                </GridPanelItem>
-              ))
-            ) : (
-              <LoadingIndicator />
+  return (
+    <Fragment>
+      <SentryDocumentTitle
+        title={routeTitleGen(t('Projects'), organization.slug, false)}
+      />
+      <SettingsPageHeader title="Projects" />
+      <SearchWrapper>
+        <Flex align="center" gap="md">
+          <Container flex={1}>
+            {containerProps => (
+              <SearchBar
+                {...containerProps}
+                placeholder={t('Search Projects')}
+                onChange={debouncedSearch}
+                query={query}
+              />
             )}
-            {projectList && projectList.length === 0 && (
-              <EmptyMessage>{t('No projects found.')}</EmptyMessage>
-            )}
-          </PanelBody>
-        </Panel>
-        {projectListPageLinks && (
-          <Pagination pageLinks={projectListPageLinks} {...this.props} />
-        )}
-      </React.Fragment>
-    );
-  }
+          </Container>
+          {action}
+        </Flex>
+      </SearchWrapper>
+      <Panel>
+        <PanelHeader>{t('Projects')}</PanelHeader>
+        <PanelBody>
+          {isPending && <LoadingIndicator />}
+          {isError && <LoadingError />}
+          {projectList &&
+            sortProjects(projectList).map(project => (
+              <GridPanelItem key={project.id}>
+                <ProjectListItemWrapper>
+                  <ProjectItem project={project} organization={organization} />
+                </ProjectListItemWrapper>
+                <ProjectStatsGraphWrapper>
+                  <ProjectStatsGraph stats={project.stats} />
+                </ProjectStatsGraphWrapper>
+              </GridPanelItem>
+            ))}
+          {projectList?.length === 0 && (
+            <EmptyMessage>{t('No projects found.')}</EmptyMessage>
+          )}
+        </PanelBody>
+      </Panel>
+      {projectListPageLinks && <Pagination pageLinks={projectListPageLinks} />}
+    </Fragment>
+  );
 }
 
-export default withOrganization(OrganizationProjects);
+export default OrganizationProjects;
 
 const SearchWrapper = styled('div')`
-  margin-bottom: ${space(2)};
+  margin-bottom: ${p => p.theme.space.xl};
 `;
 
 const GridPanelItem = styled(PanelItem)`
@@ -161,12 +141,12 @@ const GridPanelItem = styled(PanelItem)`
 `;
 
 const ProjectListItemWrapper = styled('div')`
-  padding: ${space(2)};
+  padding: ${p => p.theme.space.xl};
   flex: 1;
 `;
 
 const ProjectStatsGraphWrapper = styled('div')`
-  padding: ${space(2)};
+  padding: ${p => p.theme.space.xl};
   width: 25%;
-  margin-left: ${space(2)};
+  margin-left: ${p => p.theme.space.xl};
 `;

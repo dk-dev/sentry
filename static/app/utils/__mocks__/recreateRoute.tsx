@@ -1,3 +1,1 @@
-const mockFn = jest.fn(name => name);
-
-export default mockFn;
+export const recreateRoute = jest.fn((name: any) => name);

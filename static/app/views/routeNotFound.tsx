@@ -1,44 +1,46 @@
-import React from 'react';
-import DocumentTitle from 'react-document-title';
+import {useLayoutEffect} from 'react';
 import * as Sentry from '@sentry/react';
-import {Location} from 'history';
 
-import NotFound from 'app/components/errors/notFound';
-import Footer from 'app/components/footer';
-import Sidebar from 'app/components/sidebar';
+import {Stack} from '@sentry/scraps/layout';
 
-type Props = {
-  location: Location;
-};
+import {NotFound} from 'sentry/components/errors/notFound';
+import {SentryDocumentTitle} from 'sentry/components/sentryDocumentTitle';
+import {t} from 'sentry/locale';
+import {useLocation} from 'sentry/utils/useLocation';
+import {useNavigate} from 'sentry/utils/useNavigate';
+import {useLastKnownRoute} from 'sentry/views/lastKnownRouteContextProvider';
 
-class RouteNotFound extends React.Component<Props> {
-  componentDidMount() {
+export function RouteNotFound() {
+  const navigate = useNavigate();
+  const {pathname, search, hash} = useLocation();
+  const lastKnownRoute = useLastKnownRoute();
+  const isMissingSlash = pathname[pathname.length - 1] !== '/';
+
+  useLayoutEffect(() => {
+    // Attempt to fix trailing slashes first
+    if (isMissingSlash) {
+      navigate(`${pathname}/${search}${hash}`, {replace: true});
+      return;
+    }
+
     Sentry.withScope(scope => {
       scope.setFingerprint(['RouteNotFound']);
+      scope.setTag('isMissingSlash', isMissingSlash);
+      scope.setTag('pathname', pathname);
+      scope.setTag('lastKnownRoute', lastKnownRoute);
       Sentry.captureException(new Error('Route not found'));
     });
+  }, [pathname, search, hash, isMissingSlash, lastKnownRoute, navigate]);
+
+  if (isMissingSlash) {
+    return null;
   }
 
-  getTitle = () => 'Page Not Found';
-
-  render() {
-    // TODO(dcramer): show additional resource links
-    return (
-      <DocumentTitle title={this.getTitle()}>
-        <div className="app">
-          <Sidebar location={this.props.location} />
-          <div className="container">
-            <div className="content">
-              <section className="body">
-                <NotFound />
-              </section>
-            </div>
-          </div>
-          <Footer />
-        </div>
-      </DocumentTitle>
-    );
-  }
+  return (
+    <SentryDocumentTitle title={t('Page Not Found')}>
+      <Stack flex={1} padding="2xl 3xl">
+        <NotFound />
+      </Stack>
+    </SentryDocumentTitle>
+  );
 }
-
-export default RouteNotFound;

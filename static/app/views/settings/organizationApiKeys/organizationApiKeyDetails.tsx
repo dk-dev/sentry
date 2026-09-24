@@ -1,119 +1,181 @@
-import React from 'react';
-import {browserHistory, RouteComponentProps} from 'react-router';
+import {useMutation, useQuery} from '@tanstack/react-query';
+import {z} from 'zod';
 
-import {addErrorMessage, addSuccessMessage} from 'app/actionCreators/indicator';
-import {Panel, PanelBody, PanelHeader} from 'app/components/panels';
-import {API_ACCESS_SCOPES} from 'app/constants';
-import {t} from 'app/locale';
-import {Choices, Organization} from 'app/types';
-import recreateRoute from 'app/utils/recreateRoute';
-import routeTitleGen from 'app/utils/routeTitle';
-import withOrganization from 'app/utils/withOrganization';
-import AsyncView from 'app/views/asyncView';
-import ApiForm from 'app/views/settings/components/forms/apiForm';
-import MultipleCheckbox from 'app/views/settings/components/forms/controls/multipleCheckbox';
-import FormField from 'app/views/settings/components/forms/formField';
-import TextareaField from 'app/views/settings/components/forms/textareaField';
-import TextField from 'app/views/settings/components/forms/textField';
-import SettingsPageHeader from 'app/views/settings/components/settingsPageHeader';
+import {Button} from '@sentry/scraps/button';
+import {defaultFormOptions, useScrapsForm} from '@sentry/scraps/form';
+import {Container, Flex} from '@sentry/scraps/layout';
 
-import {DeprecatedApiKey} from './types';
+import {addErrorMessage, addSuccessMessage} from 'sentry/actionCreators/indicator';
+import {MultipleCheckbox} from 'sentry/components/forms/controls/multipleCheckbox';
+import {LoadingError} from 'sentry/components/loadingError';
+import {LoadingIndicator} from 'sentry/components/loadingIndicator';
+import {SentryDocumentTitle} from 'sentry/components/sentryDocumentTitle';
+import {API_ACCESS_SCOPES} from 'sentry/constants';
+import {t} from 'sentry/locale';
+import {apiOptions} from 'sentry/utils/api/apiOptions';
+import {getApiUrl} from 'sentry/utils/api/getApiUrl';
+import {fetchMutation} from 'sentry/utils/queryClient';
+import {useNavigate} from 'sentry/utils/useNavigate';
+import {useOrganization} from 'sentry/utils/useOrganization';
+import {useParams} from 'sentry/utils/useParams';
+import {SettingsPageHeader} from 'sentry/views/settings/components/settingsPageHeader';
 
-const API_CHOICES: Choices = API_ACCESS_SCOPES.map(s => [s, s]);
+import type {DeprecatedApiKey} from './types';
 
 type RouteParams = {
-  orgId: string;
   apiKey: string;
 };
 
-type Props = RouteComponentProps<RouteParams, {}> & {
-  organization: Organization;
-};
+const scopeListSchema = z.array(z.string());
+const apiKeySchema = z.object({
+  label: z.string(),
+  key: z.string(),
+  scope_list: scopeListSchema.min(1, t('At least one scope is required')),
+  allowed_origins: z.string(),
+});
 
-type State = AsyncView['state'] & {
-  apiKey: DeprecatedApiKey;
-};
+type ApiKeyFormValues = z.infer<typeof apiKeySchema>;
 
-class OrganizationApiKeyDetails extends AsyncView<Props, State> {
-  getEndpoints(): ReturnType<AsyncView['getEndpoints']> {
-    return [
-      [
-        'apiKey',
-        `/organizations/${this.props.params.orgId}/api-keys/${this.props.params.apiKey}/`,
-      ],
-    ];
+function OrganizationApiKeyDetails() {
+  const organization = useOrganization();
+  const params = useParams<RouteParams>();
+  const {
+    data: apiKey,
+    isPending,
+    isError,
+    refetch,
+  } = useQuery(
+    apiOptions.as<DeprecatedApiKey>()(
+      '/organizations/$organizationIdOrSlug/api-keys/$apiKeyId/',
+      {
+        path: {organizationIdOrSlug: organization.slug, apiKeyId: params.apiKey},
+        staleTime: 0,
+      }
+    )
+  );
+
+  if (isError) {
+    return <LoadingError onRetry={refetch} />;
   }
 
-  getTitle() {
-    return routeTitleGen(t('Edit API Key'), this.props.organization.slug, false);
+  if (isPending) {
+    return <LoadingIndicator />;
   }
 
-  handleSubmitSuccess = () => {
-    addSuccessMessage('Saved changes');
-
-    // Go back to API list
-    browserHistory.push(
-      recreateRoute('', {
-        stepBack: -1,
-        routes: this.props.routes,
-        params: this.props.params,
-      })
-    );
-  };
-
-  handleSubmitError = () => {
-    addErrorMessage('Unable to save changes. Please try again.');
-  };
-
-  renderBody() {
-    return (
-      <div>
-        <SettingsPageHeader title={t('Edit API Key')} />
-
-        <Panel>
-          <PanelHeader>{t('API Key')}</PanelHeader>
-          <ApiForm
-            apiMethod="PUT"
-            apiEndpoint={`/organizations/${this.props.params.orgId}/api-keys/${this.props.params.apiKey}/`}
-            initialData={this.state.apiKey}
-            onSubmitSuccess={this.handleSubmitSuccess}
-            onSubmitError={this.handleSubmitError}
-            onCancel={() =>
-              browserHistory.push(
-                recreateRoute('', {
-                  stepBack: -1,
-                  routes: this.props.routes,
-                  params: this.props.params,
-                })
-              )
-            }
-          >
-            <PanelBody>
-              <TextField label={t('Label')} name="label" />
-              <TextField label={t('API Key')} name="key" disabled />
-
-              <FormField name="scope_list" label={t('Scopes')} inline={false} required>
-                {({value, onChange}) => (
-                  <MultipleCheckbox
-                    value={value}
-                    onChange={onChange}
-                    choices={API_CHOICES}
-                  />
-                )}
-              </FormField>
-
-              <TextareaField
-                label={t('Allowed Domains')}
-                name="allowed_origins"
-                placeholder="e.g. example.com or https://example.com"
-                help="Separate multiple entries with a newline"
-              />
-            </PanelBody>
-          </ApiForm>
-        </Panel>
-      </div>
-    );
-  }
+  return (
+    <div>
+      <SentryDocumentTitle title={t('Edit API Key')} orgSlug={organization.slug} />
+      <SettingsPageHeader title={t('Edit API Key')} />
+      <OrganizationApiKeyForm apiKey={apiKey} organizationSlug={organization.slug} />
+    </div>
+  );
 }
 
-export default withOrganization(OrganizationApiKeyDetails);
+function OrganizationApiKeyForm({
+  apiKey,
+  organizationSlug,
+}: {
+  apiKey: DeprecatedApiKey;
+  organizationSlug: string;
+}) {
+  const navigate = useNavigate();
+  const handleCancel = () => navigate(`/settings/${organizationSlug}/api-keys/`);
+  const mutation = useMutation({
+    mutationFn: (data: ApiKeyFormValues) =>
+      fetchMutation<DeprecatedApiKey>({
+        url: getApiUrl('/organizations/$organizationIdOrSlug/api-keys/$apiKeyId/', {
+          path: {organizationIdOrSlug: organizationSlug, apiKeyId: apiKey.id},
+        }),
+        method: 'PUT',
+        data,
+      }),
+    onSuccess: () => {
+      addSuccessMessage('Saved changes');
+      handleCancel();
+    },
+    onError: () => {
+      addErrorMessage('Unable to save changes. Please try again.');
+    },
+  });
+  const defaultValues: ApiKeyFormValues = {
+    label: apiKey.label,
+    key: apiKey.key,
+    scope_list: apiKey.scope_list,
+    allowed_origins: apiKey.allowed_origins,
+  };
+  const form = useScrapsForm({
+    ...defaultFormOptions,
+    defaultValues,
+    validators: {onDynamic: apiKeySchema},
+    onSubmit: ({value}) => mutation.mutateAsync(value).catch(() => {}),
+  });
+
+  return (
+    <form.AppForm form={form}>
+      <form.FieldGroup title={t('API Key')}>
+        <form.AppField name="label">
+          {field => (
+            <field.Layout.Row label={t('Label')}>
+              <field.Input value={field.state.value} onChange={field.handleChange} />
+            </field.Layout.Row>
+          )}
+        </form.AppField>
+        <form.AppField name="key">
+          {field => (
+            <field.Layout.Row label={t('API Key')}>
+              <field.Input
+                value={field.state.value}
+                onChange={field.handleChange}
+                disabled
+              />
+            </field.Layout.Row>
+          )}
+        </form.AppField>
+        <form.AppField name="scope_list">
+          {field => (
+            <field.Layout.Stack label={t('Scopes')} required>
+              <Flex align="center" gap="sm">
+                <Container flexGrow={1}>
+                  <MultipleCheckbox
+                    value={field.state.value}
+                    onChange={field.handleChange}
+                    name={field.name}
+                  >
+                    {API_ACCESS_SCOPES.map(scope => (
+                      <MultipleCheckbox.Item value={scope} key={scope}>
+                        {scope}
+                      </MultipleCheckbox.Item>
+                    ))}
+                  </MultipleCheckbox>
+                </Container>
+                <Flex flexShrink={0}>
+                  <field.Meta.Status />
+                </Flex>
+              </Flex>
+            </field.Layout.Stack>
+          )}
+        </form.AppField>
+        <form.AppField name="allowed_origins">
+          {field => (
+            <field.Layout.Row
+              label={t('Allowed Domains')}
+              hintText={t('Separate multiple entries with a newline')}
+            >
+              <field.TextArea
+                value={field.state.value}
+                onChange={field.handleChange}
+                placeholder={t('e.g. example.com or https://example.com')}
+              />
+            </field.Layout.Row>
+          )}
+        </form.AppField>
+        <Flex gap="sm" justify="end">
+          <Button onClick={handleCancel}>{t('Cancel')}</Button>
+          <form.SubmitButton>{t('Save Changes')}</form.SubmitButton>
+        </Flex>
+      </form.FieldGroup>
+    </form.AppForm>
+  );
+}
+
+export default OrganizationApiKeyDetails;

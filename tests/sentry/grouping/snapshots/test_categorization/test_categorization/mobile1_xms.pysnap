@@ -1,7 +1,5 @@
 ---
-created: '2021-03-29T22:02:37.963676Z'
-creator: sentry
-source: tests/sentry/grouping/test_categorization.py
+source: tests/sentry/grouping/test_categorization.py::test_categorization
 ---
 
 
@@ -11,9 +9,9 @@ SQLiteException:duplicate column name: a (code 1): , while compiling: create tab
                     java.lang.reflect.Method  invoke category=indirection
                     java.lang.reflect.Method  invoke category=indirection
                   android.app.ActivityThread  main category=threadbase
-                           android.os.Looper  loop category=system
-                          android.os.Handler  dispatchMessage category=internals
-                          android.os.Handler  handleCallback category=internals
+                           android.os.Looper  loop category=threadbase
+                          android.os.Handler  dispatchMessage category=threadbase
+                          android.os.Handler  handleCallback category=threadbase
                 android.widget.AbsListView$3  run category=indirection
      android.widget.AbsListView$PerformClick  run category=indirection
                   android.widget.AbsListView  performItemClick category=ui

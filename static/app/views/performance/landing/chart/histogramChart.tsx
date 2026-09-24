@@ -1,173 +1,156 @@
-import React from 'react';
-import {withTheme} from '@emotion/react';
+import {Fragment} from 'react';
+import {useTheme} from '@emotion/react';
 import styled from '@emotion/styled';
-import {Location} from 'history';
+import type {Location} from 'history';
 
-import BarChart from 'app/components/charts/barChart';
-import BarChartZoom from 'app/components/charts/barChartZoom';
-import ErrorPanel from 'app/components/charts/errorPanel';
-import {HeaderTitleLegend} from 'app/components/charts/styles';
-import TransparentLoadingMask from 'app/components/charts/transparentLoadingMask';
-import Placeholder from 'app/components/placeholder';
-import QuestionTooltip from 'app/components/questionTooltip';
-import {IconWarning} from 'app/icons/iconWarning';
-import {t} from 'app/locale';
-import space from 'app/styles/space';
-import {Organization} from 'app/types';
-import {Series} from 'app/types/echarts';
-import EventView from 'app/utils/discover/eventView';
-import getDynamicText from 'app/utils/getDynamicText';
-import HistogramQuery from 'app/utils/performance/histogram/histogramQuery';
-import {computeBuckets, formatHistogramData} from 'app/utils/performance/histogram/utils';
-import {Theme} from 'app/utils/theme';
-
-import {DoubleHeaderContainer} from '../../styles';
+import type {BarChartProps} from 'sentry/components/charts/barChart';
+import {BarChart} from 'sentry/components/charts/barChart';
+import {BarChartZoom} from 'sentry/components/charts/barChartZoom';
+import {TransparentLoadingMask} from 'sentry/components/charts/transparentLoadingMask';
+import {Placeholder} from 'sentry/components/placeholder';
+import {t} from 'sentry/locale';
+import type {Series} from 'sentry/types/echarts';
+import type {Organization} from 'sentry/types/organization';
+import type {EventView} from 'sentry/utils/discover/eventView';
+import {formatAbbreviatedNumber} from 'sentry/utils/formatters';
+import {getDynamicText} from 'sentry/utils/getDynamicText';
+import type {HistogramData} from 'sentry/utils/performance/histogram/types';
+import {
+  computeBuckets,
+  formatHistogramData,
+} from 'sentry/utils/performance/histogram/utils';
 
 const NUM_BUCKETS = 50;
 const PRECISION = 0;
 
 type Props = {
-  theme: Theme;
-  location: Location;
-  organization: Organization;
   eventView: EventView;
   field: string;
+  location: Location;
+  onFilterChange: (minValue: number, maxValue: number) => void;
+  organization: Organization;
   title: string;
   titleTooltip: string;
-  onFilterChange: (minValue: number, maxValue: number) => void;
+  usingBackupAxis: boolean;
+  backupField?: string;
+  didReceiveMultiAxis?: (axisCounts: Record<string, number>) => void;
 };
 
-export function HistogramChart(props: Props) {
+type ChartProps = {
+  field: string;
+  isErrored: boolean;
+  isLoading: boolean;
+  location: Location;
+  onFilterChange: Props['onFilterChange'];
+  chartData?: HistogramData;
+  colors?: string[];
+  disableChartPadding?: boolean;
+  disableXAxis?: boolean;
+  disableZoom?: boolean;
+  grid?: BarChartProps['grid'];
+  height?: number;
+};
+
+export function Chart(props: ChartProps) {
   const {
-    theme,
+    isLoading,
+    isErrored,
+    chartData,
     location,
-    onFilterChange,
-    organization,
-    eventView,
     field,
-    title,
-    titleTooltip,
+    onFilterChange,
+    height,
+    grid,
+    disableXAxis,
+    disableZoom,
+    disableChartPadding,
+    colors,
   } = props;
+  const theme = useTheme();
+
+  if (!chartData) {
+    return null;
+  }
+
+  const series = {
+    seriesName: t('Count'),
+    data: formatHistogramData(chartData, {type: 'duration'}),
+  };
 
   const xAxis = {
     type: 'category' as const,
     truncate: true,
-    boundaryGap: false,
     axisTick: {
       alignWithLabel: true,
     },
   };
 
+  const allSeries: Series[] = [];
+
+  if (!isLoading && !isErrored) {
+    allSeries.push(series);
+  }
+
+  const yAxis = {
+    type: 'value' as const,
+    axisLabel: {
+      color: theme.tokens.content.secondary,
+      formatter: (value: number | string) => formatAbbreviatedNumber(value),
+    },
+  };
+
   return (
-    <div>
-      <DoubleHeaderContainer>
-        <HeaderTitleLegend>
-          {title}
-          <QuestionTooltip position="top" size="sm" title={titleTooltip} />
-        </HeaderTitleLegend>
-      </DoubleHeaderContainer>
-      <HistogramQuery
+    <Fragment>
+      <BarChartZoom
+        minZoomWidth={10 ** -PRECISION * NUM_BUCKETS}
         location={location}
-        orgSlug={organization.slug}
-        eventView={eventView}
-        numBuckets={NUM_BUCKETS}
-        precision={PRECISION}
-        fields={[field]}
-        dataFilter="exclude_outliers"
+        paramStart={`${field}:>=`}
+        paramEnd={`${field}:<=`}
+        xAxisIndex={[0]}
+        buckets={computeBuckets(chartData)}
+        onHistoryPush={onFilterChange}
       >
-        {results => {
-          const loading = results.isLoading;
-          const errored = results.error !== null;
-          const chartData = results.histograms?.[field];
-
-          if (errored) {
-            return (
-              <ErrorPanel height="250px">
-                <IconWarning color="gray300" size="lg" />
-              </ErrorPanel>
-            );
-          }
-
-          if (!chartData) {
-            return null;
-          }
-
-          const series = {
-            seriesName: t('Count'),
-            data: formatHistogramData(chartData, {type: 'duration'}),
-          };
-          const allSeries: Series[] = [];
-
-          if (!loading && !errored) {
-            allSeries.push(series);
-          }
-
-          const values = series.data.map(point => point.value);
-          const max = values.length ? Math.max(...values) : undefined;
-
-          const yAxis = {
-            type: 'value' as const,
-            max,
-            axisLabel: {
-              color: theme.chartLabel,
-            },
-          };
-
+        {zoomRenderProps => {
           return (
-            <React.Fragment>
-              <BarChartZoom
-                minZoomWidth={10 ** -PRECISION * NUM_BUCKETS}
-                location={location}
-                paramStart={`${field}:>=`}
-                paramEnd={`${field}:<=`}
-                xAxisIndex={[0]}
-                buckets={computeBuckets(chartData)}
-                onHistoryPush={onFilterChange}
-              >
-                {zoomRenderProps => {
-                  return (
-                    <BarChartContainer>
-                      <MaskContainer>
-                        <TransparentLoadingMask visible={loading} />
-                        {getDynamicText({
-                          value: (
-                            <BarChart
-                              height={250}
-                              series={allSeries}
-                              xAxis={xAxis}
-                              yAxis={yAxis}
-                              grid={{
-                                left: space(3),
-                                right: space(3),
-                                top: space(3),
-                                bottom: loading ? space(4) : space(1.5),
-                              }}
-                              stacked
-                              {...zoomRenderProps}
-                            />
-                          ),
-                          fixed: <Placeholder height="250px" testId="skeleton-ui" />,
-                        })}
-                      </MaskContainer>
-                    </BarChartContainer>
-                  );
-                }}
-              </BarChartZoom>
-            </React.Fragment>
+            <BarChartContainer hasPadding={!disableChartPadding}>
+              <MaskContainer>
+                <TransparentLoadingMask visible={isLoading} />
+                {getDynamicText({
+                  value: (
+                    <BarChart
+                      height={height ?? 250}
+                      series={allSeries}
+                      xAxis={disableXAxis ? {show: false} : xAxis}
+                      yAxis={yAxis}
+                      colors={colors}
+                      grid={
+                        grid ?? {
+                          left: theme.space['2xl'],
+                          right: theme.space['2xl'],
+                          top: theme.space['2xl'],
+                          bottom: isLoading ? theme.space['3xl'] : theme.space.lg,
+                        }
+                      }
+                      stacked
+                      {...(disableZoom ? {} : zoomRenderProps)}
+                    />
+                  ),
+                  fixed: <Placeholder height="250px" testId="skeleton-ui" />,
+                })}
+              </MaskContainer>
+            </BarChartContainer>
           );
         }}
-      </HistogramQuery>
-    </div>
+      </BarChartZoom>
+    </Fragment>
   );
 }
 
-const BarChartContainer = styled('div')`
-  padding-top: ${space(1)};
+const BarChartContainer = styled('div')<{hasPadding?: boolean}>`
+  padding-top: ${p => (p.hasPadding ? p.theme.space.md : 0)};
   position: relative;
 `;
 
 const MaskContainer = styled('div')`
   position: relative;
 `;
-
-export default withTheme(HistogramChart);

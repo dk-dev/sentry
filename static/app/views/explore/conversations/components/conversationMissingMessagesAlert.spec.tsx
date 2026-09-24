@@ -1,0 +1,26 @@
+import {render, screen, userEvent} from 'sentry-test/reactTestingLibrary';
+
+import {ConversationMissingMessagesAlert} from 'sentry/views/explore/conversations/components/conversationMissingMessagesAlert';
+
+describe('ConversationMissingMessagesAlert', () => {
+  it('renders the missing messages guidance', async () => {
+    render(<ConversationMissingMessagesAlert />);
+
+    expect(
+      await screen.findByText('Capture Your Conversation Messages')
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole('button', {name: 'Copy Prompt for AI Agent'})
+    ).toBeInTheDocument();
+  });
+
+  it('can be dismissed', async () => {
+    render(<ConversationMissingMessagesAlert />);
+
+    await userEvent.click(screen.getByRole('button', {name: 'Dismiss banner'}));
+
+    expect(
+      screen.queryByText('Capture Your Conversation Messages')
+    ).not.toBeInTheDocument();
+  });
+});

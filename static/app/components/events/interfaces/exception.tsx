@@ -1,97 +1,127 @@
-import React from 'react';
+import {Fragment} from 'react';
 
-import EventDataSection from 'app/components/events/eventDataSection';
-import CrashContent from 'app/components/events/interfaces/crashContent';
-import CrashActions from 'app/components/events/interfaces/crashHeader/crashActions';
-import CrashTitle from 'app/components/events/interfaces/crashHeader/crashTitle';
-import {isStacktraceNewestFirst} from 'app/components/events/interfaces/stacktrace';
-import {t} from 'app/locale';
-import {ExceptionType} from 'app/types';
-import {Event} from 'app/types/event';
-import {STACK_TYPE, STACK_VIEW} from 'app/types/stacktrace';
+import {ErrorBoundary} from 'sentry/components/errorBoundary';
+import {StacktraceContext} from 'sentry/components/events/interfaces/stackTraceContext';
+import {SuspectCommits} from 'sentry/components/events/suspectCommits';
+import {TraceEventDataSection} from 'sentry/components/events/traceEventDataSection';
+import {t} from 'sentry/locale';
+import type {Event, ExceptionType} from 'sentry/types/event';
+import {EntryType} from 'sentry/types/event';
+import type {Group} from 'sentry/types/group';
+import type {Project} from 'sentry/types/project';
+import {SectionDivider} from 'sentry/views/issueDetails/foldSection';
 
-const defaultProps = {
-  hideGuide: false,
-};
+import {ExceptionContent} from './crashContent/exception';
+import {NoStackTraceMessage} from './noStackTraceMessage';
+import {isStacktraceNewestFirst} from './utils';
 
 type Props = {
-  event: Event;
-  type: string;
   data: ExceptionType;
-  projectId: string;
-} & typeof defaultProps;
-
-type State = {
-  stackView: STACK_VIEW;
-  stackType: STACK_TYPE;
-  newestFirst: boolean;
+  event: Event;
+  group: Group | undefined;
+  projectSlug: Project['slug'];
+  groupingCurrentLevel?: Group['metadata']['current_level'];
 };
 
-class Exception extends React.Component<Props, State> {
-  static defaultProps = {
-    hideGuide: false,
-  };
-
-  state: State = {
-    stackView: this.props.data.hasSystemFrames ? STACK_VIEW.APP : STACK_VIEW.FULL,
-    newestFirst: isStacktraceNewestFirst(),
-    stackType: STACK_TYPE.ORIGINAL,
-  };
-
-  handleChange = (newState: Partial<State>) => {
-    this.setState(prevState => ({
-      ...prevState,
-      ...newState,
-    }));
-  };
-
-  render() {
-    const eventHasThreads = !!this.props.event.entries.find(
-      entry => entry.type === 'threads'
-    );
-
-    // in case there are threads in the event data, we don't render the
-    // exception block.  Instead the exception is contained within the
-    // thread interface.
-    if (eventHasThreads) {
-      return null;
-    }
-
-    const {projectId, event, data, hideGuide, type} = this.props;
-    const {stackView, stackType, newestFirst} = this.state;
-
-    const commonCrashHeaderProps = {
-      newestFirst,
-      hideGuide,
-      onChange: this.handleChange,
-    };
-
-    return (
-      <EventDataSection
-        type={type}
-        title={<CrashTitle title={t('Exception')} {...commonCrashHeaderProps} />}
-        actions={
-          <CrashActions
-            stackType={stackType}
-            stackView={stackView}
-            platform={event.platform}
-            exception={data}
-            {...commonCrashHeaderProps}
-          />
-        }
-        wrapTitle={false}
-      >
-        <CrashContent
-          projectId={projectId}
-          event={event}
-          stackType={stackType}
-          stackView={stackView}
-          newestFirst={newestFirst}
-          exception={data}
-        />
-      </EventDataSection>
-    );
+export function Exception({
+  event,
+  data,
+  projectSlug,
+  group,
+  groupingCurrentLevel,
+}: Props) {
+  const eventHasThreads = !!event.entries.some(entry => entry.type === EntryType.THREADS);
+  // in case there are threads in the event data, we don't render the
+  // exception block.  Instead the exception is contained within the
+  // thread interface.
+  if (eventHasThreads) {
+    return null;
   }
-}
 
-export default Exception;
+  const entryIndex = event.entries.findIndex(
+    eventEntry => eventEntry.type === EntryType.EXCEPTION
+  );
+
+  const meta = event._meta?.entries?.[entryIndex]?.data?.values;
+
+  const stackTraceNotFound = !(data.values ?? []).length;
+
+  const hasNonAppFrames = !!data.values?.some(value =>
+    value.stacktrace?.frames?.some(frame => !frame.inApp)
+  );
+
+  return (
+    <StacktraceContext
+      projectSlug={projectSlug}
+      forceFullStackTrace={hasNonAppFrames ? !data.hasSystemFrames : true}
+      defaultIsNewestFramesFirst={isStacktraceNewestFirst()}
+      hasSystemFrames={data.hasSystemFrames}
+    >
+      <TraceEventDataSection
+        title={t('Stack Trace')}
+        type={EntryType.EXCEPTION}
+        projectSlug={projectSlug}
+        event={event}
+        eventId={event.id}
+        platform={event.platform ?? 'other'}
+        hasMinified={!!data.values?.some(value => value.rawStacktrace)}
+        hasVerboseFunctionNames={
+          !!data.values?.some(
+            value =>
+              !!value.stacktrace?.frames?.some(
+                frame =>
+                  !!frame.rawFunction &&
+                  !!frame.function &&
+                  frame.rawFunction !== frame.function
+              )
+          )
+        }
+        hasAbsoluteFilePaths={
+          !!data.values?.some(
+            value => !!value.stacktrace?.frames?.some(frame => !!frame.filename)
+          )
+        }
+        hasAbsoluteAddresses={
+          !!data.values?.some(
+            value => !!value.stacktrace?.frames?.some(frame => !!frame.instructionAddr)
+          )
+        }
+        hasNewestFirst={
+          !!data.values?.some(value => (value.stacktrace?.frames ?? []).length > 1)
+        }
+        stackTraceNotFound={stackTraceNotFound}
+      >
+        {stackTraceNotFound ? (
+          <NoStackTraceMessage />
+        ) : (
+          <Fragment>
+            <ExceptionContent
+              projectSlug={projectSlug}
+              event={event}
+              values={data.values}
+              groupingCurrentLevel={groupingCurrentLevel}
+              meta={meta}
+            />
+            {group && (
+              <Fragment>
+                {data.values && data.values.length > 1 && (
+                  <SectionDivider orientation="horizontal" />
+                )}
+                <ErrorBoundary
+                  mini
+                  message={t('There was an error loading the suspect commits')}
+                >
+                  <SuspectCommits
+                    projectSlug={projectSlug}
+                    eventId={event.id}
+                    group={group}
+                  />
+                </ErrorBoundary>
+              </Fragment>
+            )}
+          </Fragment>
+        )}
+      </TraceEventDataSection>
+    </StacktraceContext>
+  );
+}

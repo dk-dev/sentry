@@ -1,23 +1,31 @@
-export default function parseLinkHeader(
-  header: string | null
-): {[key: string]: {href: string; results: boolean | null; cursor: string}} {
+export interface ParsedHeader {
+  cursor: string;
+  href: string;
+  results: boolean | null;
+}
+type Result = Record<string, ParsedHeader>;
+
+export function parseLinkHeader(header: string | null): Result {
   if (header === null || header === '') {
     return {};
   }
 
-  const header_vals = header.split(',');
-  const links = {};
+  const headerValues = header.split(',');
+  const links: Record<string, ParsedHeader> = {};
 
-  header_vals.forEach(val => {
-    const match = /<([^>]+)>; rel="([^"]+)"(?:; results="([^"]+)")?(?:; cursor="([^"]+)")?/g.exec(
-      val
-    );
-    const hasResults = match![3] === 'true' ? true : match![3] === 'false' ? false : null;
+  headerValues.forEach(val => {
+    const match =
+      /<([^>]+)>; rel="([^"]+)"(?:; results="([^"]+)")?(?:; cursor="([^"]+)")?/.exec(val);
+    if (!match) {
+      return;
+    }
+    const [, href, rel, results, cursor] = match;
+    const hasResults = results === 'true' ? true : results === 'false' ? false : null;
 
-    links[match![2]] = {
-      href: match![1],
+    links[rel!] = {
+      href: href!,
       results: hasResults,
-      cursor: match![4],
+      cursor: cursor!,
     };
   });
 

@@ -5,12 +5,42 @@ ahead of you.
 To resolve this, rebase against latest master and regenerate your migration. This file
 will then be regenerated, and you should be able to merge without conflicts.
 
-admin: 0002_logentry_remove_auto_add
-auth: 0008_alter_user_username_max_length
-contenttypes: 0002_remove_content_type_name
-jira_ac: 0001_initial
-nodestore: 0002_nodestore_no_dictfield
-sentry: 0186_add_externalactor
-sessions: 0001_initial
-sites: 0002_alter_domain_unique
-social_auth: 0001_initial
+ai_monitoring: 0002_add_date_updated_index
+
+discover: 0004_discover_starred_and_last_visited
+
+explore: 0013_delete_project_column_from_metric_context
+
+feedback: 0007_cleanup_failed_safe_deletes
+
+flags: 0005_increase_flag_max_length
+
+hybridcloud: 0042_cacheversion_key_drop
+
+insights: 0001_squashed_0002_backfill_team_starred
+
+investigations: 0009_drop_producing_seer_run_index
+
+monitors: 0001_squashed_0013_delete_monitor_is_muted_field
+
+nodestore: 0001_squashed_0002_nodestore_no_dictfield
+
+notifications: 0013_add_notificationmessage_parent_lookup_index
+
+preprod: 0001_squashed_0030_add_images_errored_to_snapshot_comparison
+
+releases: 0004_cleanup_failed_safe_deletes
+
+replays: 0001_squashed_0007_organizationmember_replay_access
+
+seer: 0036_disable_autofix_issue_data_fk_constraints
+
+sentry: 1181_release_drop_new_last_deploy_id_pending
+
+social_auth: 0001_squashed_0003_social_auth_json_field
+
+tempest: 0001_squashed_0003_use_encrypted_char_field
+
+uptime: 0056_encrypt_uptime_subscription_headers_body
+
+workflow_engine: 0120_replace_boolean_deescalation_comparisons

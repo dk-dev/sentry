@@ -1,246 +1,135 @@
-import React from 'react';
-import styled from '@emotion/styled';
+import {isValidElement} from 'react';
 import * as Sentry from '@sentry/react';
 
-import IndicatorActions from 'app/actions/indicatorActions';
-import {DEFAULT_TOAST_DURATION} from 'app/constants';
-import {t, tct} from 'app/locale';
-import space from 'app/styles/space';
-import FormModel, {FieldValue} from 'app/views/settings/components/forms/model';
+import {toast, type ToastOptions} from '@sentry/scraps/toast';
+
+import {IconRefresh} from 'sentry/icons';
+import {t} from 'sentry/locale';
+import {isDemoModeActive} from 'sentry/utils/demoMode';
 
 type IndicatorType = 'loading' | 'error' | 'success' | 'undo' | '';
 
-type Options = {
-  duration?: number;
+interface IndicatorOptions {
   append?: boolean;
-  modelArg?: {
-    model: FormModel;
-    id: string;
-    undo: () => void;
-  };
-  disableDismiss?: boolean;
+  duration?: number | null;
   undo?: () => void;
-};
-
-export type Indicator = {
-  type: IndicatorType;
-  id: string | number;
-  message: React.ReactNode;
-  options: Options;
-  clearId?: null | number;
-};
-
-// Removes a single indicator
-export function removeIndicator(indicator: Indicator) {
-  IndicatorActions.remove(indicator);
 }
+
+type UndoIndicatorOptions = IndicatorOptions & {undo: () => void};
 
 // Clears all indicators
+/**
+ * @deprecated Use `toast.dismiss()` from `@sentry/scraps/toast` instead.
+ */
 export function clearIndicators() {
-  IndicatorActions.clear();
+  toast.dismiss();
 }
 
-// Note previous IndicatorStore.add behavior was to default to "loading" if no type was supplied
+/**
+ * @deprecated Use the namespaced API from `@sentry/scraps/toast` instead.
+ */
+export function addMessage(
+  msg: React.ReactNode,
+  type: 'undo',
+  options: UndoIndicatorOptions
+): void;
+export function addMessage(
+  msg: React.ReactNode,
+  type: Exclude<IndicatorType, 'undo'>,
+  options?: IndicatorOptions
+): void;
 export function addMessage(
   msg: React.ReactNode,
   type: IndicatorType,
-  options: Options = {}
+  options: IndicatorOptions = {}
 ): void {
-  const {duration: optionsDuration, append, ...rest} = options;
+  const {duration: optionsDuration, undo} = options;
 
   // XXX: Debug for https://sentry.io/organizations/sentry/issues/1595204979/
   if (
-    // @ts-expect-error
-    typeof msg?.message !== 'undefined' &&
-    // @ts-expect-error
-    typeof msg?.code !== 'undefined' &&
-    // @ts-expect-error
-    typeof msg?.extra !== 'undefined'
+    (msg as any)?.message !== undefined &&
+    (msg as any)?.code !== undefined &&
+    (msg as any)?.extra !== undefined
   ) {
     Sentry.captureException(new Error('Attempt to XHR response to Indicators'));
   }
-
-  // use default only if undefined, as 0 is a valid duration
-  const duration =
-    typeof optionsDuration === 'undefined' ? DEFAULT_TOAST_DURATION : optionsDuration;
-
-  const action = append ? 'append' : 'replace';
-  // XXX: This differs from `IndicatorStore.add` since it won't return the indicator that is created
-  // because we are firing an action. You can just add a new message and it will, by default,
-  // replace active indicator
-  IndicatorActions[action](msg, type, {...rest, duration});
-}
-
-function addMessageWithType(type: IndicatorType) {
-  return (msg: React.ReactNode, options?: Options) => addMessage(msg, type, options);
-}
-
-export function addLoadingMessage(
-  msg: React.ReactNode = t('Saving changes...'),
-  options?: Options
-) {
-  return addMessageWithType('loading')(msg, options);
-}
-
-export function addErrorMessage(msg: React.ReactNode, options?: Options) {
-  return addMessageWithType('error')(msg, options);
-}
-
-export function addSuccessMessage(msg: React.ReactNode, options?: Options) {
-  return addMessageWithType('success')(msg, options);
-}
-
-const PRETTY_VALUES: Map<unknown, string> = new Map([
-  ['', '<empty>'],
-  [null, '<none>'],
-  [undefined, '<unset>'],
-  // if we don't cast as any, then typescript complains because booleans are not valid keys
-  [true as any, 'enabled'],
-  [false as any, 'disabled'],
-]);
-
-// Transform form values into a string
-// Otherwise bool values will not get rendered and empty strings look like a bug
-const prettyFormString = (val: ChangeValue, model: FormModel, fieldName: string) => {
-  const descriptor = model.fieldDescriptor.get(fieldName);
-
-  if (descriptor && typeof descriptor.formatMessageValue === 'function') {
-    const initialData = model.initialData;
-    // XXX(epurkhsier): We pass the "props" as the descriptor and initialData.
-    // This isn't necessarily all of the props of the form field, but should
-    // make up a good portion needed for formatting.
-    return descriptor.formatMessageValue(val, {...descriptor, initialData});
+  if (type === 'undo' && typeof options.undo !== 'function') {
+    Sentry.captureException(
+      new Error('Rendered undo toast without undo function, this should not happen.')
+    );
   }
 
-  if (PRETTY_VALUES.has(val)) {
-    return PRETTY_VALUES.get(val);
+  const toastOptions: ToastOptions = {};
+
+  if (optionsDuration !== undefined) {
+    toastOptions.duration =
+      optionsDuration === null || optionsDuration === 0 ? Infinity : optionsDuration;
   }
 
-  return `${val}`;
-};
+  if (typeof undo === 'function') {
+    toastOptions.action = {
+      label: t('Undo'),
+      icon: <IconRefresh size="xs" />,
+      onClick: undo,
+    };
+  }
 
-// Some fields have objects in them.
-// For example project key rate limits.
-type ChangeValue = FieldValue | Record<string, any>;
-
-type Change = {
-  old: ChangeValue;
-  new: ChangeValue;
-};
+  switch (type) {
+    case 'loading':
+      toast.loading(msg, toastOptions);
+      break;
+    case 'error':
+      toast.error(msg, toastOptions);
+      break;
+    case 'success':
+      toast.success(msg, toastOptions);
+      break;
+    case 'undo':
+    case '':
+      toast.message(msg, toastOptions);
+      break;
+  }
+}
 
 /**
- * This will call an action creator to generate a "Toast" message that
- * notifies user the field that changed with its previous and current values.
- *
- * Also allows for undo
+ * @deprecated Use `toast.loading()` from `@sentry/scraps/toast` instead.
  */
-
-export function saveOnBlurUndoMessage(
-  change: Change,
-  model: FormModel,
-  fieldName: string
+export function addLoadingMessage(
+  msg: React.ReactNode = t('Saving changes...'),
+  options?: IndicatorOptions
 ) {
-  if (!model) {
-    return;
+  return addMessage(msg, 'loading', options);
+}
+
+/**
+ * @deprecated Use `toast.error()` from `@sentry/scraps/toast` instead.
+ */
+export function addErrorMessage(msg: React.ReactNode, options?: IndicatorOptions) {
+  if (isDemoModeActive()) {
+    return addMessage(t('This action is not allowed in demo mode.'), 'error', options);
   }
-
-  const label = model.getDescriptor(fieldName, 'label');
-
-  if (!label) {
-    return;
+  if (typeof msg === 'string' || isValidElement(msg)) {
+    return addMessage(msg, 'error', options);
   }
-
-  const prettifyValue = (val: ChangeValue) => prettyFormString(val, model, fieldName);
-
-  // Hide the change text when formatMessageValue is explicitly set to false
-  const showChangeText = model.getDescriptor(fieldName, 'formatMessageValue') !== false;
-
-  addSuccessMessage(
-    tct(
-      showChangeText
-        ? 'Changed [fieldName] from [oldValue] to [newValue]'
-        : 'Changed [fieldName]',
-      {
-        root: <MessageContainer />,
-        fieldName: <FieldName>{label}</FieldName>,
-        oldValue: <FormValue>{prettifyValue(change.old)}</FormValue>,
-        newValue: <FormValue>{prettifyValue(change.new)}</FormValue>,
-      }
+  // When non string, non-react element responses are passed, addErrorMessage
+  // crashes the entire page because it falls outside any error
+  // boundaries defined for the components on the page. Adding a fallback
+  // to prevent page crashes.
+  return addMessage(
+    t(
+      "You've hit an issue, fortunately we use Sentry to monitor Sentry. So it's likely we're already looking into this!"
     ),
-    {
-      modelArg: {
-        model,
-        id: fieldName,
-        undo: () => {
-          if (!model || !fieldName) {
-            return;
-          }
-
-          const oldValue = model.getValue(fieldName);
-          const didUndo = model.undo();
-          const newValue = model.getValue(fieldName);
-
-          if (!didUndo) {
-            return;
-          }
-          if (!label) {
-            return;
-          }
-
-          // `saveField` can return null if it can't save
-          const saveResult = model.saveField(fieldName, newValue);
-
-          if (!saveResult) {
-            addErrorMessage(
-              tct(
-                showChangeText
-                  ? 'Unable to restore [fieldName] from [oldValue] to [newValue]'
-                  : 'Unable to restore [fieldName]',
-                {
-                  root: <MessageContainer />,
-                  fieldName: <FieldName>{label}</FieldName>,
-                  oldValue: <FormValue>{prettifyValue(oldValue)}</FormValue>,
-                  newValue: <FormValue>{prettifyValue(newValue)}</FormValue>,
-                }
-              )
-            );
-            return;
-          }
-
-          saveResult.then(() => {
-            addMessage(
-              tct(
-                showChangeText
-                  ? 'Restored [fieldName] from [oldValue] to [newValue]'
-                  : 'Restored [fieldName]',
-                {
-                  root: <MessageContainer />,
-                  fieldName: <FieldName>{label}</FieldName>,
-                  oldValue: <FormValue>{prettifyValue(oldValue)}</FormValue>,
-                  newValue: <FormValue>{prettifyValue(newValue)}</FormValue>,
-                }
-              ),
-              'undo',
-              {
-                duration: DEFAULT_TOAST_DURATION,
-              }
-            );
-          });
-        },
-      },
-    }
+    'error',
+    options
   );
 }
 
-const FormValue = styled('span')`
-  font-style: italic;
-  margin: 0 ${space(0.5)};
-`;
-const FieldName = styled('span')`
-  font-weight: bold;
-  margin: 0 ${space(0.5)};
-`;
-const MessageContainer = styled('div')`
-  display: flex;
-  align-items: center;
-`;
+/**
+ * @deprecated Use `toast.success()` from `@sentry/scraps/toast` instead.
+ */
+export function addSuccessMessage(
+  msg: React.ReactNode,
+  options?: IndicatorOptions | UndoIndicatorOptions
+) {
+  return addMessage(msg, 'success', options);
+}

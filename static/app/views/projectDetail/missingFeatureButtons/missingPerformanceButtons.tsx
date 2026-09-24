@@ -1,14 +1,21 @@
-import React from 'react';
-import styled from '@emotion/styled';
+import {Button} from '@sentry/scraps/button';
+import {Grid} from '@sentry/scraps/layout';
 
-import Feature from 'app/components/acl/feature';
-import Button from 'app/components/button';
-import ButtonBar from 'app/components/buttonBar';
-import FeatureTourModal from 'app/components/modals/featureTourModal';
-import {t} from 'app/locale';
-import {Organization} from 'app/types';
-import {trackAnalyticsEvent} from 'app/utils/analytics';
-import {PERFORMANCE_TOUR_STEPS} from 'app/views/performance/onboarding';
+import {navigateTo} from 'sentry/actionCreators/navigation';
+import Feature from 'sentry/components/acl/feature';
+import {FeatureTourModal} from 'sentry/components/modals/featureTourModal';
+import {usePageFilters} from 'sentry/components/pageFilters/usePageFilters';
+import {t} from 'sentry/locale';
+import type {Organization} from 'sentry/types/organization';
+import {trackAnalytics} from 'sentry/utils/analytics';
+import {useLocation} from 'sentry/utils/useLocation';
+import {useNavigate} from 'sentry/utils/useNavigate';
+import {useProjects} from 'sentry/utils/useProjects';
+import {PERFORMANCE_TOUR_STEPS} from 'sentry/views/performance/onboarding';
+import {
+  getPerformanceBaseUrl,
+  platformToDomainView,
+} from 'sentry/views/performance/utils';
 
 const DOCS_URL = 'https://docs.sentry.io/performance-monitoring/getting-started/';
 
@@ -16,35 +23,52 @@ type Props = {
   organization: Organization;
 };
 
-function MissingPerformanceButtons({organization}: Props) {
+export function MissingPerformanceButtons({organization}: Props) {
+  const navigate = useNavigate();
+  const location = useLocation();
+  const {projects} = useProjects();
+  const {
+    selection: {projects: selectedProjects},
+  } = usePageFilters();
+
   function handleTourAdvance(step: number, duration: number) {
-    trackAnalyticsEvent({
-      eventKey: 'project_detail.performance_tour.advance',
-      eventName: 'Project Detail: Performance Tour Advance',
-      organization_id: parseInt(organization.id, 10),
+    trackAnalytics('project_detail.performance_tour.advance', {
+      organization,
       step,
       duration,
     });
   }
 
   function handleClose(step: number, duration: number) {
-    trackAnalyticsEvent({
-      eventKey: 'project_detail.performance_tour.close',
-      eventName: 'Project Detail: Performance Tour Close',
-      organization_id: parseInt(organization.id, 10),
+    trackAnalytics('project_detail.performance_tour.close', {
+      organization,
       step,
       duration,
     });
   }
+  const domainView = platformToDomainView(projects, selectedProjects);
 
   return (
     <Feature
-      hookName="feature-disabled:project-performance-score-card"
-      features={['performance-view']}
+      overrideName="feature-disabled:project-performance-score-card"
+      features="performance-view"
       organization={organization}
     >
-      <StyledButtonBar gap={1}>
-        <Button size="small" priority="primary" external href={DOCS_URL}>
+      <Grid flow="column" align="center" gap="md">
+        <Button
+          size="sm"
+          variant="primary"
+          analyticsEventKey="project_detail.performance_setup_clicked"
+          analyticsEventName="Project Detail: Performance Start Setup Clicked"
+          onClick={event => {
+            event.preventDefault();
+            navigateTo(
+              `${getPerformanceBaseUrl(organization.slug, domainView)}/?project=:project#performance-sidequest`,
+              navigate,
+              location
+            );
+          }}
+        >
           {t('Start Setup')}
         </Button>
 
@@ -56,18 +80,17 @@ function MissingPerformanceButtons({organization}: Props) {
           doneUrl={DOCS_URL}
         >
           {({showModal}) => (
-            <Button size="small" onClick={showModal}>
-              {t('Get a tour')}
+            <Button
+              size="sm"
+              onClick={showModal}
+              analyticsEventKey="project_detail.performance_tour_clicked"
+              analyticsEventName="Project Detail: Performance Get Tour Clicked"
+            >
+              {t('Get Tour')}
             </Button>
           )}
         </FeatureTourModal>
-      </StyledButtonBar>
+      </Grid>
     </Feature>
   );
 }
-
-const StyledButtonBar = styled(ButtonBar)`
-  grid-template-columns: minmax(auto, max-content) minmax(auto, max-content);
-`;
-
-export default MissingPerformanceButtons;

@@ -1,22 +1,16 @@
-import React from 'react';
+import {t} from 'sentry/locale';
+import type {Rule} from 'sentry/views/settings/components/dataScrubbing/types';
 
-import {t} from 'app/locale';
+import {DataScrubFormModal, type DataScrubFormModalProps} from './dataScrubFormModal';
 
-import {ProjectId, Rule} from '../types';
-
-import ModalManager from './modalManager';
-
-type ModalManagerProps<T extends ProjectId> = ModalManager<T>['props'];
-type Props<T extends ProjectId> = Omit<
-  ModalManagerProps<T>,
-  'title' | 'initialValues' | 'onGetNewRules'
-> & {
+type Props = Omit<DataScrubFormModalProps, 'title' | 'initialState' | 'onGetNewRules'> & {
   rule: Rule;
+  savedRules: Rule[];
 };
 
-const Edit = <T extends ProjectId>({savedRules, rule, ...props}: Props<T>) => {
+export function Edit({savedRules, rule, ...props}: Props) {
   const handleGetNewRules = (
-    values: Parameters<ModalManagerProps<T>['onGetNewRules']>[0]
+    values: Parameters<DataScrubFormModalProps['onGetNewRules']>[0]
   ) => {
     const updatedRule = {...values, id: rule.id};
 
@@ -25,20 +19,17 @@ const Edit = <T extends ProjectId>({savedRules, rule, ...props}: Props<T>) => {
         return updatedRule;
       }
       return savedRule;
-    }) as Array<Rule>;
+    }) as Rule[];
 
     return newRules;
   };
 
   return (
-    <ModalManager
+    <DataScrubFormModal
       {...props}
-      savedRules={savedRules}
       title={t('Edit an advanced data scrubbing rule')}
       initialState={rule}
       onGetNewRules={handleGetNewRules}
     />
   );
-};
-
-export default Edit;
+}

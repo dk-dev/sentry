@@ -1,13 +1,31 @@
-import {PromptData} from 'app/actionCreators/prompts';
+import moment from 'moment-timezone';
 
-import {snoozedDays} from './promptsActivity';
+import type {PromptData} from 'sentry/actionCreators/prompts';
 
-export const promptIsDismissed = (prompt: PromptData, daysToSnooze: number = 14) => {
-  const {snoozedTime, dismissedTime} = prompt || {};
-  // check if the prompt has been dismissed
-  if (dismissedTime) {
+/**
+ * Given a snoozed unix timestamp in seconds, returns the number of days since
+ * the prompt was snoozed.
+ *
+ * @param snoozedTs Snoozed timestamp
+ */
+function snoozedDays(snoozedTs: number) {
+  const now = moment.utc();
+  const snoozedOn = moment.unix(snoozedTs).utc();
+  return now.diff(snoozedOn, 'days');
+}
+
+export const DEFAULT_SNOOZE_PROMPT_DAYS = 14;
+export const promptIsDismissed = (
+  prompt: PromptData,
+  daysToSnooze: number = DEFAULT_SNOOZE_PROMPT_DAYS
+): boolean => {
+  if (typeof prompt?.dismissedTime === 'number') {
     return true;
   }
-  //check if it has been snoozed
-  return !snoozedTime ? false : snoozedDays(snoozedTime) < daysToSnooze;
+
+  if (typeof prompt?.snoozedTime === 'number') {
+    return snoozedDays(prompt.snoozedTime) < daysToSnooze;
+  }
+
+  return false;
 };

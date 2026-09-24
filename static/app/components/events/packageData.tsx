@@ -1,52 +1,90 @@
-import React from 'react';
+import {useRef} from 'react';
+import styled from '@emotion/styled';
 
-import ClippedBox from 'app/components/clippedBox';
-import ErrorBoundary from 'app/components/errorBoundary';
-import EventDataSection from 'app/components/events/eventDataSection';
-import KeyValueList from 'app/components/events/interfaces/keyValueList';
-import {getMeta} from 'app/components/events/meta/metaProxy';
-import {t} from 'app/locale';
-import {Event} from 'app/types/event';
+import {useIssueDetailsColumnCount} from 'sentry/components/events/eventTags/util';
+import {KeyValueTableDataRow} from 'sentry/components/tables/keyValueTable';
+import {t} from 'sentry/locale';
+import type {Event} from 'sentry/types/event';
+import {splitIntoColumns} from 'sentry/utils/array/splitIntoColumns';
+import {isEmptyObject} from 'sentry/utils/object/isEmptyObject';
+import {SectionKey} from 'sentry/views/issueDetails/context';
+import {FoldSection} from 'sentry/views/issueDetails/foldSection';
 
 type Props = {
   event: Event;
 };
 
-class EventPackageData extends React.Component<Props> {
-  shouldComponentUpdate(nextProps: Props) {
-    return this.props.event.id !== nextProps.event.id;
+export function EventPackageData({event}: Props) {
+  const containerRef = useRef<HTMLDivElement>(null);
+  const columnCount = useIssueDetailsColumnCount(containerRef) + 1;
+  let title: string;
+
+  const packages = Object.entries(event.packages || {}).map(([key, value]) => ({
+    key,
+    value,
+    subject: key,
+    meta: event._meta?.packages?.[key]?.[''],
+  }));
+
+  switch (event.platform) {
+    case 'csharp':
+      title = t('Assemblies');
+      break;
+    case 'java':
+      title = t('Dependencies');
+      break;
+    default:
+      title = t('Packages');
   }
 
-  render() {
-    const {event} = this.props;
-    let longKeys: boolean, title: string;
-    const packages = Object.entries(event.packages || {}).map(([key, value]) => ({
-      key,
-      value,
-      subject: key,
-      meta: getMeta(event.packages, key),
-    }));
-
-    switch (event.platform) {
-      case 'csharp':
-        longKeys = true;
-        title = t('Assemblies');
-        break;
-      default:
-        longKeys = false;
-        title = t('Packages');
-    }
-
-    return (
-      <EventDataSection type="packages" title={title}>
-        <ClippedBox>
-          <ErrorBoundary mini>
-            <KeyValueList data={packages} longKeys={longKeys} />
-          </ErrorBoundary>
-        </ClippedBox>
-      </EventDataSection>
-    );
+  if (isEmptyObject(event.packages)) {
+    return null;
   }
+
+  const componentItems = packages.map((item, i) => (
+    <KeyValueTableDataRow
+      key={`content-card-${item.key}-${i}`}
+      item={item}
+      meta={item.meta}
+    />
+  ));
+
+  return (
+    <FoldSection
+      sectionKey={SectionKey.PACKAGES}
+      title={title}
+      ref={containerRef}
+      initialCollapse
+    >
+      <ColumnsContainer columnCount={columnCount}>
+        {splitIntoColumns(componentItems, columnCount).map((column, i) => (
+          <Column key={`highlight-column-${i}`}>{column}</Column>
+        ))}
+      </ColumnsContainer>
+    </FoldSection>
+  );
 }
 
-export default EventPackageData;
+const ColumnsContainer = styled('div')<{columnCount: number}>`
+  display: grid;
+  align-items: start;
+  grid-template-columns: repeat(${p => p.columnCount}, 1fr);
+`;
+
+const Column = styled('div')`
+  display: grid;
+  grid-template-columns: fit-content(65%) 1fr;
+  font-size: ${p => p.theme.font.size.sm};
+  &:first-child {
+    margin-left: -${p => p.theme.space.md};
+  }
+  &:not(:first-child) {
+    border-left: 1px solid ${p => p.theme.tokens.border.secondary};
+    padding-left: ${p => p.theme.space.xl};
+    margin-left: -1px;
+  }
+  &:not(:last-child) {
+    border-right: 1px solid ${p => p.theme.tokens.border.secondary};
+    padding-right: ${p => p.theme.space.xl};
+  }
+`;

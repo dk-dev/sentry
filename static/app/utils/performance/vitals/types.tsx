@@ -1,18 +1,10 @@
-import {ColumnType, WebVital} from 'app/utils/discover/fields';
+import type {ColumnType} from 'sentry/utils/discover/fields';
 
 export type Vital = {
-  slug: string;
-  name: string;
-  acronym: string;
   description: string;
-  poorThreshold: number;
+  name: string;
+  slug: string;
   type: ColumnType;
-};
-
-export type VitalGroup = {
-  vitals: WebVital[];
-  colors: string[];
-  min?: number;
-  max?: number;
-  precision?: number;
+  acronym?: string;
+  poorThreshold?: number;
 };

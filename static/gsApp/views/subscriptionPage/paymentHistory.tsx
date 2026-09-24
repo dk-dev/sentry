@@ -1,0 +1,204 @@
+import {Fragment} from 'react';
+import {useQuery} from '@tanstack/react-query';
+import moment from 'moment-timezone';
+
+import {Tag, type TagProps} from '@sentry/scraps/badge';
+import {LinkButton} from '@sentry/scraps/button';
+import {
+  Container,
+  Flex,
+  Grid,
+  Stack,
+  useResponsivePropValue,
+} from '@sentry/scraps/layout';
+import {Link} from '@sentry/scraps/link';
+import {Pagination} from '@sentry/scraps/pagination';
+import {Text} from '@sentry/scraps/text';
+
+import {LoadingError} from 'sentry/components/loadingError';
+import {LoadingIndicator} from 'sentry/components/loadingIndicator';
+import {SentryDocumentTitle} from 'sentry/components/sentryDocumentTitle';
+import {
+  IconCheckmark,
+  IconClose,
+  IconDownload,
+  IconTimer,
+  IconWarning,
+} from 'sentry/icons';
+import {t, tct} from 'sentry/locale';
+import type {Organization} from 'sentry/types/organization';
+import {apiOptions, selectJsonWithHeaders} from 'sentry/utils/api/apiOptions';
+import {capitalize} from 'sentry/utils/string/capitalize';
+import {useLocation} from 'sentry/utils/useLocation';
+import {useOrganization} from 'sentry/utils/useOrganization';
+import {SettingsPageHeader} from 'sentry/views/settings/components/settingsPageHeader';
+
+import type {InvoiceBase} from 'getsentry/types';
+import {formatCurrency} from 'getsentry/utils/formatCurrency';
+import {ContactBillingMembers} from 'getsentry/views/contactBillingMembers';
+import {SubscriptionPageContainer} from 'getsentry/views/subscriptionPage/components/subscriptionPageContainer';
+
+enum ReceiptStatus {
+  PAID = 'paid',
+  REFUNDED = 'refunded',
+  CLOSED = 'closed',
+  AWAITING_PAYMENT = 'awaiting_payment',
+}
+
+function ReceiptStatusTag({payment}: {payment: InvoiceBase}) {
+  const status = payment.amountRefunded
+    ? ReceiptStatus.REFUNDED
+    : payment.isPaid
+      ? ReceiptStatus.PAID
+      : payment.isClosed
+        ? ReceiptStatus.CLOSED
+        : ReceiptStatus.AWAITING_PAYMENT;
+  let icon = <IconWarning />;
+  let tagType: TagProps['variant'] = 'warning';
+
+  switch (status) {
+    case ReceiptStatus.PAID:
+      icon = <IconCheckmark />;
+      tagType = 'success';
+      break;
+    case ReceiptStatus.CLOSED:
+      icon = <IconClose />;
+      tagType = 'danger';
+      break;
+    case ReceiptStatus.REFUNDED:
+      icon = <IconTimer />;
+      tagType = 'promotion';
+      break;
+    default:
+      icon = <IconWarning />;
+      tagType = 'warning';
+      break;
+  }
+
+  return (
+    <Tag icon={icon} variant={tagType}>
+      {capitalize(status.replace('_', ' '))}
+    </Tag>
+  );
+}
+
+/**
+ * Invoice/Payment list view.
+ */
+function PaymentHistory() {
+  const organization = useOrganization();
+  const location = useLocation();
+
+  const {data, isPending, isError} = useQuery({
+    ...apiOptions.as<InvoiceBase[]>()('/customers/$organizationIdOrSlug/invoices/', {
+      path: {organizationIdOrSlug: organization.slug},
+      query: {cursor: location.query.cursor},
+      staleTime: 0,
+    }),
+    select: selectJsonWithHeaders,
+  });
+
+  const hasBillingPerms = organization.access?.includes('org:billing');
+  const paymentsPageLinks = data?.headers.Link;
+
+  return (
+    <SubscriptionPageContainer>
+      <SentryDocumentTitle title={t('Receipts')} orgSlug={organization.slug} />
+      <SettingsPageHeader title={t('Receipts')} />
+      {isPending ? (
+        <LoadingIndicator />
+      ) : isError ? (
+        <LoadingError />
+      ) : hasBillingPerms ? (
+        <ReceiptGrid
+          payments={data.json}
+          organization={organization}
+          paymentsPageLinks={paymentsPageLinks}
+        />
+      ) : (
+        <ContactBillingMembers />
+      )}
+    </SubscriptionPageContainer>
+  );
+}
+
+function ReceiptGrid({
+  payments,
+  organization,
+  paymentsPageLinks,
+}: {
+  organization: Organization;
+  payments: InvoiceBase[];
+  paymentsPageLinks: string | null | undefined;
+}) {
+  const isXSmallContainer = useResponsivePropValue({zero: true, sm: false});
+  const isSmallContainer = useResponsivePropValue({zero: true, xl: false});
+
+  return (
+    <Fragment>
+      <Stack
+        border="primary"
+        radius="md"
+        background="primary"
+        data-test-id="payment-list"
+      >
+        <Grid
+          align="start"
+          columns={{zero: 'repeat(4, 1fr)', sm: 'repeat(4, 1fr) 2fr'}}
+          gap="xl"
+          padding="xl"
+        >
+          <Text bold>{t('Date')}</Text>
+          <Text bold align="right">
+            {t('Amount')}
+          </Text>
+          <Text bold>{t('Status')}</Text>
+          {!isXSmallContainer && <Text bold>{t('Receipt ID')}</Text>}
+          <div />
+        </Grid>
+        {payments.map(payment => {
+          const url = `/settings/${organization.slug}/billing/receipts/${payment.id}/`;
+          return (
+            <Grid
+              key={payment.id}
+              align="center"
+              columns={{zero: 'repeat(4, 1fr)', sm: 'repeat(4, 1fr) 2fr'}}
+              gap="xl"
+              borderTop="primary"
+              padding="xl"
+            >
+              <Link to={url}>{moment(payment.dateCreated).format('MMM D, YYYY')}</Link>
+              <Container>
+                <Text align="right">{formatCurrency(payment.amountBilled ?? 0)}</Text>
+                {!!payment.amountRefunded && (
+                  <Text size="sm" align="right">
+                    {tct('[amount] refunded', {
+                      amount: formatCurrency(payment.amountRefunded),
+                    })}
+                  </Text>
+                )}
+              </Container>
+              <Container>
+                <ReceiptStatusTag payment={payment} />
+              </Container>
+              {!isXSmallContainer && (
+                <Text monospace ellipsis>
+                  {payment.id}
+                </Text>
+              )}
+              <Flex justify="end">
+                <LinkButton icon={<IconDownload />} href={payment.receipt.url}>
+                  {isSmallContainer ? undefined : t('Download PDF')}
+                </LinkButton>
+              </Flex>
+            </Grid>
+          );
+        })}
+      </Stack>
+      {payments.length === 0 && <Text>{t('No receipts found')}</Text>}
+      {paymentsPageLinks && <Pagination pageLinks={paymentsPageLinks} />}
+    </Fragment>
+  );
+}
+
+export default PaymentHistory;

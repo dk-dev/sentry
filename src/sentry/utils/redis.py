@@ -1,32 +1,45 @@
-import functools
+from __future__ import annotations
+
+import importlib.resources
+import inspect
 import logging
-import posixpath
 from copy import deepcopy
 from threading import Lock
+from typing import Any, Literal, TypeGuard, TypeVar, cast, overload
 
 import rb
 from django.utils.functional import SimpleLazyObject
-from pkg_resources import resource_string
 from redis.client import Script, StrictRedis
-from redis.connection import ConnectionPool, Encoder
-from redis.exceptions import BusyLoadingError, ConnectionError
-from rediscluster import RedisCluster
-from rediscluster.exceptions import ClusterError
+from redis.connection import ConnectionPool
+from sentry_redis_tools.clients import RedisCluster
+from sentry_redis_tools.failover_redis import FailoverRedis
+from sentry_redis_tools.retrying_cluster import RetryingRedisCluster
 
 from sentry import options
+from sentry.db.postgres.transactions import in_test_assert_no_transaction
 from sentry.exceptions import InvalidConfiguration
+from sentry.options import OptionsManager
 from sentry.utils import warnings
-from sentry.utils.compat import map
+from sentry.utils.env import in_test_environment
 from sentry.utils.versioning import Version, check_versions
 from sentry.utils.warnings import DeprecatedSettingWarning
 
 logger = logging.getLogger(__name__)
 
-_pool_cache = {}
+T = TypeVar("T", str, bytes)
+
+
+_REDIS_DEFAULT_CLIENT_ARGS = {
+    # 3 seconds default socket and socket connection timeout avoids blocking on socket till the
+    # operating system level timeout kicks in
+    "socket_timeout": 3.0
+}
+
+_pool_cache: dict[str, ConnectionPool] = {}
 _pool_lock = Lock()
 
 
-def _shared_pool(**opts):
+def _shared_pool(**opts: Any) -> ConnectionPool:
     if "host" in opts:
         key = "{}:{}/{}".format(opts["host"], opts["port"], opts["db"])
     else:
@@ -43,139 +56,328 @@ def _shared_pool(**opts):
         return pool
 
 
-_make_rb_cluster = functools.partial(rb.Cluster, pool_cls=_shared_pool)
+class RBClusterManager:
+    def __init__(self, options_manager: OptionsManager) -> None:
+        self._clusters: dict[str, rb.Cluster] = {}
+        self._options_manager = options_manager
 
-
-def make_rb_cluster(*args, **kwargs):
-    # This uses the standard library `warnings`, since this is provided for
-    # plugin compatibility but isn't actionable by the system administrator.
-    import warnings
-
-    warnings.warn(
-        "Direct Redis cluster construction is deprecated, please use named clusters. "
-        "Direct cluster construction will be removed in Sentry 8.5.",
-        DeprecationWarning,
-    )
-    return _make_rb_cluster(*args, **kwargs)
-
-
-class _RBCluster:
-    def supports(self, config):
-        return not config.get("is_redis_cluster", False)
-
-    def factory(self, **config):
+    def _factory(
+        self,
+        *,
+        hosts: list[dict[int, Any]] | dict[int, Any] | None = None,
+        **config: Any,
+    ) -> rb.Cluster:
+        if not hosts:
+            hosts = []
         # rb expects a dict of { host, port } dicts where the key is the host
         # ID. Coerce the configuration into the correct format if necessary.
-        hosts = config["hosts"]
         hosts = {k: v for k, v in enumerate(hosts)} if isinstance(hosts, list) else hosts
         config["hosts"] = hosts
 
-        return _make_rb_cluster(**config)
+        pool_options: dict[str, Any] = config.pop("client_args", {})
+        pool_options = {**_REDIS_DEFAULT_CLIENT_ARGS, **pool_options}
+        config["pool_options"] = pool_options
 
-    def __str__(self):
-        return "Redis Blaster Cluster"
+        return rb.Cluster(**config, pool_cls=_shared_pool)
 
-
-class RetryingRedisCluster(RedisCluster):
-    """
-    Execute a command with cluster reinitialization retry logic.
-
-    Should a cluster respond with a ConnectionError or BusyLoadingError the
-    cluster nodes list will be reinitialized and the command will be executed
-    again with the most up to date view of the world.
-    """
-
-    def execute_command(self, *args, **kwargs):
+    def get(self, key: str) -> rb.Cluster:
         try:
-            return super(self.__class__, self).execute_command(*args, **kwargs)
-        except (
-            ConnectionError,
-            BusyLoadingError,
-            ClusterError,
-            KeyError,  # see: https://github.com/Grokzen/redis-py-cluster/issues/287
-        ):
-            self.connection_pool.nodes.reset()
-            return super(self.__class__, self).execute_command(*args, **kwargs)
+            return self._clusters[key]
+        except KeyError:
+            pass
+
+        cfg = self._options_manager.get("redis.clusters", {}).get(key)
+        if cfg is None:
+            raise KeyError(f"Invalid cluster name: {key}")
+
+        if cfg.get("is_redis_cluster", False):
+            raise KeyError("Invalid cluster type, expected rb cluster")
+
+        ret = self._clusters[key] = self._factory(**cfg)
+        return ret
 
 
-class _RedisCluster:
-    def supports(self, config):
-        # _RedisCluster supports two configurations:
+class RedisClusterManager:
+    def __init__(self, options_manager: OptionsManager) -> None:
+        self._clusters_bytes: dict[str, RedisCluster[bytes] | StrictRedis[bytes]] = {}
+        self._clusters_str: dict[str, RedisCluster[str] | StrictRedis[str]] = {}
+        self._options_manager = options_manager
+
+    def _supports(self, config: dict[str, Any]) -> bool:
+        # supports two configurations:
         #  * Explicitly configured with is_redis_cluster. This mode is for real redis-cluster.
         #  * No is_redis_cluster, but only 1 host. This represents a singular node Redis running
         #    in non-cluster mode.
-        return config.get("is_redis_cluster", False) or len(config.get("hosts")) == 1
+        return config.get("is_redis_cluster", False) or len(config.get("hosts", [])) == 1
 
-    def factory(self, **config):
+    def _cfg(self, key: str) -> dict[str, Any]:
+        # TODO: This would probably be safer with a lock, but I'm not sure
+        # that it's necessary.
+        cfg = self._options_manager.get("redis.clusters", {}).get(key)
+        if cfg is None:
+            raise KeyError(f"Invalid cluster name: {key}")
+
+        if not self._supports(cfg):
+            raise KeyError("Invalid cluster type, expected redis cluster")
+
+        return cfg
+
+    @overload
+    def _factory(
+        self,
+        *,
+        decode_responses: Literal[False],
+        is_redis_cluster: bool = False,
+        readonly_mode: bool = False,
+        hosts: list[dict[Any, Any]] | dict[Any, Any] | None = None,
+        client_args: dict[str, Any] | None = None,
+        **config: Any,
+    ) -> RedisCluster[bytes] | StrictRedis[bytes]: ...
+
+    @overload
+    def _factory(
+        self,
+        *,
+        decode_responses: Literal[True],
+        is_redis_cluster: bool = False,
+        readonly_mode: bool = False,
+        hosts: list[dict[Any, Any]] | dict[Any, Any] | None = None,
+        client_args: dict[str, Any] | None = None,
+        **config: Any,
+    ) -> RedisCluster[str] | StrictRedis[str]: ...
+
+    def _factory(
+        self,
+        *,
+        decode_responses: bool,
+        is_redis_cluster: bool = False,
+        readonly_mode: bool = False,
+        hosts: list[dict[Any, Any]] | dict[Any, Any] | None = None,
+        client_args: dict[str, Any] | None = None,
+        **config: Any,
+    ) -> RedisCluster[bytes] | StrictRedis[bytes] | RedisCluster[str] | StrictRedis[str]:
         # StrictRedisCluster expects a list of { host, port } dicts. Coerce the
         # configuration into the correct format if necessary.
-        hosts = config.get("hosts")
-        hosts = list(hosts.values()) if isinstance(hosts, dict) else hosts
+        if not hosts:
+            hosts = []
+        hosts_list = list(hosts.values()) if isinstance(hosts, dict) else hosts
+
+        # support for scaling reads using the readonly mode
+        # https://redis.io/docs/reference/cluster-spec/#scaling-reads-using-replica-nodes
+
+        if not client_args:
+            client_args = {}
+
+        client_args = {**_REDIS_DEFAULT_CLIENT_ARGS, **client_args}
 
         # Redis cluster does not wait to attempt to connect. We'd prefer to not
         # make TCP connections on boot. Wrap the client in a lazy proxy object.
-        def cluster_factory():
-            if config.get("is_redis_cluster", False):
-                return RetryingRedisCluster(
-                    # Intentionally copy hosts here because redis-cluster-py
-                    # mutates the inner dicts and this closure can be run
-                    # concurrently, as SimpleLazyObject is not threadsafe. This
-                    # is likely triggered by RetryingRedisCluster running
-                    # reset() after startup
-                    #
-                    # https://github.com/Grokzen/redis-py-cluster/blob/73f27edf7ceb4a408b3008ef7d82dac570ab9c6a/rediscluster/nodemanager.py#L385
-                    startup_nodes=deepcopy(hosts),
-                    decode_responses=True,
-                    skip_full_coverage_check=True,
-                    max_connections=16,
-                    max_connections_per_node=True,
+        def cluster_factory() -> (
+            RedisCluster[bytes] | StrictRedis[bytes] | RedisCluster[str] | StrictRedis[str]
+        ):
+            if is_redis_cluster:
+                return _add_transaction_checks(
+                    RetryingRedisCluster(
+                        # Intentionally copy hosts here because redis-cluster-py
+                        # mutates the inner dicts and this closure can be run
+                        # concurrently, as SimpleLazyObject is not threadsafe. This
+                        # is likely triggered by RetryingRedisCluster running
+                        # reset() after startup
+                        #
+                        # https://github.com/Grokzen/redis-py-cluster/blob/73f27edf7ceb4a408b3008ef7d82dac570ab9c6a/rediscluster/nodemanager.py#L385
+                        startup_nodes=deepcopy(hosts_list),
+                        decode_responses=decode_responses,
+                        skip_full_coverage_check=True,
+                        max_connections=16,
+                        max_connections_per_node=True,
+                        readonly_mode=readonly_mode,
+                        **client_args,
+                    )
                 )
-            else:
-                host = hosts[0].copy()
-                host["decode_responses"] = True
-                return StrictRedis(**host)
 
+            assert len(hosts_list) > 0, "Hosts should have at least 1 entry"
+            host = dict(hosts_list[0])
+            host["decode_responses"] = decode_responses
+            return _add_transaction_checks(FailoverRedis(**host, **client_args))
+
+        # losing some type safety: SimpleLazyObject acts like the underlying type
         return SimpleLazyObject(cluster_factory)
 
-    def __str__(self):
-        return "Redis Cluster"
-
-
-class ClusterManager:
-    def __init__(self, options_manager, cluster_type=_RBCluster):
-        self.__clusters = {}
-        self.__options_manager = options_manager
-        self.__cluster_type = cluster_type()
-
-    def get(self, key):
-        cluster = self.__clusters.get(key)
+    def get(self, key: str) -> RedisCluster[str] | StrictRedis[str]:
+        try:
+            return self._clusters_str[key]
+        except KeyError:
+            pass
 
         # Do not access attributes of the `cluster` object to prevent
-        # setup/init of lazy objects. The _RedisCluster type will try to
-        # connect to the cluster during initialization.
-        if cluster is None:
-            # TODO: This would probably be safer with a lock, but I'm not sure
-            # that it's necessary.
-            configuration = self.__options_manager.get("redis.clusters").get(key)
-            if configuration is None:
-                raise KeyError(f"Invalid cluster name: {key}")
+        # setup/init of lazy objects.
+        ret = self._clusters_str[key] = self._factory(**self._cfg(key), decode_responses=True)
+        return ret
 
-            if not self.__cluster_type.supports(configuration):
-                raise KeyError(f"Invalid cluster type, expected: {self.__cluster_type}")
+    def get_binary(self, key: str) -> RedisCluster[bytes] | StrictRedis[bytes]:
+        try:
+            return self._clusters_bytes[key]
+        except KeyError:
+            pass
 
-            cluster = self.__clusters[key] = self.__cluster_type.factory(**configuration)
+        # Do not access attributes of the `cluster` object to prevent
+        # setup/init of lazy objects.
+        ret = self._clusters_bytes[key] = self._factory(**self._cfg(key), decode_responses=False)
+        return ret
 
-        return cluster
+
+# INC-2410: Existing violations of Redis calls happening during DB transactions at the time the check was added.
+# New entries are not allowed and we should burn this down over time.
+_REDIS_TRANSACTION_CALLSTACK_ALLOWLIST_RATCHET = frozenset(
+    {
+        (
+            "getsentry.billing.usagebuffer.redis.RedisUsageBuffer.fetch_pop",
+            "getsentry.billing.tasks.usagebuffer.flush_usage_buffer",
+        ),
+        (
+            "getsentry.models.billingseatassignment.BillingSeatAssignment.schedule_redis_key_sync.<locals>._sync_redis_key",
+        ),
+        (
+            "sentry.dynamic_sampling.rules.helpers.latest_releases.ProjectBoostedReleases.has_boosted_releases",
+            "sentry.models.releases.release_project.ReleaseProjectModelManager._on_post",
+        ),
+        ("sentry.event_manager._get_severity_metadata_for_group",),
+        (
+            "sentry.models.counter.increment_project_counter_in_cache",
+            "sentry.models.counter.Counter.increment",
+            "sentry.models.project.Project.next_short_id",
+            "sentry.event_manager._get_next_short_id",
+        ),
+        ("sentry.models.counter.refill_cached_short_ids",),
+        ("sentry.notifications.notifications.activity.base.GroupActivityNotification.__init__",),
+        (
+            "sentry.ratelimits.redis.RedisRateLimiter.reset",
+            "sentry.auth.twofactor.reset_2fa_rate_limits",
+            "sentry.users.web.accounts.recover_confirm",
+        ),
+        ("sentry.rules.actions.integrations.create_ticket.utils.create_issue",),
+        ("sentry.rules.conditions.event_frequency.EventFrequencyCondition.query_hook",),
+        ("sentry.rules.conditions.event_frequency.EventFrequencyPercentCondition.query_hook",),
+        ("sentry.rules.conditions.event_frequency.EventUniqueUserFrequencyCondition.query_hook",),
+        (
+            "sentry.services.eventstore.reprocessing.redis.RedisReprocessingStore.get_pending",
+            "sentry.reprocessing2.get_progress",
+        ),
+        (
+            "sentry.services.eventstore.reprocessing.redis.RedisReprocessingStore.get_pending",
+            "sentry.reprocessing2.is_reprocessing_active",
+        ),
+        ("sentry.tasks.assemble.delete_assemble_status",),
+        (
+            "sentry.uptime.config_producer._send_to_redis",
+            "sentry.uptime.config_producer.produce_config",
+        ),
+        (
+            "sentry.uptime.config_producer._send_to_redis",
+            "sentry.uptime.config_producer.produce_config_removal",
+        ),
+        ("sentry.uptime.subscriptions.subscriptions.disable_uptime_detector",),
+        ("sentry.utils.snowflake.get_sequence_value_from_redis",),
+        (
+            "sentry.utils.sentry_apps.request_buffer.SentryAppWebhookRequestsBuffer.add_request",
+            "sentry.sentry_apps.external_requests.utils.send_and_save_sentry_app_request",
+        ),
+        (
+            "sentry.utils.sentry_apps.request_buffer.SentryAppWebhookRequestsBuffer.add_request",
+            "sentry.utils.sentry_apps.webhooks.send_and_save_webhook_request",
+        ),
+    }
+)
+
+
+def _add_transaction_checks(
+    client: RedisCluster[T] | StrictRedis[T],
+) -> RedisCluster[T] | StrictRedis[T]:
+    """No-ops in production. In testing environments, wraps Redis calls to assert it's not inside a transaction."""
+    if not in_test_environment():
+        return client
+
+    mutable_client = cast(Any, client)
+    execute_command = mutable_client.execute_command
+
+    def execute_command_outside_transaction(*args: Any, **kwargs: Any) -> Any:
+        _assert_redis_transaction_allowed("Redis commands must run outside database transactions")
+        return execute_command(*args, **kwargs)
+
+    pipeline_factory = mutable_client.pipeline
+
+    def pipeline(*args: Any, **kwargs: Any) -> Any:
+        redis_pipeline = pipeline_factory(*args, **kwargs)
+        execute_pipeline = redis_pipeline.execute
+
+        def execute_pipeline_outside_transaction(*args: Any, **kwargs: Any) -> Any:
+            _assert_redis_transaction_allowed(
+                "Redis pipeline commands must run outside database transactions"
+            )
+            return execute_pipeline(*args, **kwargs)
+
+        redis_pipeline.execute = execute_pipeline_outside_transaction
+        return redis_pipeline
+
+    mutable_client.execute_command = execute_command_outside_transaction
+    mutable_client.pipeline = pipeline
+    return client
+
+
+def _assert_redis_transaction_allowed(message: str) -> None:
+    try:
+        in_test_assert_no_transaction(message)
+    except AssertionError:
+        callers = _redis_transaction_callers()
+        caller = callers[0] if callers else None
+        if caller is not None and caller.startswith(
+            ("getsentry.testutils.", "sentry.testutils.", "tests.")
+        ):
+            return
+        if _matches_redis_transaction_ratchet(callers):
+            return
+        raise AssertionError(f"{message} (Redis caller: {caller or 'unknown'})") from None
+
+
+def _matches_redis_transaction_ratchet(callers: tuple[str, ...]) -> bool:
+    for signature in _REDIS_TRANSACTION_CALLSTACK_ALLOWLIST_RATCHET:
+        remaining_callers = iter(callers)
+        if all(caller in remaining_callers for caller in signature):
+            return True
+    return False
+
+
+def _redis_transaction_callers() -> tuple[str, ...]:
+    callers = []
+    frame = inspect.currentframe()
+    while frame is not None:
+        module = frame.f_globals.get("__name__", "")
+        if module in ("_pytest", "pytest", "unittest.case") or module.startswith(
+            ("_pytest.", "pytest.", "unittest.case.")
+        ):
+            break
+        is_redis_internal = module == __name__ or any(
+            module == prefix or module.startswith(f"{prefix}.")
+            for prefix in ("django.utils.functional", "redis", "rediscluster", "sentry_redis_tools")
+        )
+        if module and not is_redis_internal:
+            callers.append(f"{module}.{frame.f_code.co_qualname}")
+        frame = frame.f_back
+    return tuple(callers)
 
 
 # TODO(epurkhiser): When migration of all rb cluster to true redis clusters has
 # completed, remove the rb ``clusters`` module variable and rename
 # redis_clusters to clusters.
-clusters = ClusterManager(options.default_manager)
-redis_clusters = ClusterManager(options.default_manager, _RedisCluster)
+clusters = RBClusterManager(options.default_manager)
+redis_clusters = RedisClusterManager(options.default_manager)
 
 
-def get_cluster_from_options(setting, options, cluster_manager=clusters):
+def get_cluster_from_options(
+    setting: str,
+    options: dict[str, Any],
+    cluster_manager: RBClusterManager = clusters,
+) -> tuple[rb.Cluster, dict[str, Any]]:
     cluster_option_name = "cluster"
     default_cluster_name = "default"
     cluster_constructor_option_names = frozenset(("hosts",))
@@ -189,14 +391,15 @@ def get_cluster_from_options(setting, options, cluster_manager=clusters):
         if cluster_option_name in options:
             raise InvalidConfiguration(
                 "Cannot provide both named cluster ({!r}) and cluster configuration ({}) options.".format(
-                    cluster_option_name, ", ".join(map(repr, cluster_constructor_option_names))
+                    cluster_option_name,
+                    ", ".join(repr(name) for name in cluster_constructor_option_names),
                 )
             )
         else:
             warnings.warn(
                 DeprecatedSettingWarning(
                     "{} parameter of {}".format(
-                        ", ".join(map(repr, cluster_constructor_option_names)), setting
+                        ", ".join(repr(name) for name in cluster_constructor_option_names), setting
                     ),
                     f'{setting}["{cluster_option_name}"]',
                     removed_in_version="8.5",
@@ -210,35 +413,75 @@ def get_cluster_from_options(setting, options, cluster_manager=clusters):
     return cluster, options
 
 
-def get_dynamic_cluster_from_options(setting, config):
+def get_dynamic_cluster_from_options(
+    setting: str, config: dict[str, Any]
+) -> tuple[bool, RedisCluster[str] | StrictRedis[str] | rb.Cluster, dict[str, Any]]:
     cluster_name = config.get("cluster", "default")
-    cluster_opts = options.default_manager.get("redis.clusters").get(cluster_name)
+    cluster_opts: dict[str, Any] | None = options.default_manager.get("redis.clusters").get(
+        cluster_name
+    )
     if cluster_opts is not None and cluster_opts.get("is_redis_cluster"):
-        # RedisCluster
+        # RedisCluster, StrictRedis
         return True, redis_clusters.get(cluster_name), config
 
     # RBCluster
-    return (False,) + get_cluster_from_options(setting, config)
+    cluster, config = get_cluster_from_options(setting, config)
+    return False, cluster, config
 
 
-def validate_dynamic_cluster(is_redis_cluster, cluster):
+def get_cluster_routing_client(
+    cluster: RedisCluster[T] | rb.Cluster, is_redis_cluster: bool
+) -> RedisCluster[T] | rb.RoutingClient:
+    if is_instance_redis_cluster(cluster, is_redis_cluster):
+        return cluster
+    elif is_instance_rb_cluster(cluster, is_redis_cluster):
+        return cluster.get_routing_client()
+    else:
+        raise AssertionError("unreachable")
+
+
+def is_instance_redis_cluster(
+    val: rb.Cluster | RedisCluster[str], is_redis_cluster: bool
+) -> TypeGuard[RedisCluster[str]]:
+    return is_redis_cluster
+
+
+def is_instance_rb_cluster(
+    val: rb.Cluster | RedisCluster[str], is_redis_cluster: bool
+) -> TypeGuard[rb.Cluster]:
+    return not is_redis_cluster
+
+
+def validate_dynamic_cluster(
+    is_redis_cluster: bool, cluster: rb.Cluster | RedisCluster[str]
+) -> None:
     try:
-        if is_redis_cluster:
+        if is_instance_redis_cluster(cluster, is_redis_cluster):
             cluster.ping()
-        else:
+            cluster.connection_pool.disconnect()
+        elif is_instance_rb_cluster(cluster, is_redis_cluster):
             with cluster.all() as client:
                 client.ping()
+            cluster.disconnect_pools()
+        else:
+            raise AssertionError("unreachable")
     except Exception as e:
-        raise InvalidConfiguration(str(e))
+        raise InvalidConfiguration(str(e)) from e
 
 
-def check_cluster_versions(cluster, required, recommended=None, label=None):
+def check_cluster_versions(
+    cluster: rb.Cluster,
+    required: Version,
+    recommended: Version | None = None,
+    label: str | None = None,
+) -> None:
     try:
         with cluster.all() as client:
             results = client.info()
+        cluster.disconnect_pools()
     except Exception as e:
         # Any connection issues should be caught here.
-        raise InvalidConfiguration(str(e))
+        raise InvalidConfiguration(str(e)) from e
 
     versions = {}
     for id, info in results.value.items():
@@ -246,68 +489,15 @@ def check_cluster_versions(cluster, required, recommended=None, label=None):
         # NOTE: This assumes there is no routing magic going on here, and
         # all requests to this host are being served by the same database.
         key = f"{host.host}:{host.port}"
-        versions[key] = Version(map(int, info["redis_version"].split(".", 3)))
+        versions[key] = Version([int(part) for part in str(info["redis_version"]).split(".", 3)])
 
     check_versions(
         "Redis" if label is None else f"Redis ({label})", versions, required, recommended
     )
 
 
-def load_script(path):
-    script = []
-
-    # This changes the argument order of the ``Script.__call__`` method to
-    # encourage using the script with a specific Redis client, rather
-    # than implicitly using the first client that the script was registered
-    # with. (This can prevent lots of bizarre behavior when dealing with
-    # clusters of Redis servers.)
-    def call_script(client, keys, args):
-        # Executes load_script's path as a Lua script on a Redis server.
-        # Takes the client to execute the script on as the first argument,
-        # followed by the values that will be provided as ``KEYS`` and ``ARGV``
-        # to the script as two sequence arguments.
-        if not script:
-            # XXX: Script is a list here. We're doing this to work around the lack of
-            # `nonlocal` in python 3, so that we only instantiate the script once.
-            script.append(
-                Script(client, resource_string("sentry", posixpath.join("scripts", path)))
-            )
-            # Unset the client here to keep things as close to how they worked before
-            # as possible. It will always be overridden on `__call__` anyway.
-            script[0].registered_client = None
-        return script[0](keys, args, client)
-
-    return call_script
-
-
-class SentryScript(Script):
-    """
-    XXX: This is a gross workaround to fix a breaking api change in redis-py. When we
-    instantiate a script, we've historically been passing `None` as the client. Then
-    when we call the script we pass the actual client, which Redis uses as an override.
-    The breaking changes relies on there being a client passed in the constructor to
-    determine the encoding of the script before generating the sha.
-
-    To work around this, we create a fake client with a fake connection pool that just
-    returns an encoder that will work. Once this has been done we then set the
-    `registered_client` back to None, so that the behaviour is the same as before.
-
-    This is only needed when we can't use `load_script`, since we have the client
-    available there and can pass it through. So once we remove `RedisTSDB` we can also
-    kill this hack.
-    """
-
-    class FakeConnectionPool:
-        def get_encoder(self):
-            return Encoder(encoding="utf-8", encoding_errors="strict", decode_responses=False)
-
-    class FakeEncoderClient:
-        def __init__(self):
-            self.connection_pool = SentryScript.FakeConnectionPool()
-
-    def __init__(self, registered_client, script):
-        if registered_client is None:
-            registered_client = self.FakeEncoderClient()
-        super().__init__(registered_client, script)
-        if isinstance(self.registered_client, self.FakeEncoderClient):
-            self.registered_client = None
+def load_redis_script(path: str) -> Script:
+    return Script(
+        None,
+        importlib.resources.files("sentry").joinpath("scripts", path).read_bytes(),
+    )

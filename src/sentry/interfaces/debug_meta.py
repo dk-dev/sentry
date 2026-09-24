@@ -24,10 +24,12 @@ class DebugMeta(Interface):
 
     @classmethod
     def to_python(cls, data):
-        return cls(
-            images=data.get("images", None) or [],
-            sdk_info=data.get("sdk_info"),
-            is_debug_build=data.get("is_debug_build"),
+        return super().to_python(
+            {
+                "images": data.get("images", None) or [],
+                "sdk_info": data.get("sdk_info"),
+                "is_debug_build": data.get("is_debug_build"),
+            }
         )
 
     def to_json(self):

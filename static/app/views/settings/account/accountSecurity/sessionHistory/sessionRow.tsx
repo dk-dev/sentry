@@ -1,14 +1,12 @@
-import React from 'react';
 import styled from '@emotion/styled';
 
-import {PanelItem} from 'app/components/panels';
-import TimeSince from 'app/components/timeSince';
-import space from 'app/styles/space';
-import {InternetProtocol} from 'app/types';
+import {PanelItem} from 'sentry/components/panels/panelItem';
+import {TimeSince} from 'sentry/components/timeSince';
+import type {InternetProtocol} from 'sentry/types/user';
 
 import {tableLayout} from './utils';
 
-function SessionRow({
+export function SessionRow({
   ipAddress,
   lastSeen,
   firstSeen,
@@ -23,24 +21,26 @@ function SessionRow({
           <CountryCode>{`${countryCode} (${regionCode})`}</CountryCode>
         )}
       </IpAndLocation>
-      <StyledTimeSince date={firstSeen} />
-      <StyledTimeSince date={lastSeen} />
+      <div>
+        <StyledTimeSince date={firstSeen} />
+      </div>
+      <div>
+        <StyledTimeSince date={lastSeen} />
+      </div>
     </SessionPanelItem>
   );
 }
 
-export default SessionRow;
-
 const IpAddress = styled('div')`
-  margin-bottom: ${space(0.5)};
-  font-weight: bold;
+  margin-bottom: ${p => p.theme.space.xs};
+  font-weight: ${p => p.theme.font.weight.sans.medium};
 `;
 const CountryCode = styled('div')`
-  font-size: ${p => p.theme.fontSizeRelativeSmall};
+  font-size: ${p => p.theme.font.size.sm};
 `;
 
 const StyledTimeSince = styled(TimeSince)`
-  font-size: ${p => p.theme.fontSizeRelativeSmall};
+  font-size: ${p => p.theme.font.size.sm};
 `;
 
 const IpAndLocation = styled('div')`

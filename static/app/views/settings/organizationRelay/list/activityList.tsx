@@ -1,35 +1,53 @@
-import React from 'react';
 import styled from '@emotion/styled';
 
-import DateTime from 'app/components/dateTime';
-import {PanelTable} from 'app/components/panels';
-import {t} from 'app/locale';
-import {RelayActivity} from 'app/types';
+import type {TableColumnConfig} from '@sentry/scraps/table';
+
+import {DateTime} from 'sentry/components/dateTime';
+import {SimpleTable} from 'sentry/components/tables/simpleTable';
+import {t} from 'sentry/locale';
+import type {RelayActivity} from 'sentry/types/relay';
 
 type Props = {
-  activities: Array<RelayActivity>;
+  activities: RelayActivity[];
 };
 
-const ActivityList = ({activities}: Props) => (
-  <StyledPanelTable headers={[t('Version'), t('First Used'), t('Last Used')]}>
-    {activities.map(({relayId, version, firstSeen, lastSeen}) => {
-      return (
-        <React.Fragment key={relayId}>
-          <div>{version}</div>
-          <DateTime date={firstSeen} seconds={false} />
-          <DateTime date={lastSeen} seconds={false} />
-        </React.Fragment>
-      );
-    })}
-  </StyledPanelTable>
-);
+export function ActivityList({activities}: Props) {
+  return (
+    <SimpleTable
+      columns={ACTIVITY_COLUMNS}
+      header={
+        <SimpleTable.HeaderRow>
+          <SimpleTable.HeaderCell>{t('Version')}</SimpleTable.HeaderCell>
+          <SimpleTable.HeaderCell>{t('First Used')}</SimpleTable.HeaderCell>
+          <SimpleTable.HeaderCell>{t('Last Used')}</SimpleTable.HeaderCell>
+        </SimpleTable.HeaderRow>
+      }
+    >
+      {activities.map(({relayId, version, firstSeen, lastSeen}) => {
+        return (
+          <SimpleTable.Row key={relayId}>
+            <SimpleTable.RowCell>
+              <Version>{version}</Version>
+            </SimpleTable.RowCell>
+            <SimpleTable.RowCell>
+              <DateTime date={firstSeen} />
+            </SimpleTable.RowCell>
+            <SimpleTable.RowCell>
+              <DateTime date={lastSeen} />
+            </SimpleTable.RowCell>
+          </SimpleTable.Row>
+        );
+      })}
+    </SimpleTable>
+  );
+}
 
-export default ActivityList;
+const ACTIVITY_COLUMNS: TableColumnConfig[] = [
+  {key: 'version', width: 'minmax(max-content, 2fr)'},
+  {key: 'firstSeen', width: 'minmax(max-content, 1fr)'},
+  {key: 'lastSeen', width: 'minmax(max-content, 1fr)'},
+];
 
-const StyledPanelTable = styled(PanelTable)`
-  grid-template-columns: repeat(3, 2fr);
-
-  @media (min-width: ${p => p.theme.breakpoints[2]}) {
-    grid-template-columns: 2fr repeat(2, 1fr);
-  }
+const Version = styled('div')`
+  font-variant-numeric: tabular-nums;
 `;

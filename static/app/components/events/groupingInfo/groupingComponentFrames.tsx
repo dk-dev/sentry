@@ -1,91 +1,73 @@
-import React from 'react';
+import {Fragment, useState} from 'react';
 import styled from '@emotion/styled';
 
-import Button from 'app/components/button';
-import {IconAdd, IconSubtract} from 'app/icons';
-import {tct} from 'app/locale';
-import space from 'app/styles/space';
+import {Button} from '@sentry/scraps/button';
 
-import {GroupingComponentListItem} from './groupingComponent';
+import {IconAdd, IconSubtract} from 'sentry/icons';
+import {tct} from 'sentry/locale';
 
-type DefaultProps = {
-  maxVisibleItems: number;
-};
-
-type Props = DefaultProps & {
+interface GroupingComponentFramesProps {
   items: React.ReactNode[];
-};
+  showNonContributing: boolean;
+}
 
-type State = {
-  collapsed: boolean;
-};
+export function GroupingComponentFrames({
+  items,
+  showNonContributing,
+}: GroupingComponentFramesProps) {
+  const [collapsed, setCollapsed] = useState(!showNonContributing);
+  const [previousShowNonContributing, setPreviousShowNonContributing] =
+    useState(showNonContributing);
+  const isCollapsible = items.length > 2;
 
-class GroupingComponentFrames extends React.Component<Props, State> {
-  static defaultProps: DefaultProps = {
-    maxVisibleItems: 2,
-  };
-
-  state: State = {
-    collapsed: true,
-  };
-
-  render() {
-    const {items, maxVisibleItems} = this.props;
-    const {collapsed} = this.state;
-    const isCollapsable = items.length > maxVisibleItems;
-
-    return (
-      <React.Fragment>
-        {items.map((item, index) => {
-          if (!collapsed || index < maxVisibleItems) {
-            return (
-              <GroupingComponentListItem isCollapsable={isCollapsable} key={index}>
-                {item}
-              </GroupingComponentListItem>
-            );
-          }
-
-          if (index === maxVisibleItems) {
-            return (
-              <GroupingComponentListItem key={index}>
-                <ToggleCollapse
-                  size="small"
-                  priority="link"
-                  icon={<IconAdd size="8px" />}
-                  onClick={() => this.setState({collapsed: false})}
-                >
-                  {tct('show [numberOfFrames] similiar', {
-                    numberOfFrames: items.length - maxVisibleItems,
-                  })}
-                </ToggleCollapse>
-              </GroupingComponentListItem>
-            );
-          }
-
-          return null;
-        })}
-
-        {!collapsed && items.length > maxVisibleItems && (
-          <GroupingComponentListItem>
-            <ToggleCollapse
-              size="small"
-              priority="link"
-              icon={<IconSubtract size="8px" />}
-              onClick={() => this.setState({collapsed: true})}
-            >
-              {tct('collapse [numberOfFrames] similiar', {
-                numberOfFrames: items.length - maxVisibleItems,
-              })}
-            </ToggleCollapse>
-          </GroupingComponentListItem>
-        )}
-      </React.Fragment>
-    );
+  // Reset the frame limit without remounting nested disclosures.
+  if (previousShowNonContributing !== showNonContributing) {
+    setPreviousShowNonContributing(showNonContributing);
+    setCollapsed(!showNonContributing);
   }
+
+  const visibleItems = collapsed ? items.slice(0, 2) : items;
+
+  return (
+    <Fragment>
+      {visibleItems.map((item, index) => (
+        <GroupingComponentListItem isCollapsible={isCollapsible} key={index}>
+          {item}
+        </GroupingComponentListItem>
+      ))}
+
+      {isCollapsible && (
+        <GroupingComponentListItem key="toggle">
+          <ToggleCollapse
+            size="sm"
+            variant="link"
+            icon={
+              collapsed ? <IconAdd legacySize="8px" /> : <IconSubtract legacySize="8px" />
+            }
+            onClick={() => setCollapsed(previous => !previous)}
+            aria-expanded={!collapsed}
+          >
+            {collapsed
+              ? tct('show [numberOfFrames] similar', {
+                  numberOfFrames: items.length - 2,
+                })
+              : tct('collapse [numberOfFrames] similar', {
+                  numberOfFrames: items.length - 2,
+                })}
+          </ToggleCollapse>
+        </GroupingComponentListItem>
+      )}
+    </Fragment>
+  );
 }
 
 const ToggleCollapse = styled(Button)`
-  margin: ${space(0.5)} 0;
+  margin: ${p => p.theme.space.xs} 0;
+  color: ${p => p.theme.tokens.interactive.link.accent.rest};
 `;
 
-export default GroupingComponentFrames;
+export const GroupingComponentListItem = styled('li')<{isCollapsible?: boolean}>`
+  padding: 0;
+  margin: ${p => p.theme.space['2xs']} 0 ${p => p.theme.space['2xs']}
+    ${p => p.theme.space.lg};
+`;

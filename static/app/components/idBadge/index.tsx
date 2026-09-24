@@ -1,18 +1,16 @@
-import React from 'react';
 import styled from '@emotion/styled';
 
-import ErrorBoundary from 'app/components/errorBoundary';
+import {ErrorBoundary} from 'sentry/components/errorBoundary';
 
-import getBadge from './getBadge';
-
-type Props = React.ComponentProps<typeof getBadge> & Record<string, any>;
+import type {GetBadgeProps} from './getBadge';
+import {getBadge} from './getBadge';
 
 /**
  * Public interface for all "id badges":
  * Organization, project, team, user
  */
 
-const IdBadge = (props: Props) => {
+export function IdBadge(props: GetBadgeProps) {
   const componentBadge = getBadge(props);
 
   if (!componentBadge) {
@@ -22,9 +20,7 @@ const IdBadge = (props: Props) => {
   }
 
   return <InlineErrorBoundary mini>{componentBadge}</InlineErrorBoundary>;
-};
-
-export default IdBadge;
+}
 
 const InlineErrorBoundary = styled(ErrorBoundary)`
   background-color: transparent;
@@ -33,5 +29,5 @@ const InlineErrorBoundary = styled(ErrorBoundary)`
   align-items: center;
   margin-bottom: 0;
   box-shadow: none;
-  padding: 0; /* Because badges dont have any padding, so this should make the boundary fit well */
+  padding: 0; /* Because badges don't have any padding, so this should make the boundary fit well */
 `;

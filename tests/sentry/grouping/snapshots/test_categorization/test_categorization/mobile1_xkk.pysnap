@@ -1,7 +1,5 @@
 ---
-created: '2021-03-29T22:02:38.438648Z'
-creator: sentry
-source: tests/sentry/grouping/test_categorization.py
+source: tests/sentry/grouping/test_categorization.py::test_categorization
 ---
 
 
@@ -11,10 +9,10 @@ IllegalArgumentException:Missing android.support.FILE_PROVIDER_PATHS meta-data (
                     java.lang.reflect.Method  invoke category=indirection
                     java.lang.reflect.Method  invoke category=indirection
                   android.app.ActivityThread  main category=threadbase
-                           android.os.Looper  loop category=system
-                          android.os.Handler  dispatchMessage category=internals
-                android.app.ActivityThread$H  handleMessage category=std
-                  android.app.ActivityThread  access$1600 category=internals
+                           android.os.Looper  loop category=threadbase
+                          android.os.Handler  dispatchMessage category=threadbase
+                android.app.ActivityThread$H  handleMessage category=threadbase
+                  android.app.ActivityThread  access$1600 category=std
                   android.app.ActivityThread  handleBindApplication category=internals
                   android.app.ActivityThread  installContentProviders category=internals
                   android.app.ActivityThread  installProvider category=internals
@@ -32,10 +30,10 @@ RuntimeException:Unable to get provider com.helpshift.support.providers.Helpshif
                     java.lang.reflect.Method  invoke category=indirection
                     java.lang.reflect.Method  invoke category=indirection
                   android.app.ActivityThread  main category=threadbase
-                           android.os.Looper  loop category=system
-                          android.os.Handler  dispatchMessage category=internals
-                android.app.ActivityThread$H  handleMessage category=std
-                  android.app.ActivityThread  access$1600 category=internals
+                           android.os.Looper  loop category=threadbase
+                          android.os.Handler  dispatchMessage category=threadbase
+                android.app.ActivityThread$H  handleMessage category=threadbase
+                  android.app.ActivityThread  access$1600 category=std
                   android.app.ActivityThread  handleBindApplication category=internals
                   android.app.ActivityThread  installContentProviders category=internals
                   android.app.ActivityThread  installProvider category=internals

@@ -1,22 +1,28 @@
-import React from 'react';
 import styled from '@emotion/styled';
 import {motion} from 'framer-motion';
 import {PlatformIcon} from 'platformicons';
 
-import {PlatformKey} from 'app/data/platformCategories';
-import space from 'app/styles/space';
+import type {PlatformKey} from 'sentry/types/platform';
+import {useExperiment} from 'sentry/utils/useExperiment';
 
-import StepHeading from './stepHeading';
+import {OnboardingStepHeading} from './onboardingStepHeading';
 
 type Props = {
-  stepHeaderText: string;
   platform: PlatformKey;
+  stepHeaderText: string;
 };
-export default function SetupIntroduction({stepHeaderText, platform}: Props) {
+export function SetupIntroduction({stepHeaderText, platform}: Props) {
+  const {inExperiment: hasScmOnboarding} = useExperiment({
+    feature: 'onboarding-scm-experiment',
+    reportExposure: false,
+  });
+
   return (
     <TitleContainer>
-      <StepHeading step={2}>{stepHeaderText}</StepHeading>
-      <motion.div
+      <OnboardingStepHeading step={hasScmOnboarding ? undefined : 2}>
+        {stepHeaderText}
+      </OnboardingStepHeading>
+      <IconWrapper
         variants={{
           initial: {opacity: 0, x: 20},
           animate: {opacity: 1, x: 0},
@@ -24,19 +30,22 @@ export default function SetupIntroduction({stepHeaderText, platform}: Props) {
         }}
       >
         <PlatformIcon size={48} format="lg" platform={platform} />
-      </motion.div>
+      </IconWrapper>
     </TitleContainer>
   );
 }
 
 const TitleContainer = styled('div')`
-  display: grid;
-  grid-template-columns: max-content 1fr;
-  grid-gap: ${space(2)};
-  align-items: center;
-  justify-items: end;
+  display: flex;
+  gap: ${p => p.theme.space.xl};
 
-  ${StepHeading} {
+  ${OnboardingStepHeading} {
     margin-bottom: 0;
+    min-width: 0;
   }
+`;
+
+const IconWrapper = styled(motion.div)`
+  margin-left: auto;
+  flex-shrink: 0;
 `;

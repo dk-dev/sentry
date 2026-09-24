@@ -1,29 +1,67 @@
-import React from 'react';
+import {lazy, Suspense} from 'react';
+import {skipToken, useQuery} from '@tanstack/react-query';
 
-import {Client} from 'app/api';
-import EmptyStateWarning from 'app/components/emptyStateWarning';
-import LoadingIndicator from 'app/components/loadingIndicator';
-import Placeholder from 'app/components/placeholder';
-import {DEFAULT_QUERY} from 'app/constants';
-import {t} from 'app/locale';
-import {LightWeightOrganization, Project} from 'app/types';
+import {EmptyStateWarning} from 'sentry/components/emptyStateWarning';
+import {LoadingIndicator} from 'sentry/components/loadingIndicator';
+import {ALL_ACCESS_PROJECTS} from 'sentry/components/pageFilters/constants';
+import {Placeholder} from 'sentry/components/placeholder';
+import {t} from 'sentry/locale';
+import type {Organization} from 'sentry/types/organization';
+import type {Project} from 'sentry/types/project';
+import {apiOptions} from 'sentry/utils/api/apiOptions';
+import {NoIssuesMatched} from 'sentry/views/issueList/noGroupsHandler/noIssuesMatched';
+import {DEFAULT_QUERY, FOR_REVIEW_QUERIES} from 'sentry/views/issueList/utils';
 
-import NoUnresolvedIssues from './noUnresolvedIssues';
+import {NoUnresolvedIssues} from './noUnresolvedIssues';
 
-type Props = {
-  api: Client;
-  organization: LightWeightOrganization;
-  query: string;
-  selectedProjectIds?: number[];
+const WaitingForEvents = lazy(() => import('sentry/components/waitingForEvents'));
+const UpdatedEmptyState = lazy(() => import('sentry/components/updatedEmptyState'));
+
+interface NoGroupsHandlerProps {
   groupIds: string[];
+  organization: Organization;
+  query: string;
+  selectedProjectIds: number[];
   emptyMessage?: React.ReactNode;
-};
+}
 
-type State = {
-  fetchingSentFirstEvent: boolean;
-  firstEventProjects?: Project[] | null;
-  sentFirstEvent?: boolean;
-};
+interface SentFirstEventResponse {
+  sentFirstEvent: boolean;
+}
+
+interface EmptyResultProps {
+  query: string;
+  emptyMessage?: React.ReactNode;
+}
+
+const UPDATED_EMPTY_STATE_PLATFORMS = new Set([
+  'python-django',
+  'node',
+  'javascript-nextjs',
+  'android',
+  'apple-ios',
+  'dotnet',
+  'dotnet-aspnetcore',
+  'flutter',
+  'go',
+  'java',
+  'java-spring-boot',
+  'javascript',
+  'javascript-angular',
+  'javascript-react',
+  'javascript-vue',
+  'node-express',
+  'node-nestjs',
+  'php',
+  'php-laravel',
+  'python',
+  'python-fastapi',
+  'python-flask',
+  'react-native',
+  'ruby',
+  'ruby-rails',
+  'unity',
+]);
 
 /**
  * Component which is rendered when no groups/issues were found. This could
@@ -31,132 +69,127 @@ type State = {
  * having no issues be returned from a query. This component will conditionally
  * render one of those states.
  */
-class NoGroupsHandler extends React.Component<Props, State> {
-  state = {
-    fetchingSentFirstEvent: true,
-    sentFirstEvent: false,
-    firstEventProjects: null,
-  };
+export function NoGroupsHandler({
+  emptyMessage,
+  groupIds,
+  organization,
+  query,
+  selectedProjectIds,
+}: NoGroupsHandlerProps) {
+  // If no projects are selected, then we must check every project the user is a
+  // member of and make sure there are no first events for all of the projects.
+  // Set project to -1 for all projects. Do not pass a project id for "my projects".
+  const explicitSelectedProjectIds =
+    selectedProjectIds.length && !selectedProjectIds.includes(ALL_ACCESS_PROJECTS)
+      ? selectedProjectIds
+      : undefined;
+  const selectedProjectQuery = explicitSelectedProjectIds
+    ?.map(id => `id:${id}`)
+    .join(' ');
 
-  componentDidMount() {
-    this.fetchSentFirstEvent();
-    this._isMounted = true;
-  }
+  const sentFirstEventQuery = useQuery({
+    ...apiOptions.as<SentFirstEventResponse>()(
+      '/organizations/$organizationIdOrSlug/sent-first-event/',
+      {
+        path: {organizationIdOrSlug: organization.slug},
+        query: {project: explicitSelectedProjectIds},
+        staleTime: 0,
+      }
+    ),
+    retry: false,
+  });
 
-  componentWillUnmount() {
-    this._isMounted = false;
-  }
+  const shouldFetchProject = sentFirstEventQuery.data?.sentFirstEvent === false;
 
-  /**
-   * This is a bit hacky, but this is causing flakiness in frontend tests
-   * `issueList/overview` is being unmounted during tests before the requests
-   * in `this.fetchSentFirstEvent` are completed and causing this React warning:
-   *
-   * Warning: Can't perform a React state update on an unmounted component.
-   * This is a no-op, but it indicates a memory leak in your application.
-   * To fix, cancel all subscriptions and asynchronous tasks in the
-   * componentWillUnmount method.
-   *
-   * This is something to revisit if we refactor API client
-   */
-  private _isMounted: boolean = false;
+  const projectsQuery = useQuery({
+    ...apiOptions.as<Project[]>()('/organizations/$organizationIdOrSlug/projects/', {
+      path: shouldFetchProject ? {organizationIdOrSlug: organization.slug} : skipToken,
+      query: {
+        collapse: ['latestDeploys', 'unusedFeatures'],
+        per_page: 1,
+        query: selectedProjectQuery,
+      },
+      staleTime: 0,
+    }),
+    retry: false,
+  });
 
-  async fetchSentFirstEvent() {
-    this.setState({
-      fetchingSentFirstEvent: true,
-    });
-
-    const {organization, selectedProjectIds, api} = this.props;
-    let sentFirstEvent = false;
-    let projects = [];
-
-    // If no projects are selected, then we must check every project the user is a
-    // member of and make sure there are no first events for all of the projects
-    let firstEventQuery = {};
-    const projectsQuery: {per_page: number; query?: string} = {per_page: 1};
-
-    if (!selectedProjectIds || !selectedProjectIds.length) {
-      firstEventQuery = {is_member: true};
-    } else {
-      firstEventQuery = {project: selectedProjectIds};
-      projectsQuery.query = selectedProjectIds.map(id => `id:${id}`).join(' ');
-    }
-
-    [{sentFirstEvent}, projects] = await Promise.all([
-      // checks to see if selection has sent a first event
-      api.requestPromise(`/organizations/${organization.slug}/sent-first-event/`, {
-        query: firstEventQuery,
-      }),
-      // retrieves a single project to feed to the ErrorRobot from renderStreamBody
-      api.requestPromise(`/organizations/${organization.slug}/projects/`, {
-        query: projectsQuery,
-      }),
-    ]);
-
-    // See comment where this property is initialized
-    // FIXME
-    if (!this._isMounted) {
-      return;
-    }
-
-    this.setState({
-      fetchingSentFirstEvent: false,
-      sentFirstEvent,
-      firstEventProjects: projects,
-    });
-  }
-
-  renderLoading() {
+  if (sentFirstEventQuery.isPending || (shouldFetchProject && projectsQuery.isPending)) {
     return <LoadingIndicator />;
   }
 
-  renderAwaitingEvents(projects: State['firstEventProjects']) {
-    const {organization, groupIds} = this.props;
+  if (sentFirstEventQuery.isError || (shouldFetchProject && projectsQuery.isError)) {
+    return <EmptyResult emptyMessage={emptyMessage} query={query} />;
+  }
 
-    const project = projects && projects.length > 0 ? projects[0] : undefined;
-    const sampleIssueId = groupIds.length > 0 ? groupIds[0] : undefined;
-
-    const ErrorRobot = React.lazy(
-      () => import(/* webpackChunkName: "ErrorRobot" */ 'app/components/errorRobot')
-    );
-
+  if (!sentFirstEventQuery.data?.sentFirstEvent) {
     return (
-      <React.Suspense fallback={<Placeholder height="260px" />}>
-        <ErrorRobot
-          org={organization}
-          project={project}
-          sampleIssueId={sampleIssueId}
-          gradient
-        />
-      </React.Suspense>
+      <AwaitingEvents
+        groupIds={groupIds}
+        organization={organization}
+        projects={projectsQuery.data ?? []}
+      />
     );
   }
 
-  renderEmpty() {
-    const {emptyMessage} = this.props;
+  return <EmptyResult emptyMessage={emptyMessage} query={query} />;
+}
+
+interface AwaitingEventsProps {
+  groupIds: string[];
+  organization: Organization;
+  projects: Project[];
+}
+
+function AwaitingEvents({groupIds, organization, projects}: AwaitingEventsProps) {
+  const project = projects?.[0];
+  const sampleIssueId = groupIds.length > 0 ? groupIds[0] : undefined;
+
+  const hasUpdatedEmptyState =
+    project?.platform && UPDATED_EMPTY_STATE_PLATFORMS.has(project.platform);
+
+  return (
+    <Suspense fallback={<Placeholder height="260px" />}>
+      {!hasUpdatedEmptyState && (
+        <WaitingForEvents
+          org={organization}
+          project={project}
+          sampleIssueId={sampleIssueId}
+        />
+      )}
+      {hasUpdatedEmptyState && <UpdatedEmptyState project={project} />}
+    </Suspense>
+  );
+}
+
+function EmptyResult({emptyMessage, query}: EmptyResultProps) {
+  if (query === DEFAULT_QUERY) {
+    return (
+      <NoUnresolvedIssues
+        title={t("We couldn't find any issues that matched your filters.")}
+        subtitle={t('Get out there and write some broken code!')}
+      />
+    );
+  }
+
+  if (FOR_REVIEW_QUERIES.includes(query || '')) {
+    return (
+      <NoUnresolvedIssues
+        title={t('Well, would you look at that.')}
+        subtitle={t(
+          'No more issues to review. Better get back out there and write some broken code.'
+        )}
+      />
+    );
+  }
+
+  if (emptyMessage) {
     return (
       <EmptyStateWarning>
-        <p>{emptyMessage ?? t('Sorry, no issues match your filters.')}</p>
+        <p>{emptyMessage}</p>
       </EmptyStateWarning>
     );
   }
 
-  render() {
-    const {fetchingSentFirstEvent, sentFirstEvent, firstEventProjects} = this.state;
-    const {query} = this.props;
-
-    if (fetchingSentFirstEvent) {
-      return this.renderLoading();
-    }
-    if (!sentFirstEvent) {
-      return this.renderAwaitingEvents(firstEventProjects);
-    }
-    if (query === DEFAULT_QUERY) {
-      return <NoUnresolvedIssues />;
-    }
-
-    return this.renderEmpty();
-  }
+  return <NoIssuesMatched />;
 }
-
-export default NoGroupsHandler;

@@ -1,13 +1,209 @@
+import type {Span} from '@sentry/core';
 import * as Sentry from '@sentry/react';
-import {Transaction} from '@sentry/types';
 
-import HookStore from 'app/stores/hookStore';
-import {Hooks} from 'app/types/hooks';
+import {getOverride} from 'sentry/overrideRegistry';
+import type {Overrides} from 'sentry/types/overrides';
+import {
+  alertsEventMap,
+  type AlertsEventParameters,
+} from 'sentry/utils/analytics/alertsAnalyticsEvents';
+import {
+  commandPaletteEventMap,
+  type CommandPaletteEventParameters,
+} from 'sentry/utils/analytics/commandPaletteAnalyticsEvents';
+import {
+  exploreAnalyticsEventMap,
+  type ExploreAnalyticsEventParameters,
+} from 'sentry/utils/analytics/exploreAnalyticsEvents';
+import {
+  featureFlagEventMap,
+  type FeatureFlagEventParameters,
+} from 'sentry/utils/analytics/featureFlagAnalyticsEvents';
+import {
+  gamingEventMap,
+  type GamingAnalyticsEventParameters,
+} from 'sentry/utils/analytics/gamingAnalyticsEvents';
+import {
+  logsAnalyticsEventMap,
+  type LogsAnalyticsEventParameters,
+} from 'sentry/utils/analytics/logsAnalyticsEvent';
+import {
+  metricsAnalyticsEventMap,
+  type MetricsAnalyticsEventParameters,
+} from 'sentry/utils/analytics/metricsAnalyticsEvent';
+import {navigationAnalyticsEventMap} from 'sentry/utils/analytics/navigationAnalyticsEvents';
+import {nextJsInsightsEventMap} from 'sentry/utils/analytics/nextJsInsightsAnalyticsEvents';
+import {
+  quickStartEventMap,
+  type QuickStartEventParameters,
+} from 'sentry/utils/analytics/quickStartAnalyticsEvents';
+import {
+  statsEventMap,
+  type StatsEventParameters,
+} from 'sentry/utils/analytics/statsAnalyticsEvents';
+
+import type {AgentMonitoringEventParameters} from './analytics/agentMonitoringAnalyticsEvents';
+import {agentMonitoringEventMap} from './analytics/agentMonitoringAnalyticsEvents';
+import type {AuthV2EventParameters} from './analytics/authV2AnalyticsEvents';
+import {authV2EventMap} from './analytics/authV2AnalyticsEvents';
+import type {BreadcrumbsAnalyticsEventParameters} from './analytics/breadcrumbsAnalyticsEvents';
+import {breadcrumbsAnalyticsEventMap} from './analytics/breadcrumbsAnalyticsEvents';
+import type {ConversationsEventParameters} from './analytics/conversationsAnalyticsEvents';
+import {conversationsEventMap} from './analytics/conversationsAnalyticsEvents';
+import type {CoreUIEventParameters} from './analytics/coreuiAnalyticsEvents';
+import {coreUIEventMap} from './analytics/coreuiAnalyticsEvents';
+import type {DashboardsEventParameters} from './analytics/dashboardsAnalyticsEvents';
+import {dashboardsEventMap} from './analytics/dashboardsAnalyticsEvents';
+import type {DiscoverEventParameters} from './analytics/discoverAnalyticsEvents';
+import {discoverEventMap} from './analytics/discoverAnalyticsEvents';
+import type {DynamicSamplingEventParameters} from './analytics/dynamicSamplingAnalyticsEvents';
+import {dynamicSamplingEventMap} from './analytics/dynamicSamplingAnalyticsEvents';
+import type {EcosystemEventParameters} from './analytics/ecosystemAnalyticsEvents';
+import {ecosystemEventMap} from './analytics/ecosystemAnalyticsEvents';
+import type {FeedbackEventParameters} from './analytics/feedbackAnalyticsEvents';
+import {feedbackEventMap} from './analytics/feedbackAnalyticsEvents';
+import type {GrowthEventParameters} from './analytics/growthAnalyticsEvents';
+import {growthEventMap} from './analytics/growthAnalyticsEvents';
+import type {InsightEventParameters} from './analytics/insightAnalyticEvents';
+import {insightEventMap} from './analytics/insightAnalyticEvents';
+import type {IntegrationEventParameters} from './analytics/integrations';
+import {integrationEventMap} from './analytics/integrations';
+import type {IssueEventParameters} from './analytics/issueAnalyticsEvents';
+import {issueEventMap} from './analytics/issueAnalyticsEvents';
+import type {LaravelInsightsEventParameters} from './analytics/laravelInsightsAnalyticsEvents';
+import {laravelInsightsEventMap} from './analytics/laravelInsightsAnalyticsEvents';
+import {makeAnalyticsFunction} from './analytics/makeAnalyticsFunction';
+import type {McpMonitoringEventParameters} from './analytics/mcpMonitoringAnalyticsEvents';
+import {mcpMonitoringEventMap} from './analytics/mcpMonitoringAnalyticsEvents';
+import type {MonitorsEventParameters} from './analytics/monitorsAnalyticsEvents';
+import {monitorsEventMap} from './analytics/monitorsAnalyticsEvents';
+import type {OnboardingEventParameters} from './analytics/onboardingAnalyticsEvents';
+import {onboardingEventMap} from './analytics/onboardingAnalyticsEvents';
+import type {PerformanceEventParameters} from './analytics/performanceAnalyticsEvents';
+import {performanceEventMap} from './analytics/performanceAnalyticsEvents';
+import type {PreprodBuildEventParameters} from './analytics/preprodBuildAnalyticsEvents';
+import {preprodBuildEventMap} from './analytics/preprodBuildAnalyticsEvents';
+import type {ProfilingEventParameters} from './analytics/profilingAnalyticsEvents';
+import {profilingEventMap} from './analytics/profilingAnalyticsEvents';
+import type {ProjectCreationEventParameters} from './analytics/projectCreationAnalyticsEvents';
+import {projectCreationEventMap} from './analytics/projectCreationAnalyticsEvents';
+import type {ReleasesEventParameters} from './analytics/releasesAnalyticsEvents';
+import {releasesEventMap} from './analytics/releasesAnalyticsEvents';
+import type {ReplayEventParameters} from './analytics/replayAnalyticsEvents';
+import {replayEventMap} from './analytics/replayAnalyticsEvents';
+import type {SearchEventParameters} from './analytics/searchAnalyticsEvents';
+import {searchEventMap} from './analytics/searchAnalyticsEvents';
+import {seerAnalyticsEventsMap} from './analytics/seerAnalyticsEvents';
+import type {SeerAnalyticsEventsParameters} from './analytics/seerAnalyticsEvents';
+import type {SettingsEventParameters} from './analytics/settingsAnalyticsEvents';
+import {settingsEventMap} from './analytics/settingsAnalyticsEvents';
+import type {SignupAnalyticsParameters} from './analytics/signupAnalyticsEvents';
+import {signupEventMap} from './analytics/signupAnalyticsEvents';
+import type {StackTraceEventParameters} from './analytics/stackTraceAnalyticsEvents';
+import {stackTraceEventMap} from './analytics/stackTraceAnalyticsEvents';
+import {starfishEventMap} from './analytics/starfishAnalyticsEvents';
+import type {TempestEventParameters} from './analytics/tempestAnalyticsEvents';
+import {tempestEventMap} from './analytics/tempestAnalyticsEvents';
+import {tracingEventMap, type TracingEventParameters} from './analytics/tracingEventMap';
+import type {TeamInsightsEventParameters} from './analytics/workflowAnalyticsEvents';
+import {workflowEventMap} from './analytics/workflowAnalyticsEvents';
+
+interface EventParameters
+  extends
+    CommandPaletteEventParameters,
+    AuthV2EventParameters,
+    GrowthEventParameters,
+    AgentMonitoringEventParameters,
+    AlertsEventParameters,
+    ConversationsEventParameters,
+    BreadcrumbsAnalyticsEventParameters,
+    CoreUIEventParameters,
+    DashboardsEventParameters,
+    DiscoverEventParameters,
+    FeatureFlagEventParameters,
+    FeedbackEventParameters,
+    InsightEventParameters,
+    IssueEventParameters,
+    LaravelInsightsEventParameters,
+    McpMonitoringEventParameters,
+    MonitorsEventParameters,
+    PerformanceEventParameters,
+    ProfilingEventParameters,
+    PreprodBuildEventParameters,
+    ReleasesEventParameters,
+    ReplayEventParameters,
+    SearchEventParameters,
+    SeerAnalyticsEventsParameters,
+    SettingsEventParameters,
+    TeamInsightsEventParameters,
+    DynamicSamplingEventParameters,
+    OnboardingEventParameters,
+    GamingAnalyticsEventParameters,
+    StackTraceEventParameters,
+    EcosystemEventParameters,
+    IntegrationEventParameters,
+    ProjectCreationEventParameters,
+    SignupAnalyticsParameters,
+    LogsAnalyticsEventParameters,
+    MetricsAnalyticsEventParameters,
+    TracingEventParameters,
+    StatsEventParameters,
+    ExploreAnalyticsEventParameters,
+    QuickStartEventParameters,
+    TempestEventParameters,
+    Record<string, Record<string, any>> {}
+
+const allEventMap: Record<string, string | null> = {
+  ...commandPaletteEventMap,
+  ...authV2EventMap,
+  ...agentMonitoringEventMap,
+  ...alertsEventMap,
+  ...conversationsEventMap,
+  ...breadcrumbsAnalyticsEventMap,
+  ...coreUIEventMap,
+  ...dashboardsEventMap,
+  ...discoverEventMap,
+  ...featureFlagEventMap,
+  ...feedbackEventMap,
+  ...growthEventMap,
+  ...insightEventMap,
+  ...issueEventMap,
+  ...laravelInsightsEventMap,
+  ...monitorsEventMap,
+  ...nextJsInsightsEventMap,
+  ...performanceEventMap,
+  ...preprodBuildEventMap,
+  ...tracingEventMap,
+  ...profilingEventMap,
+  ...exploreAnalyticsEventMap,
+  ...logsAnalyticsEventMap,
+  ...metricsAnalyticsEventMap,
+  ...releasesEventMap,
+  ...replayEventMap,
+  ...searchEventMap,
+  ...seerAnalyticsEventsMap,
+  ...settingsEventMap,
+  ...workflowEventMap,
+  ...dynamicSamplingEventMap,
+  ...onboardingEventMap,
+  ...gamingEventMap,
+  ...stackTraceEventMap,
+  ...ecosystemEventMap,
+  ...integrationEventMap,
+  ...projectCreationEventMap,
+  ...starfishEventMap,
+  ...signupEventMap,
+  ...statsEventMap,
+  ...quickStartEventMap,
+  ...navigationAnalyticsEventMap,
+  ...tempestEventMap,
+  ...mcpMonitoringEventMap,
+};
 
 /**
  * Analytics and metric tracking functionality.
  *
- * These are primarily driven through hooks provided through the hookstore. For
+ * These are primarily driven through hooks provided through the hook registry. For
  * sentry.io these are currently mapped to our in-house analytics backend
  * 'Reload' and the Amplitude service.
  *
@@ -23,63 +219,23 @@ import {Hooks} from 'app/types/hooks';
  */
 
 /**
- * This should be primarily used for product events. In that case where you
- * want to track some one-off Adhoc events, use the `trackAdhocEvent` function.
+ * This should be used with all analytics events regardless of the analytics
+ * destination which includes Reload, Amplitude, and Google Analytics. All
+ * events go to Reload. If eventName is defined, events also go to Amplitude.
+ * For more details, refer to makeAnalyticsFunction.
  *
- * Generally this is the function you will want to use for event tracking.
- *
- * Refer for the backend implementation provided through HookStore for more
- * details.
+ * Should be used for all analytics that are defined in Sentry.
  */
-export const trackAnalyticsEvent: Hooks['analytics:track-event'] = options =>
-  HookStore.get('analytics:track-event').forEach(cb => cb(options));
+export const trackAnalytics = makeAnalyticsFunction<EventParameters>(allEventMap);
 
-/**
- * This should be used for adhoc analytics tracking.
- *
- * This is used for high volume events, and events with unbounded parameters,
- * such as tracking search queries.
- *
- * Refer for the backend implementation provided through HookStore for a more
- * thorough explanation of when to use this.
- */
-export const trackAdhocEvent: Hooks['analytics:track-adhoc-event'] = options =>
-  HookStore.get('analytics:track-adhoc-event').forEach(cb => cb(options));
+type RecordMetric = Overrides['metrics:event'] & {
+  endSpan: (opts: {
+    /**
+     * Name of the transaction to end
+     */
+    name: string;
+  }) => void;
 
-/**
- * This should be used to log when a `organization.experiments` experiment
- * variant is checked in the application.
- *
- * Refer for the backend implementation provided through HookStore for more
- * details.
- */
-export const logExperiment: Hooks['analytics:log-experiment'] = options =>
-  HookStore.get('analytics:log-experiment').forEach(cb => cb(options));
-
-/**
- * Helper function for `trackAnalyticsEvent` to generically track usage of deprecated features
- *
- * @param feature A name to identify the feature you are tracking
- * @param orgId The organization id
- * @param url [optional] The URL
- */
-export const trackDeprecated = (feature: string, orgId: number, url: string = '') =>
-  trackAdhocEvent({
-    eventKey: 'deprecated.feature',
-    feature,
-    url,
-    org_id: orgId && Number(orgId),
-  });
-
-/**
- * Legacy analytics tracking.
- *
- * @deprecated Prefer `trackAnalyticsEvent` and `trackAdhocEvent`.
- */
-export const analytics: Hooks['analytics:event'] = (name, data) =>
-  HookStore.get('analytics:event').forEach(cb => cb(name, data));
-
-type RecordMetric = Hooks['metrics:event'] & {
   mark: (opts: {
     /**
      * Name of the metric event
@@ -89,69 +245,58 @@ type RecordMetric = Hooks['metrics:event'] & {
      * Additional data that will be sent with measure()
      * This is useful if you want to track initial state
      */
-    data?: object;
+    data?: Record<PropertyKey, unknown>;
   }) => void;
 
   measure: (opts: {
     /**
-     * Name of the metric event
+     * Additional data to send with metric event.
+     * If a key collide with the data in mark(), this will overwrite them
      */
-    name?: string;
-    /**
-     * Name of starting mark
-     */
-    start?: string;
+    data?: Record<PropertyKey, unknown>;
     /**
      * Name of ending mark
      */
     end?: string;
     /**
-     * Additional data to send with metric event.
-     * If a key collide with the data in mark(), this will overwrite them
+     * Name of the metric event
      */
-    data?: object;
+    name?: string;
     /**
      * Do not clean up marks and measurements when completed
      */
     noCleanup?: boolean;
+    /**
+     * Name of starting mark
+     */
+    start?: string;
   }) => void;
 
-  startTransaction: (opts: {
+  startSpan: (opts: {
     /**
      * Name of transaction
      */
     name: string;
     /**
-     * Optional trace id, defaults to current tx trace
-     */
-    traceId?: string;
-    /**
      * Optional op code
      */
     op?: string;
-  }) => Transaction;
-
-  endTransaction: (opts: {
-    /**
-     * Name of the transaction to end
-     */
-    name: string;
-  }) => void;
+  }) => Span | undefined;
 };
 
 /**
  * Used to pass data between metric.mark() and metric.measure()
  */
-const metricDataStore = new Map<string, object>();
+const metricDataStore = new Map<string, Record<PropertyKey, unknown>>();
 
 /**
  * Record metrics.
  */
 export const metric: RecordMetric = (name, value, tags) =>
-  HookStore.get('metrics:event').forEach(cb => cb(name, value, tags));
+  getOverride('metrics:event')?.(name, value, tags);
 
 // JSDOM implements window.performance but not window.performance.mark
-const CAN_MARK =
+export const CAN_MARK =
   window.performance &&
   typeof window.performance.mark === 'function' &&
   typeof window.performance.measure === 'function' &&
@@ -176,7 +321,7 @@ metric.mark = function metricMark({name, data = {}}) {
  * Performs a measurement between `start` and `end` (or now if `end` is not
  * specified) Calls `metric` with `name` and the measured time difference.
  */
-metric.measure = function metricMeasure({name, start, end, data = {}, noCleanup} = {}) {
+metric.measure = function metricMeasure({name, start, end, data = {}, noCleanup}) {
   // Just ignore if browser is old enough that it doesn't support this
   if (!CAN_MARK) {
     return;
@@ -225,24 +370,19 @@ metric.measure = function metricMeasure({name, start, end, data = {}, noCleanup}
 /**
  * Used to pass data between startTransaction and endTransaction
  */
-const transactionDataStore = new Map<string, object>();
+const spanDataStore = new Map<string, Span | undefined>();
 
-const getCurrentTransaction = () => {
-  return Sentry.getCurrentHub().getScope()?.getTransaction();
+metric.startSpan = ({name, op}) => {
+  const span = Sentry.startInactiveSpan({
+    name,
+    op,
+    forceTransaction: true,
+  });
+  spanDataStore.set(name, span);
+  return span;
 };
 
-metric.startTransaction = ({name, traceId, op}) => {
-  if (!traceId) {
-    traceId = getCurrentTransaction()?.traceId;
-  }
-  const transaction = Sentry.startTransaction({name, op, traceId});
-  transactionDataStore[name] = transaction;
-  return transaction;
-};
-
-metric.endTransaction = ({name}) => {
-  const transaction = transactionDataStore[name];
-  if (transaction) {
-    transaction.finish();
-  }
+metric.endSpan = ({name}) => {
+  const span = spanDataStore.get(name);
+  span?.end();
 };

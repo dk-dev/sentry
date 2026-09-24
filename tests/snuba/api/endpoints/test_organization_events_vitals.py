@@ -1,23 +1,28 @@
 from datetime import timedelta
 
+import pytest
 from django.urls import reverse
 
-from sentry.testutils import APITestCase, SnubaTestCase
-from sentry.testutils.helpers.datetime import before_now, iso_format
+from sentry.models.transaction_threshold import ProjectTransactionThreshold, TransactionMetric
+from sentry.testutils.cases import APITestCase, SnubaTestCase
+from sentry.testutils.helpers.datetime import before_now
 from sentry.utils.samples import load_data
+
+pytestmark = pytest.mark.sentry_metrics
 
 
 class OrganizationEventsVitalsEndpointTest(APITestCase, SnubaTestCase):
-    def setUp(self):
+    def setUp(self) -> None:
         super().setUp()
         self.start = before_now(days=1).replace(hour=10, minute=0, second=0, microsecond=0)
         self.end = self.start + timedelta(hours=6)
 
         self.transaction_data = load_data("transaction", timestamp=self.start)
-        self.query = {
-            "start": iso_format(self.start),
-            "end": iso_format(self.end),
+        self.query: dict[str, str | list[str]] = {
+            "start": self.start.isoformat(),
+            "end": self.end.isoformat(),
         }
+        self.features: dict[str, bool] = {}
 
     def store_event(self, data, measurements=None, **kwargs):
         if measurements:
@@ -32,24 +37,25 @@ class OrganizationEventsVitalsEndpointTest(APITestCase, SnubaTestCase):
     def do_request(self, query=None, features=None):
         if features is None:
             features = {"organizations:discover-basic": True}
+        features.update(self.features)
         if query is None:
             query = self.query
 
         self.login_as(user=self.user)
         url = reverse(
             "sentry-api-0-organization-events-vitals",
-            kwargs={"organization_slug": self.organization.slug},
+            kwargs={"organization_id_or_slug": self.organization.slug},
         )
 
         with self.feature(features):
             return self.client.get(url, query, format="json")
 
-    def test_no_projects(self):
+    def test_no_projects(self) -> None:
         response = self.do_request()
         assert response.status_code == 200, response.content
         assert len(response.data) == 0
 
-    def test_no_vitals(self):
+    def test_no_vitals(self) -> None:
         self.store_event(
             self.transaction_data,
             project_id=self.project.id,
@@ -60,7 +66,7 @@ class OrganizationEventsVitalsEndpointTest(APITestCase, SnubaTestCase):
         assert response.status_code == 400, response.content
         assert "Need to pass at least one vital" == response.data["detail"]
 
-    def test_bad_vital(self):
+    def test_bad_vital(self) -> None:
         self.store_event(
             self.transaction_data,
             project_id=self.project.id,
@@ -71,7 +77,7 @@ class OrganizationEventsVitalsEndpointTest(APITestCase, SnubaTestCase):
         assert response.status_code == 400, response.content
         assert "foobar is not a valid vital" == response.data["detail"]
 
-    def test_simple(self):
+    def test_simple(self) -> None:
         data = self.transaction_data.copy()
         for lcp in [2000, 3000, 5000]:
             self.store_event(
@@ -83,6 +89,7 @@ class OrganizationEventsVitalsEndpointTest(APITestCase, SnubaTestCase):
         self.query.update({"vital": ["measurements.lcp"]})
         response = self.do_request()
         assert response.status_code == 200, response.content
+        assert not response.data["meta"]["isMetricsData"]
         assert response.data["measurements.lcp"] == {
             "good": 1,
             "meh": 1,
@@ -91,7 +98,61 @@ class OrganizationEventsVitalsEndpointTest(APITestCase, SnubaTestCase):
             "p75": 4000,
         }
 
-    def test_grouping(self):
+    def test_simple_with_refining_user_misery_filter(self) -> None:
+        project1 = self.create_project(organization=self.organization)
+        project2 = self.create_project(organization=self.organization)
+        ProjectTransactionThreshold.objects.create(
+            project=project1,
+            organization=project1.organization,
+            threshold=100,
+            metric=TransactionMetric.LCP.value,
+        )
+
+        ProjectTransactionThreshold.objects.create(
+            project=project2,
+            organization=project2.organization,
+            threshold=1000,
+            metric=TransactionMetric.LCP.value,
+        )
+
+        data = self.transaction_data.copy()
+
+        for project in [project1, project2]:
+            for lcp in [2000, 3000, 5000]:
+                self.store_event(
+                    data,
+                    {"lcp": lcp},
+                    project_id=project.id,
+                )
+
+        self.query.update({"vital": ["measurements.lcp"]})
+        response = self.do_request(features={"organizations:discover-basic": True})
+
+        assert response.status_code == 200, response.content
+        assert not response.data["meta"]["isMetricsData"]
+        assert response.data["measurements.lcp"] == {
+            "good": 0,
+            "meh": 1,
+            "poor": 1,
+            "total": 2,
+            "p75": 4500,
+        }
+
+        self.query.update({"query": "user_misery():<0.04"})
+        response = self.do_request(features={"organizations:discover-basic": True})
+
+        assert response.status_code == 200, response.content
+        assert len(response.data) == 2
+        assert not response.data["meta"]["isMetricsData"]
+        assert response.data["measurements.lcp"] == {
+            "good": 0,
+            "meh": 1,
+            "poor": 1,
+            "total": 2,
+            "p75": 4500,
+        }
+
+    def test_grouping(self) -> None:
         counts = [
             (100, 2),
             (3000, 3),
@@ -108,6 +169,7 @@ class OrganizationEventsVitalsEndpointTest(APITestCase, SnubaTestCase):
         self.query.update({"vital": ["measurements.lcp"]})
         response = self.do_request()
         assert response.status_code == 200
+        assert not response.data["meta"]["isMetricsData"]
         assert response.data["measurements.lcp"] == {
             "good": 2,
             "meh": 3,
@@ -116,7 +178,7 @@ class OrganizationEventsVitalsEndpointTest(APITestCase, SnubaTestCase):
             "p75": 3000,
         }
 
-    def test_multiple_vitals(self):
+    def test_multiple_vitals(self) -> None:
         vitals = {"lcp": 3000, "fid": 50, "cls": 0.15, "fcp": 5000, "fp": 4000}
         self.store_event(
             load_data("transaction", timestamp=self.start),
@@ -137,6 +199,7 @@ class OrganizationEventsVitalsEndpointTest(APITestCase, SnubaTestCase):
         )
         response = self.do_request()
         assert response.status_code == 200
+        assert not response.data["meta"]["isMetricsData"]
         assert response.data["measurements.lcp"] == {
             "good": 0,
             "meh": 1,
@@ -173,7 +236,7 @@ class OrganizationEventsVitalsEndpointTest(APITestCase, SnubaTestCase):
             "p75": 4000,
         }
 
-    def test_transactions_without_vitals(self):
+    def test_transactions_without_vitals(self) -> None:
         del self.transaction_data["measurements"]
         self.store_event(
             self.transaction_data,
@@ -182,7 +245,8 @@ class OrganizationEventsVitalsEndpointTest(APITestCase, SnubaTestCase):
 
         self.query.update({"vital": ["measurements.lcp", "measurements.fcp"]})
         response = self.do_request()
-        assert response.status_code == 200
+        assert response.status_code == 200, response.data
+        assert not response.data["meta"]["isMetricsData"]
         assert response.data["measurements.lcp"] == {
             "good": 0,
             "meh": 0,
@@ -196,4 +260,37 @@ class OrganizationEventsVitalsEndpointTest(APITestCase, SnubaTestCase):
             "poor": 0,
             "total": 0,
             "p75": None,
+        }
+
+    def test_edges_of_vital_thresholds(self) -> None:
+        self.store_event(
+            load_data("transaction", timestamp=self.start),
+            {"lcp": 4000, "fp": 1000, "fcp": 0},
+            project_id=self.project.id,
+        )
+
+        self.query.update({"vital": ["measurements.lcp", "measurements.fp", "measurements.fcp"]})
+        response = self.do_request()
+        assert response.status_code == 200, response.data
+        assert not response.data["meta"]["isMetricsData"]
+        assert response.data["measurements.lcp"] == {
+            "good": 0,
+            "meh": 0,
+            "poor": 1,
+            "total": 1,
+            "p75": 4000,
+        }
+        assert response.data["measurements.fp"] == {
+            "good": 0,
+            "meh": 1,
+            "poor": 0,
+            "total": 1,
+            "p75": 1000,
+        }
+        assert response.data["measurements.fcp"] == {
+            "good": 1,
+            "meh": 0,
+            "poor": 0,
+            "total": 1,
+            "p75": 0,
         }

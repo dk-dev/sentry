@@ -1,303 +1,538 @@
-import React from 'react';
-import {css} from '@emotion/react';
+import {Fragment, useCallback, useMemo, useRef} from 'react';
+import {css, useTheme} from '@emotion/react';
 import styled from '@emotion/styled';
-import classNames from 'classnames';
+import type {LocationDescriptor} from 'history';
 
-import AssigneeSelector from 'app/components/assigneeSelector';
-import GuideAnchor from 'app/components/assistant/guideAnchor';
-import Count from 'app/components/count';
-import DropdownMenu from 'app/components/dropdownMenu';
-import EventOrGroupExtraDetails from 'app/components/eventOrGroupExtraDetails';
-import EventOrGroupHeader from 'app/components/eventOrGroupHeader';
-import Link from 'app/components/links/link';
-import MenuItem from 'app/components/menuItem';
-import {getRelativeSummary} from 'app/components/organizations/timeRangeSelector/utils';
-import {PanelItem} from 'app/components/panels';
-import Placeholder from 'app/components/placeholder';
-import ProgressBar from 'app/components/progressBar';
-import GroupChart from 'app/components/stream/groupChart';
-import GroupCheckBox from 'app/components/stream/groupCheckBox';
-import TimeSince from 'app/components/timeSince';
-import {DEFAULT_STATS_PERIOD} from 'app/constants';
-import {t} from 'app/locale';
-import GroupStore from 'app/stores/groupStore';
-import SelectedGroupStore from 'app/stores/selectedGroupStore';
-import overflowEllipsis from 'app/styles/overflowEllipsis';
-import space from 'app/styles/space';
-import {
-  GlobalSelection,
+import {Checkbox} from '@sentry/scraps/checkbox';
+import InteractionStateLayer from '@sentry/scraps/interactionStateLayer';
+import {Container, Flex, Stack} from '@sentry/scraps/layout';
+import {Link} from '@sentry/scraps/link';
+import {Tooltip} from '@sentry/scraps/tooltip';
+
+import {useAnalyticsArea} from 'sentry/components/analyticsArea';
+import type {AssignableEntity} from 'sentry/components/assigneeSelectorDropdown';
+import {GuideAnchor} from 'sentry/components/assistant/guideAnchor';
+import {GroupStatusChart} from 'sentry/components/charts/groupStatusChart';
+import {Count} from 'sentry/components/count';
+import {AssigneeAvatar} from 'sentry/components/group/assigneeAvatar';
+import {AssigneeSelector} from 'sentry/components/group/assigneeSelector';
+import {getBadgeProperties} from 'sentry/components/group/inboxBadges/statusBadge';
+import {GroupHeaderRow} from 'sentry/components/groupHeaderRow';
+import {GroupMetaRow} from 'sentry/components/groupMetaRow';
+import type {GroupListColumn} from 'sentry/components/issues/groupList';
+import {usePageFilters} from 'sentry/components/pageFilters/usePageFilters';
+import {PanelItem} from 'sentry/components/panels/panelItem';
+import {Placeholder} from 'sentry/components/placeholder';
+import {ProgressBar} from 'sentry/components/progressBar';
+import {joinQuery, parseSearch, Token} from 'sentry/components/searchSyntax/parser';
+import {getRelativeSummary} from 'sentry/components/timeRangeSelector/utils';
+import {TimeSince} from 'sentry/components/timeSince';
+import {DEFAULT_STATS_PERIOD} from 'sentry/constants';
+import {t} from 'sentry/locale';
+import type {TimeseriesValue} from 'sentry/types/core';
+import type {
   Group,
   GroupReprocessing,
   InboxDetails,
-  NewQuery,
-  Organization,
-  User,
-} from 'app/types';
-import {defined, percent, valueIsEqual} from 'app/utils';
-import {trackAnalyticsEvent} from 'app/utils/analytics';
-import {callIfFunction} from 'app/utils/callIfFunction';
-import EventView from 'app/utils/discover/eventView';
-import {queryToObj} from 'app/utils/stream';
-import withGlobalSelection from 'app/utils/withGlobalSelection';
-import withOrganization from 'app/utils/withOrganization';
-import {TimePeriodType} from 'app/views/alerts/rules/details/constants';
-import {getTabs, isForReviewQuery, Query} from 'app/views/issueList/utils';
-
-const DiscoveryExclusionFields: string[] = [
-  'query',
-  'status',
-  'bookmarked_by',
-  'assigned',
-  'assigned_to',
-  'unassigned',
-  'subscribed_by',
-  'active_at',
-  'first_release',
-  'first_seen',
-  'is',
-  '__text',
-];
+  PriorityLevel,
+  ProgressState,
+} from 'sentry/types/group';
+import type {NewQuery} from 'sentry/types/organization';
+import type {User} from 'sentry/types/user';
+import {percent} from 'sentry/utils';
+import {trackAnalytics} from 'sentry/utils/analytics';
+import {defined} from 'sentry/utils/defined';
+import {EventView} from 'sentry/utils/discover/eventView';
+import {SavedQueryDatasets} from 'sentry/utils/discover/types';
+import {isCtrlKeyPressed} from 'sentry/utils/isCtrlKeyPressed';
+import {getConfigForIssueType} from 'sentry/utils/issueTypeConfig';
+import {normalizeUrl} from 'sentry/utils/url/normalizeUrl';
+import {useLocation} from 'sentry/utils/useLocation';
+import {useNavigate} from 'sentry/utils/useNavigate';
+import {useOrganization} from 'sentry/utils/useOrganization';
+import {hasDatasetSelector} from 'sentry/views/dashboards/utils';
+import {GroupPriority} from 'sentry/views/issueDetails/groupPriority';
+import {useAssignIssueMutation} from 'sentry/views/issueDetails/useAssignIssueMutation';
+import {COLUMN_BREAKPOINTS} from 'sentry/views/issueList/actions/utils';
+import {
+  useOptionalIssueSelectionActions,
+  useOptionalIssueSelectionSummary,
+} from 'sentry/views/issueList/issueSelectionContext';
+import {ProgressActivityTooltip} from 'sentry/views/issueList/progressActivityTooltip';
+import {
+  createIssueLink,
+  DISCOVER_EXCLUSION_FIELDS,
+  isForReviewQuery,
+} from 'sentry/views/issueList/utils';
+import {
+  formatProgressState,
+  getProgressIcon,
+} from 'sentry/views/issueList/utils/progress';
 
 export const DEFAULT_STREAM_GROUP_STATS_PERIOD = '24h';
-
-const defaultProps = {
-  statsPeriod: DEFAULT_STREAM_GROUP_STATS_PERIOD,
-  canSelect: true,
-  withChart: true,
-  useFilteredStats: false,
-};
+const COLUMNS: GroupListColumn[] = [
+  'graph',
+  'event',
+  'users',
+  'priority',
+  'assignee',
+  'lastTriggered',
+];
 
 type Props = {
-  id: string;
-  selection: GlobalSelection;
-  organization: Organization;
+  group: Group;
+  canSelect?: boolean;
   displayReprocessingLayout?: boolean;
-  query?: string;
   hasGuideAnchor?: boolean;
   memberList?: User[];
-  showInboxTime?: boolean;
-  index?: number;
-  customStatsPeriod?: TimePeriodType;
-  // TODO(ts): higher order functions break defaultprops export types
-} & Partial<typeof defaultProps>;
-
-type State = {
-  data: Group;
-  reviewed: boolean;
-  actionTaken: boolean;
+  onAssigneeChange?: (newAssignee: AssignableEntity | null) => void;
+  onPriorityChange?: (newPriority: PriorityLevel) => void;
+  progressState?: ProgressState | null;
+  query?: string;
+  queryFilterDescription?: string;
+  source?: string;
+  statsPeriod?: string;
+  useFilteredStats?: boolean;
+  useTintRow?: boolean;
+  withChart?: boolean;
+  withColumns?: GroupListColumn[];
 };
 
-class StreamGroup extends React.Component<Props, State> {
-  static defaultProps = defaultProps;
+function GroupCheckbox({
+  group,
+  displayReprocessingLayout,
+}: {
+  group: Group;
+  displayReprocessingLayout?: boolean;
+}) {
+  const issueSelectionSummary = useOptionalIssueSelectionSummary();
+  const issueSelectionActions = useOptionalIssueSelectionActions();
+  const isSelected = issueSelectionSummary?.records.get(group.id);
 
-  state: State = this.getInitialState();
+  const handleToggle = useCallback(
+    (isShiftClick: boolean) => {
+      if (isShiftClick) {
+        issueSelectionActions?.shiftToggleSelect(group.id);
+      } else {
+        issueSelectionActions?.toggleSelect(group.id);
+      }
+    },
+    [group.id, issueSelectionActions]
+  );
 
-  getInitialState(): State {
-    const {id, useFilteredStats} = this.props;
+  const onChange = useCallback(
+    (evt: React.ChangeEvent<HTMLInputElement>) => {
+      const mouseEvent = evt.nativeEvent as MouseEvent;
+      handleToggle(mouseEvent.shiftKey);
+    },
+    [handleToggle]
+  );
 
-    const data = GroupStore.get(id) as Group;
+  return (
+    <GroupCheckBoxWrapper>
+      {!group.hasSeen && (
+        <Tooltip title={t('Unread')} skipWrapper>
+          <UnreadIndicator
+            data-test-id="unread-issue-indicator"
+            onClick={(e: React.MouseEvent) => {
+              // Toggle checkbox on unread indicator misclick
+              e.stopPropagation();
+              handleToggle(e.shiftKey);
+            }}
+          />
+        </Tooltip>
+      )}
+      <CheckboxLabel>
+        <CheckboxWithBackground
+          id={group.id}
+          aria-label={t('Select Issue')}
+          checked={isSelected}
+          disabled={!!displayReprocessingLayout}
+          onChange={onChange}
+        />
+      </CheckboxLabel>
+    </GroupCheckBoxWrapper>
+  );
+}
 
+function GroupLastSeen({group}: {group: Group}) {
+  if (!group.lifetime) {
+    return <Placeholder height="18px" width="70px" />;
+  }
+
+  if (!group.lifetime.lastSeen) {
+    return null;
+  }
+
+  return (
+    <PositionedTimeSince
+      date={group.lifetime.lastSeen}
+      suffix="ago"
+      unitStyle="short"
+      aria-label={t('Last Seen')}
+      tooltipPrefix={t('Last Seen')}
+    />
+  );
+}
+
+function GroupFirstSeen({group}: {group: Group}) {
+  if (!group.lifetime) {
+    return <Placeholder height="18px" width="30px" />;
+  }
+
+  if (!group.lifetime.firstSeen) {
+    return null;
+  }
+
+  return (
+    <PositionedTimeSince
+      date={group.lifetime.firstSeen}
+      unitStyle="short"
+      suffix=""
+      aria-label={t('First Seen')}
+      tooltipPrefix={t('First Seen')}
+    />
+  );
+}
+
+type LoadingSteamGroupProps = Pick<
+  Props,
+  'displayReprocessingLayout' | 'withChart' | 'withColumns'
+>;
+
+export function LoadingStreamGroup({
+  displayReprocessingLayout,
+  withChart = true,
+  withColumns = COLUMNS,
+}: LoadingSteamGroupProps) {
+  const theme = useTheme();
+
+  return (
+    <Wrapper data-test-id="group" useTintRow={false} reviewed={false}>
+      <GroupSummary canSelect={false}>
+        <Placeholder height="58px" />
+      </GroupSummary>
+      {withColumns.includes('lastSeen') && (
+        <Flex
+          display={{zero: 'none', [COLUMN_BREAKPOINTS.LAST_SEEN]: 'flex'}}
+          width="86px"
+          paddingRight="xl"
+          marginRight="xl"
+          align="center"
+          justify="end"
+        >
+          <Placeholder height="18px" width="70px" />
+        </Flex>
+      )}
+      {withColumns.includes('firstSeen') && (
+        <Flex
+          display={{zero: 'none', [COLUMN_BREAKPOINTS.FIRST_SEEN]: 'flex'}}
+          width="50px"
+          paddingRight="xl"
+          marginRight="xl"
+          align="center"
+          justify="end"
+        >
+          <Placeholder height="18px" width="30px" />
+        </Flex>
+      )}
+      {withChart && !displayReprocessingLayout && (
+        <Container
+          display={{zero: 'none', [COLUMN_BREAKPOINTS.TREND]: 'block'}}
+          width="175px"
+          alignSelf="center"
+          marginRight="xl"
+        >
+          <Placeholder height="36px" />
+        </Container>
+      )}
+      {displayReprocessingLayout ? (
+        <Fragment>
+          <Container
+            width={{zero: '85px', xl: '140px'}}
+            alignSelf="center"
+            margin="0 xl"
+            whiteSpace="nowrap"
+            overflow="hidden"
+            style={{color: theme.colors.gray800, textOverflow: 'ellipsis'}}
+          >
+            <Placeholder height="17px" />
+          </Container>
+          <Container
+            width={{zero: '75px', xl: '140px'}}
+            alignSelf="center"
+            margin="0 xl"
+            whiteSpace="nowrap"
+            overflow="hidden"
+            style={{color: theme.colors.gray800, textOverflow: 'ellipsis'}}
+          >
+            <Placeholder height="17px" />
+          </Container>
+          <Container
+            display={{zero: 'none', xl: 'block'}}
+            width="160px"
+            margin="0 xl"
+            alignSelf="center"
+          >
+            <Placeholder height="17px" />
+          </Container>
+        </Fragment>
+      ) : (
+        <Fragment>
+          {withColumns.includes('event') && (
+            <Flex
+              display={{zero: 'none', [COLUMN_BREAKPOINTS.EVENTS]: 'flex'}}
+              alignSelf="center"
+              paddingRight="xl"
+              marginRight="xl"
+              width="60px"
+              align="center"
+              justify="end"
+            >
+              <Placeholder height="18px" width="40px" />
+            </Flex>
+          )}
+          {withColumns.includes('users') && (
+            <Flex
+              display={{zero: 'none', [COLUMN_BREAKPOINTS.USERS]: 'flex'}}
+              alignSelf="center"
+              paddingRight="xl"
+              marginRight="xl"
+              width="60px"
+              align="center"
+              justify="end"
+            >
+              <Placeholder height="18px" width="40px" />
+            </Flex>
+          )}
+          {withColumns.includes('progress') && (
+            <Flex
+              display={{zero: 'none', [COLUMN_BREAKPOINTS.PROGRESS]: 'flex'}}
+              width="124px"
+              paddingRight="xl"
+              marginRight="xl"
+              alignSelf="center"
+              justify="start"
+            >
+              <Placeholder height="18px" />
+            </Flex>
+          )}
+          {withColumns.includes('priority') && (
+            <Flex
+              display={{zero: 'none', [COLUMN_BREAKPOINTS.PRIORITY]: 'flex'}}
+              width="64px"
+              paddingRight="xl"
+              marginRight="xl"
+              alignSelf="center"
+              justify="end"
+            >
+              <Placeholder height="24px" />
+            </Flex>
+          )}
+          {(withColumns.includes('assignee') ||
+            withColumns.includes('assigneeAvatar')) && (
+            <Flex
+              display={{zero: 'none', [COLUMN_BREAKPOINTS.ASSIGNEE]: 'flex'}}
+              alignSelf="center"
+              width="66px"
+              paddingRight="xl"
+              marginRight="xl"
+              justify="end"
+              style={{textAlign: 'right'}}
+            >
+              <Placeholder height="24px" />
+            </Flex>
+          )}
+        </Fragment>
+      )}
+    </Wrapper>
+  );
+}
+
+export function StreamGroup({
+  group,
+  displayReprocessingLayout,
+  hasGuideAnchor,
+  memberList,
+  query,
+  queryFilterDescription,
+  source,
+  statsPeriod = DEFAULT_STREAM_GROUP_STATS_PERIOD,
+  canSelect = true,
+  withChart = true,
+  withColumns = COLUMNS,
+  useFilteredStats = false,
+  useTintRow = true,
+  onPriorityChange,
+  onAssigneeChange,
+  progressState,
+}: Props) {
+  const theme = useTheme();
+
+  const issueSelectionSummary = useOptionalIssueSelectionSummary();
+  const issueSelectionActions = useOptionalIssueSelectionActions();
+  const groupId = group.id;
+
+  const organization = useOrganization();
+  const navigate = useNavigate();
+  const location = useLocation();
+  const area = useAnalyticsArea();
+  const selectionEnabled =
+    canSelect && !!issueSelectionSummary && !!issueSelectionActions;
+  const originalInboxState = useRef(group.inbox as InboxDetails | null);
+  const {selection} = usePageFilters();
+
+  const referrer = source ? `${source}-issue-stream` : 'issue-stream';
+
+  const {period, start, end} = selection.datetime || {};
+
+  const summary =
+    !!start && !!end
+      ? 'time range'
+      : getRelativeSummary(period || DEFAULT_STATS_PERIOD).toLowerCase();
+
+  const sharedAnalytics = useMemo(() => {
+    const owners = group?.owners ?? [];
     return {
-      data: {
-        ...data,
-        filtered: useFilteredStats ? data.filtered : null,
-      },
-      reviewed: false,
-      actionTaken: false,
-    };
-  }
-
-  componentWillReceiveProps(nextProps: Props) {
-    if (
-      nextProps.id !== this.props.id ||
-      nextProps.useFilteredStats !== this.props.useFilteredStats
-    ) {
-      const data = GroupStore.get(this.props.id) as Group;
-
-      this.setState({
-        data: {
-          ...data,
-          filtered: nextProps.useFilteredStats ? data.filtered : null,
-        },
-      });
-    }
-  }
-
-  shouldComponentUpdate(nextProps: Props, nextState: State) {
-    if (nextProps.statsPeriod !== this.props.statsPeriod) {
-      return true;
-    }
-    if (!valueIsEqual(this.state.data, nextState.data)) {
-      return true;
-    }
-    return false;
-  }
-
-  componentWillUnmount() {
-    callIfFunction(this.listener);
-  }
-
-  listener = GroupStore.listen(itemIds => this.onGroupChange(itemIds), undefined);
-
-  onGroupChange(itemIds: Set<string>) {
-    const {id, query} = this.props;
-    if (!itemIds.has(id)) {
-      return;
-    }
-
-    const actionTaken = this.state.data.status === 'unresolved' ? false : true;
-    const data = GroupStore.get(id) as Group;
-    this.setState(state => {
-      // When searching is:for_review and the inbox reason is removed
-      const reviewed =
-        state.reviewed ||
-        (isForReviewQuery(query) &&
-          (state.data.inbox as InboxDetails)?.reason !== undefined &&
-          data.inbox === false);
-      return {data, reviewed, actionTaken};
-    });
-  }
-
-  /** Shared between two events */
-  sharedAnalytics() {
-    const {query, organization} = this.props;
-    const {data} = this.state;
-    const tab = getTabs(organization).find(([tabQuery]) => tabQuery === query)?.[1];
-    const owners = data?.owners || [];
-    return {
-      organization_id: organization.id,
-      group_id: data.id,
-      tab: tab?.analyticsName || 'other',
+      organization,
+      group_id: group?.id ?? '',
       was_shown_suggestion: owners.length > 0,
     };
-  }
+  }, [organization, group]);
 
-  trackClick = () => {
-    const {query, organization} = this.props;
-    const {data} = this.state;
-    if (query === Query.FOR_REVIEW) {
-      trackAnalyticsEvent({
-        eventKey: 'inbox_tab.issue_clicked',
-        eventName: 'Clicked Issue from Inbox Tab',
-        organization_id: organization.id,
-        group_id: data.id,
-      });
-    }
+  const {mutate: assignMutate, isPending: assigneeLoading} = useAssignIssueMutation();
 
-    if (query !== undefined) {
-      trackAnalyticsEvent({
-        eventKey: 'issues_stream.issue_clicked',
-        eventName: 'Clicked Issue from Issues Stream',
-        ...this.sharedAnalytics(),
-      });
-    }
-  };
+  const handleAssigneeChange = useCallback(
+    (newAssignee: AssignableEntity | null) => {
+      assignMutate(
+        {
+          groupId,
+          orgSlug: organization.slug,
+          actor: newAssignee ? {id: newAssignee.id, type: newAssignee.type} : null,
+          assignedBy: 'assignee_selector',
+        },
+        {
+          onSuccess: () => {
+            if (query !== undefined && newAssignee) {
+              trackAnalytics('issues_stream.issue_assigned', {
+                ...sharedAnalytics,
+                did_assign_suggestion: !!newAssignee.suggestedAssignee,
+                assigned_suggestion_reason:
+                  newAssignee.suggestedAssignee?.suggestedReason,
+                assigned_type: newAssignee.type,
+                area,
+              });
+            }
+            onAssigneeChange?.(newAssignee);
+          },
+        }
+      );
+    },
+    [
+      area,
+      assignMutate,
+      groupId,
+      onAssigneeChange,
+      organization.slug,
+      query,
+      sharedAnalytics,
+    ]
+  );
 
-  trackAssign: React.ComponentProps<typeof AssigneeSelector>['onAssign'] = (
-    type,
-    _assignee,
-    suggestedAssignee
-  ) => {
-    const {query} = this.props;
-    if (query !== undefined) {
-      trackAnalyticsEvent({
-        eventKey: 'issues_stream.issue_assigned',
-        eventName: 'Assigned Issue from Issues Stream',
-        ...this.sharedAnalytics(),
-        did_assign_suggestion: !!suggestedAssignee,
-        assigned_suggestion_reason: suggestedAssignee?.suggestedReason,
-        assigned_type: type,
-      });
-    }
-  };
-
-  toggleSelect = (evt: React.MouseEvent<HTMLDivElement>) => {
+  const clickHasBeenHandled = useCallback((evt: React.MouseEvent<HTMLDivElement>) => {
     const targetElement = evt.target as Partial<HTMLElement>;
+    const tagName = targetElement?.tagName?.toLowerCase();
 
-    if (targetElement?.tagName?.toLowerCase() === 'a') {
-      return;
-    }
+    const ignoredTags = new Set(['a', 'input', 'label']);
 
-    if (targetElement?.tagName?.toLowerCase() === 'input') {
-      return;
+    if (tagName && ignoredTags.has(tagName)) {
+      return true;
     }
 
     let e = targetElement;
     while (e.parentElement) {
-      if (e?.tagName?.toLowerCase() === 'a') {
-        return;
+      if (ignoredTags.has(e?.tagName?.toLowerCase() ?? '')) {
+        return true;
       }
       e = e.parentElement!;
     }
 
-    SelectedGroupStore.toggleSelect(this.state.data.id);
-  };
+    return false;
+  }, []);
 
-  getDiscoverUrl(isFiltered?: boolean) {
-    const {organization, query, selection, customStatsPeriod} = this.props;
-    const {data} = this.state;
+  const groupStats = useMemo<readonly TimeseriesValue[]>(() => {
+    return group.filtered
+      ? group.filtered.stats?.[statsPeriod]!
+      : group.stats?.[statsPeriod]!;
+  }, [group, statsPeriod]);
 
-    // when there is no discover feature open events page
+  const groupSecondaryStats = useMemo<readonly TimeseriesValue[]>(() => {
+    return group.filtered ? group.stats?.[statsPeriod]! : [];
+  }, [group, statsPeriod]);
+
+  const parsedSearch = useMemo(() => parseSearch(query ?? ''), [query]);
+
+  const getDiscoverUrl = (isFiltered?: boolean): LocationDescriptor => {
+    // When there is no Discover feature, open the events page.
     const hasDiscoverQuery = organization.features.includes('discover-basic');
 
-    const queryTerms: string[] = [];
-
-    if (isFiltered && typeof query === 'string') {
-      const queryObj = queryToObj(query);
-      for (const queryTag in queryObj)
-        if (!DiscoveryExclusionFields.includes(queryTag)) {
-          const queryVal = queryObj[queryTag].includes(' ')
-            ? `"${queryObj[queryTag]}"`
-            : queryObj[queryTag];
-          queryTerms.push(`${queryTag}:${queryVal}`);
-        }
-
-      if (queryObj.__text) {
-        queryTerms.push(queryObj.__text);
-      }
-    }
-
-    const commonQuery = {projects: [Number(data.project.id)]};
-
-    const searchQuery = (queryTerms.length ? ' ' : '') + queryTerms.join(' ');
+    const filteredTerms = isFiltered
+      ? parsedSearch?.filter(
+          p =>
+            !(p.type === Token.FILTER && DISCOVER_EXCLUSION_FIELDS.includes(p.key.text))
+        )
+      : [];
+    const filteredQuery = joinQuery(filteredTerms, true);
+    const commonQuery = {projects: [Number(group.project.id)]};
 
     if (hasDiscoverQuery) {
-      const {period, start, end} = customStatsPeriod ?? (selection.datetime || {});
-
+      const stats = selection.datetime || {};
       const discoverQuery: NewQuery = {
         ...commonQuery,
         id: undefined,
-        name: data.title || data.type,
+        name: group.title || group.type,
         fields: ['title', 'release', 'environment', 'user', 'timestamp'],
         orderby: '-timestamp',
-        query: `issue.id:${data.id}${searchQuery}`,
+        query: `issue:${group.shortId}${filteredQuery}`,
         version: 2,
       };
 
-      if (!!start && !!end) {
-        discoverQuery.start = String(start);
-        discoverQuery.end = String(end);
+      if (!!stats.start && !!stats.end) {
+        discoverQuery.start = new Date(stats.start).toISOString();
+        discoverQuery.end = new Date(stats.end).toISOString();
+        if (stats.utc) {
+          discoverQuery.utc = true;
+        }
       } else {
-        discoverQuery.range = period || DEFAULT_STATS_PERIOD;
+        discoverQuery.range = stats.period || DEFAULT_STATS_PERIOD;
       }
 
       const discoverView = EventView.fromSavedQuery(discoverQuery);
-      return discoverView.getResultsViewUrlTarget(organization.slug);
+      return discoverView.getResultsViewUrlTarget(
+        organization,
+        false,
+        hasDatasetSelector(organization) ? SavedQueryDatasets.ERRORS : undefined
+      );
     }
 
     return {
-      pathname: `/organizations/${organization.slug}/issues/${data.id}/events/`,
+      pathname: `/organizations/${organization.slug}/issues/${group.id}/events/`,
       query: {
+        referrer,
         ...commonQuery,
-        query: searchQuery,
+        query: filteredQuery,
       },
     };
-  }
+  };
 
-  renderReprocessingColumns() {
-    const {data} = this.state;
-    const {statusDetails, count} = data as GroupReprocessing;
+  const renderReprocessingColumns = () => {
+    const {statusDetails, count} = group as GroupReprocessing;
     const {info, pendingEvents} = statusDetails;
+
+    if (!info) {
+      return null;
+    }
+
     const {totalEvents, dateCreated} = info;
 
     const remainingEventsToReprocess = totalEvents - pendingEvents;
@@ -306,280 +541,412 @@ class StreamGroup extends React.Component<Props, State> {
       totalEvents
     );
 
-    const value = remainingEventsToReprocessPercent || 100;
-
     return (
-      <React.Fragment>
-        <StartedColumn>
+      <Fragment>
+        <Flex
+          width={{zero: '85px', xl: '140px'}}
+          alignSelf="center"
+          margin="0 xl"
+          whiteSpace="nowrap"
+          overflow="hidden"
+          style={{color: theme.colors.gray800, textOverflow: 'ellipsis'}}
+        >
           <TimeSince date={dateCreated} />
-        </StartedColumn>
-        <EventsReprocessedColumn>
-          {!defined(count) ? (
-            <Placeholder height="17px" />
-          ) : (
-            <React.Fragment>
-              <Count value={totalEvents} />
+        </Flex>
+        <Container
+          width={{zero: '75px', xl: '140px'}}
+          alignSelf="center"
+          margin="0 xl"
+          whiteSpace="nowrap"
+          overflow="hidden"
+          style={{color: theme.colors.gray800, textOverflow: 'ellipsis'}}
+        >
+          {defined(count) ? (
+            <Fragment>
+              <Count value={remainingEventsToReprocess} />
               {'/'}
-              <Count value={Number(count)} />
-            </React.Fragment>
+              <Count value={totalEvents} />
+            </Fragment>
+          ) : (
+            <Placeholder height="17px" />
           )}
-        </EventsReprocessedColumn>
-        <ProgressColumn>
-          <ProgressBar value={value} />
-        </ProgressColumn>
-      </React.Fragment>
+        </Container>
+        <Container
+          display={{zero: 'none', xl: 'block'}}
+          width="160px"
+          margin="0 xl"
+          alignSelf="center"
+        >
+          <ProgressBar value={remainingEventsToReprocessPercent} />
+        </Container>
+      </Fragment>
     );
-  }
+  };
 
-  render() {
-    const {data, reviewed, actionTaken} = this.state;
-    const {
-      index,
-      query,
-      hasGuideAnchor,
-      canSelect,
-      memberList,
-      withChart,
-      statsPeriod,
-      selection,
-      organization,
-      displayReprocessingLayout,
-      showInboxTime,
-      useFilteredStats,
-      customStatsPeriod,
-    } = this.props;
+  const issueTypeConfig = getConfigForIssueType(group, group.project);
+  const reviewed =
+    // Original state had an inbox reason
+    // oxlint-disable-next-line react/refs
+    originalInboxState.current?.reason !== undefined &&
+    // Updated state has been removed from inbox
+    !group.inbox &&
+    // Only apply reviewed on the "for review" tab
+    isForReviewQuery(query);
 
-    const {period, start, end} = selection.datetime || {};
-    const summary =
-      customStatsPeriod?.label.toLowerCase() ??
-      (!!start && !!end
-        ? 'time range'
-        : getRelativeSummary(period || DEFAULT_STATS_PERIOD).toLowerCase());
+  // Use data.filtered to decide on which value to use
+  // In case of the query has filters but we avoid showing both sets of filtered/unfiltered stats
+  // we use useFilteredStats param passed to Group for deciding
+  const primaryCount = group.filtered ? group.filtered.count : group.count;
+  const secondaryCount = group.filtered ? group.count : undefined;
+  const primaryUserCount = group.filtered ? group.filtered.userCount : group.userCount;
+  const secondaryUserCount = group.filtered ? group.userCount : undefined;
+  // preview stats
+  const showSecondaryPoints = Boolean(
+    withChart && group?.filtered && statsPeriod && useFilteredStats
+  );
 
-    // Use data.filtered to decide on which value to use
-    // In case of the query has filters but we avoid showing both sets of filtered/unfiltered stats
-    // we use useFilteredStats param passed to Group for deciding
-    const primaryCount = data.filtered ? data.filtered.count : data.count;
-    const secondaryCount = data.filtered ? data.count : undefined;
-    const primaryUserCount = data.filtered ? data.filtered.userCount : data.userCount;
-    const secondaryUserCount = data.filtered ? data.userCount : undefined;
-
-    const showSecondaryPoints = Boolean(
-      withChart && data && data.filtered && statsPeriod && useFilteredStats
-    );
-
-    const hasInbox = organization.features.includes('inbox');
-    const unresolved = data.status === 'unresolved' ? true : false;
-
-    return (
-      <Wrapper
-        data-test-id="group"
-        onClick={displayReprocessingLayout ? undefined : this.toggleSelect}
-        reviewed={reviewed}
-        hasInbox={hasInbox}
-        unresolved={unresolved}
-        actionTaken={actionTaken}
-      >
-        {canSelect && (
-          <GroupCheckBoxWrapper>
-            <GroupCheckBox id={data.id} disabled={!!displayReprocessingLayout} />
-          </GroupCheckBoxWrapper>
+  const groupCount = (
+    <Tooltip
+      disabled={!useFilteredStats}
+      title={
+        <CountTooltipContent>
+          <h4>{issueTypeConfig.customCopy.eventUnits}</h4>
+          {group.filtered && (
+            <Fragment>
+              <div>{queryFilterDescription ?? t('Matching filters')}</div>
+              <Link to={getDiscoverUrl(true)}>
+                <Count value={group.filtered?.count} />
+              </Link>
+            </Fragment>
+          )}
+          <Fragment>
+            <div>{t('Total in %s', summary)}</div>
+            <Link to={getDiscoverUrl()}>
+              <Count value={group.count} />
+            </Link>
+          </Fragment>
+          {group.lifetime && (
+            <Fragment>
+              <div>{t('Since issue began')}</div>
+              <Count value={group.lifetime.count} />
+            </Fragment>
+          )}
+        </CountTooltipContent>
+      }
+    >
+      <Stack position="relative">
+        <PrimaryCount value={primaryCount} />
+        {secondaryCount !== undefined && useFilteredStats && (
+          <SecondaryCount value={secondaryCount} />
         )}
-        <GroupSummary canSelect={!!canSelect}>
-          <EventOrGroupHeader
-            index={index}
-            organization={organization}
-            includeLink
-            data={data}
-            query={query}
-            size="normal"
-            onClick={this.trackClick}
+      </Stack>
+    </Tooltip>
+  );
+
+  const groupUsersCount = (
+    <Tooltip
+      title={
+        <CountTooltipContent>
+          <h4>{t('Affected Users')}</h4>
+          {group.filtered && (
+            <Fragment>
+              <div>{queryFilterDescription ?? t('Matching filters')}</div>
+              <Link to={getDiscoverUrl(true)}>
+                <Count value={group.filtered?.userCount} />
+              </Link>
+            </Fragment>
+          )}
+          <Fragment>
+            <div>{t('Total in %s', summary)}</div>
+            <Link to={getDiscoverUrl()}>
+              <Count value={group.userCount} />
+            </Link>
+          </Fragment>
+          {group.lifetime && (
+            <Fragment>
+              <div>{t('Since issue began')}</div>
+              <Count value={group.lifetime.userCount} />
+            </Fragment>
+          )}
+        </CountTooltipContent>
+      }
+    >
+      <Stack position="relative">
+        <PrimaryCount value={primaryUserCount} />
+        {secondaryUserCount !== undefined && useFilteredStats && (
+          <SecondaryCount value={secondaryUserCount} />
+        )}
+      </Stack>
+    </Tooltip>
+  );
+
+  const onClick = (e: React.MouseEvent<HTMLDivElement>) => {
+    if (displayReprocessingLayout) {
+      return;
+    }
+
+    const handled = clickHasBeenHandled(e);
+
+    if (handled) {
+      return;
+    }
+
+    if (selectionEnabled && e.shiftKey) {
+      issueSelectionActions?.shiftToggleSelect(group.id);
+      window.getSelection()?.removeAllRanges();
+      return;
+    }
+
+    if (selectionEnabled && isCtrlKeyPressed(e)) {
+      issueSelectionActions?.toggleSelect(group.id);
+      return;
+    }
+
+    navigate(
+      normalizeUrl(
+        createIssueLink({
+          data: group,
+          organization,
+          referrer,
+          location,
+          query,
+        })
+      )
+    );
+  };
+
+  return (
+    <Wrapper
+      data-test-id="group"
+      data-test-reviewed={reviewed}
+      onClick={onClick}
+      reviewed={reviewed}
+      useTintRow={useTintRow ?? true}
+    >
+      <InteractionStateLayer />
+      <Fragment>
+        {selectionEnabled && (
+          <GroupCheckbox
+            group={group}
+            displayReprocessingLayout={displayReprocessingLayout}
           />
-          <EventOrGroupExtraDetails
-            hasGuideAnchor={hasGuideAnchor}
-            organization={organization}
-            data={data}
-            showInboxTime={showInboxTime}
-          />
+        )}
+        <GroupSummary canSelect={selectionEnabled}>
+          <GroupHeaderRow data={group} query={query} source={referrer} />
+          <GroupMetaRow data={group} showLifetime={false} />
         </GroupSummary>
-        {hasGuideAnchor && <GuideAnchor target="issue_stream" />}
-        {withChart && !displayReprocessingLayout && (
-          <ChartWrapper className="hidden-xs hidden-sm">
-            {!data.filtered?.stats && !data.stats ? (
-              <Placeholder height="24px" />
-            ) : (
-              <GroupChart
-                statsPeriod={statsPeriod!}
-                data={data}
-                showSecondaryPoints={showSecondaryPoints}
-              />
-            )}
-          </ChartWrapper>
-        )}
-        {displayReprocessingLayout ? (
-          this.renderReprocessingColumns()
-        ) : (
-          <React.Fragment>
-            <EventUserWrapper>
-              {!defined(primaryCount) ? (
-                <Placeholder height="18px" />
+      </Fragment>
+      {hasGuideAnchor && <GuideAnchor target="issue_stream" />}
+
+      {withColumns.includes('lastSeen') && (
+        <Flex
+          display={{zero: 'none', [COLUMN_BREAKPOINTS.LAST_SEEN]: 'flex'}}
+          width="86px"
+          paddingRight="xl"
+          marginRight="xl"
+          align="center"
+          justify="end"
+        >
+          <GroupLastSeen group={group} />
+        </Flex>
+      )}
+
+      {withColumns.includes('firstSeen') && (
+        <Flex
+          display={{zero: 'none', [COLUMN_BREAKPOINTS.FIRST_SEEN]: 'flex'}}
+          width="50px"
+          paddingRight="xl"
+          marginRight="xl"
+          align="center"
+          justify="end"
+        >
+          <GroupFirstSeen group={group} />
+        </Flex>
+      )}
+
+      {withChart && !displayReprocessingLayout && (
+        <Container
+          display={{zero: 'none', [COLUMN_BREAKPOINTS.TREND]: 'block'}}
+          width="175px"
+          alignSelf="center"
+          marginRight="xl"
+        >
+          {issueTypeConfig.stats.enabled && defined(groupStats) ? (
+            <GroupStatusChart
+              stats={groupStats}
+              secondaryStats={groupSecondaryStats}
+              showSecondaryPoints={showSecondaryPoints}
+              groupStatus={getBadgeProperties(group.status, group.substatus)?.status}
+            />
+          ) : issueTypeConfig.stats.enabled ? (
+            <Placeholder height="36px" />
+          ) : null}
+        </Container>
+      )}
+      {displayReprocessingLayout ? (
+        renderReprocessingColumns()
+      ) : (
+        <Fragment>
+          {withColumns.includes('event') && (
+            <Flex
+              display={{zero: 'none', [COLUMN_BREAKPOINTS.EVENTS]: 'flex'}}
+              alignSelf="center"
+              paddingRight="xl"
+              marginRight="xl"
+              width="60px"
+              align="center"
+              justify="end"
+            >
+              {issueTypeConfig.stats.enabled && defined(primaryCount) ? (
+                groupCount
+              ) : issueTypeConfig.stats.enabled ? (
+                <Placeholder height="18px" width="40px" />
+              ) : null}
+            </Flex>
+          )}
+          {withColumns.includes('users') && (
+            <Flex
+              display={{zero: 'none', [COLUMN_BREAKPOINTS.USERS]: 'flex'}}
+              alignSelf="center"
+              paddingRight="xl"
+              marginRight="xl"
+              width="60px"
+              align="center"
+              justify="end"
+            >
+              {issueTypeConfig.stats.enabled && defined(primaryUserCount) ? (
+                groupUsersCount
+              ) : issueTypeConfig.stats.enabled ? (
+                <Placeholder height="18px" width="40px" />
+              ) : null}
+            </Flex>
+          )}
+          {withColumns.includes('priority') && (
+            <Flex
+              display={{zero: 'none', [COLUMN_BREAKPOINTS.PRIORITY]: 'flex'}}
+              width="64px"
+              paddingRight="xl"
+              marginRight="xl"
+              alignSelf="center"
+              justify="end"
+            >
+              {group.priority ? (
+                <GroupPriority group={group} onChange={onPriorityChange} />
+              ) : null}
+            </Flex>
+          )}
+          {withColumns.includes('progress') && (
+            <Flex
+              display={{zero: 'none', [COLUMN_BREAKPOINTS.PROGRESS]: 'flex'}}
+              width="124px"
+              paddingRight="xl"
+              marginRight="xl"
+              alignSelf="center"
+              justify="start"
+            >
+              {progressState ? (
+                <Container position="relative">
+                  <ProgressActivityTooltip group={group}>
+                    <Stack direction="row" align="center" gap="sm" wrap="nowrap">
+                      {getProgressIcon(progressState)}
+                      {formatProgressState(progressState)}
+                    </Stack>
+                  </ProgressActivityTooltip>
+                </Container>
               ) : (
-                <DropdownMenu isNestedDropdown>
-                  {({isOpen, getRootProps, getActorProps, getMenuProps}) => {
-                    const topLevelCx = classNames('dropdown', {
-                      'anchor-middle': true,
-                      open: isOpen,
-                    });
-
-                    return (
-                      <GuideAnchor target="dynamic_counts" disabled={!hasGuideAnchor}>
-                        <span
-                          {...getRootProps({
-                            className: topLevelCx,
-                          })}
-                        >
-                          <span {...getActorProps({})}>
-                            <div className="dropdown-actor-title">
-                              <PrimaryCount value={primaryCount} />
-                              {secondaryCount !== undefined && useFilteredStats && (
-                                <SecondaryCount value={secondaryCount} />
-                              )}
-                            </div>
-                          </span>
-                          {useFilteredStats && (
-                            <StyledDropdownList
-                              {...getMenuProps({className: 'dropdown-menu inverted'})}
-                            >
-                              {data.filtered && (
-                                <React.Fragment>
-                                  <StyledMenuItem to={this.getDiscoverUrl(true)}>
-                                    <MenuItemText>
-                                      {t('Matching search filters')}
-                                    </MenuItemText>
-                                    <MenuItemCount value={data.filtered.count} />
-                                  </StyledMenuItem>
-                                  <MenuItem divider />
-                                </React.Fragment>
-                              )}
-
-                              <StyledMenuItem to={this.getDiscoverUrl()}>
-                                <MenuItemText>{t(`Total in ${summary}`)}</MenuItemText>
-                                <MenuItemCount value={data.count} />
-                              </StyledMenuItem>
-
-                              {data.lifetime && (
-                                <React.Fragment>
-                                  <MenuItem divider />
-                                  <StyledMenuItem>
-                                    <MenuItemText>{t('Since issue began')}</MenuItemText>
-                                    <MenuItemCount value={data.lifetime.count} />
-                                  </StyledMenuItem>
-                                </React.Fragment>
-                              )}
-                            </StyledDropdownList>
-                          )}
-                        </span>
-                      </GuideAnchor>
-                    );
-                  }}
-                </DropdownMenu>
-              )}
-            </EventUserWrapper>
-            <EventUserWrapper>
-              {!defined(primaryUserCount) ? (
                 <Placeholder height="18px" />
-              ) : (
-                <DropdownMenu isNestedDropdown>
-                  {({isOpen, getRootProps, getActorProps, getMenuProps}) => {
-                    const topLevelCx = classNames('dropdown', {
-                      'anchor-middle': true,
-                      open: isOpen,
-                    });
-
-                    return (
-                      <span
-                        {...getRootProps({
-                          className: topLevelCx,
-                        })}
-                      >
-                        <span {...getActorProps({})}>
-                          <div className="dropdown-actor-title">
-                            <PrimaryCount value={primaryUserCount} />
-                            {secondaryUserCount !== undefined && useFilteredStats && (
-                              <SecondaryCount dark value={secondaryUserCount} />
-                            )}
-                          </div>
-                        </span>
-                        {useFilteredStats && (
-                          <StyledDropdownList
-                            {...getMenuProps({className: 'dropdown-menu inverted'})}
-                          >
-                            {data.filtered && (
-                              <React.Fragment>
-                                <StyledMenuItem to={this.getDiscoverUrl(true)}>
-                                  <MenuItemText>
-                                    {t('Matching search filters')}
-                                  </MenuItemText>
-                                  <MenuItemCount value={data.filtered.userCount} />
-                                </StyledMenuItem>
-                                <MenuItem divider />
-                              </React.Fragment>
-                            )}
-
-                            <StyledMenuItem to={this.getDiscoverUrl()}>
-                              <MenuItemText>{t(`Total in ${summary}`)}</MenuItemText>
-                              <MenuItemCount value={data.userCount} />
-                            </StyledMenuItem>
-
-                            {data.lifetime && (
-                              <React.Fragment>
-                                <MenuItem divider />
-                                <StyledMenuItem>
-                                  <MenuItemText>{t('Since issue began')}</MenuItemText>
-                                  <MenuItemCount value={data.lifetime.userCount} />
-                                </StyledMenuItem>
-                              </React.Fragment>
-                            )}
-                          </StyledDropdownList>
-                        )}
-                      </span>
-                    );
-                  }}
-                </DropdownMenu>
               )}
-            </EventUserWrapper>
-            <AssigneeWrapper className="hidden-xs hidden-sm">
-              <AssigneeSelector
-                id={data.id}
-                memberList={memberList}
-                onAssign={this.trackAssign}
-              />
-            </AssigneeWrapper>
-          </React.Fragment>
-        )}
-      </Wrapper>
-    );
-  }
+            </Flex>
+          )}
+          {(withColumns.includes('assignee') ||
+            withColumns.includes('assigneeAvatar')) && (
+            <Flex
+              display={{zero: 'none', [COLUMN_BREAKPOINTS.ASSIGNEE]: 'flex'}}
+              alignSelf="center"
+              width="66px"
+              paddingRight="xl"
+              marginRight="xl"
+              justify="end"
+              style={{textAlign: 'right'}}
+            >
+              {withColumns.includes('assigneeAvatar') ? (
+                <AssigneeAvatar assignedTo={group.assignedTo} />
+              ) : (
+                <AssigneeSelector
+                  group={group}
+                  assigneeLoading={assigneeLoading}
+                  handleAssigneeChange={handleAssigneeChange}
+                  memberList={memberList}
+                />
+              )}
+            </Flex>
+          )}
+        </Fragment>
+      )}
+    </Wrapper>
+  );
 }
 
-export default withGlobalSelection(withOrganization(StreamGroup));
+const CheckboxLabel = styled('label')`
+  position: absolute;
+  top: -1px;
+  left: 0;
+  bottom: 0;
+  height: 100%;
+  width: 32px;
+  padding-left: ${p => p.theme.space.xl};
+  margin: 0;
+  margin-top: -1px;
+  display: flex;
+  align-items: center;
+`;
+
+const UnreadIndicator = styled('div')`
+  width: 8px;
+  height: 8px;
+  background-color: ${p => p.theme.tokens.graphics.accent.vibrant};
+  border-radius: 50%;
+  margin-top: 1px;
+  margin-left: ${p => p.theme.space.xl};
+  z-index: 1;
+`;
 
 // Position for wrapper is relative for overlay actions
 const Wrapper = styled(PanelItem)<{
   reviewed: boolean;
-  hasInbox: boolean;
-  unresolved: boolean;
-  actionTaken: boolean;
+  useTintRow: boolean;
 }>`
   position: relative;
-  padding: ${p => (p.hasInbox ? `${space(1.5)} 0` : `${space(1)} 0`)};
   line-height: 1.1;
+  padding: ${p => p.theme.space.md} 0;
+  min-height: 82px;
 
-  ${p => (p.hasInbox ? p.theme.textColor : p.theme.subText)};
+  &:not(:has(:hover)):not(:has(input:checked)):not(:focus-within) {
+    ${CheckboxLabel} {
+      ${p => p.theme.visuallyHidden};
+    }
+  }
+
+  [data-issue-title-link] {
+    &::before {
+      content: '';
+      position: absolute;
+      top: 0;
+      left: 0;
+      right: 0;
+      bottom: 0;
+    }
+
+    &:hover {
+      [data-issue-title-primary] {
+        text-decoration: underline;
+      }
+    }
+  }
 
   ${p =>
-    (p.reviewed || !p.unresolved) &&
-    !p.actionTaken &&
+    p.useTintRow &&
+    p.reviewed &&
     css`
       animation: tintRow 0.2s linear forwards;
       position: relative;
@@ -598,161 +965,89 @@ const Wrapper = styled(PanelItem)<{
         bottom: 0;
         width: 100%;
         height: 100%;
-        background-color: ${p.theme.bodyBackground};
+        background-color: ${p.theme.tokens.background.secondary};
         opacity: 0.4;
-        z-index: 1;
       }
 
       @keyframes tintRow {
         0% {
-          background-color: ${p.theme.bodyBackground};
+          background-color: ${p.theme.tokens.background.secondary};
         }
         100% {
-          background-color: ${p.theme.backgroundSecondary};
+          background-color: ${p.theme.tokens.background.secondary};
         }
       }
-    `};
+    `}
 `;
 
 const GroupSummary = styled('div')<{canSelect: boolean}>`
   overflow: hidden;
-  margin-left: ${p => space(p.canSelect ? 1 : 2)};
-  margin-right: ${space(1)};
+  margin-left: ${p => (p.canSelect ? p.theme.space.md : p.theme.space.xl)};
+  margin-right: ${p => p.theme.space['3xl']};
   flex: 1;
-  width: 66.66%;
-
-  @media (min-width: ${p => p.theme.breakpoints[1]}) {
-    width: 50%;
-  }
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  font-size: ${p => p.theme.font.size.md};
+  width: auto;
 `;
 
 const GroupCheckBoxWrapper = styled('div')`
-  margin-left: ${space(2)};
   align-self: flex-start;
+  width: 32px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding-top: ${p => p.theme.space.md};
+  z-index: 1;
+`;
 
-  & input[type='checkbox'] {
-    margin: 0;
-    display: block;
-  }
+const CheckboxWithBackground = styled(Checkbox)`
+  background-color: ${p => p.theme.tokens.background.primary};
 `;
 
 const PrimaryCount = styled(Count)`
-  font-size: ${p => p.theme.fontSizeLarge};
+  font-size: ${p => p.theme.font.size.md};
+  display: flex;
+  justify-content: right;
+  margin-bottom: ${p => p.theme.space['2xs']};
+  font-variant-numeric: tabular-nums;
 `;
 
-const SecondaryCount = styled(({value, ...p}) => <Count {...p} value={value} />)`
-  font-size: ${p => p.theme.fontSizeLarge};
+const SecondaryCount = styled(({value, ...p}: any) => <Count {...p} value={value} />)`
+  font-size: ${p => p.theme.font.size.sm};
+  display: flex;
+  justify-content: right;
+  color: ${p => p.theme.tokens.content.secondary};
+  font-variant-numeric: tabular-nums;
 
   :before {
     content: '/';
-    padding-left: ${space(0.25)};
+    padding-left: ${p => p.theme.space['2xs']};
     padding-right: 2px;
-    color: ${p => p.theme.gray300};
+    color: ${p => p.theme.tokens.content.secondary};
   }
 `;
 
-const StyledDropdownList = styled('ul')`
-  z-index: ${p => p.theme.zIndex.hovercard};
-`;
-
-type MenuItemProps = React.HTMLProps<HTMLDivElement> & {
-  to?: React.ComponentProps<typeof Link>['to'];
-};
-
-const StyledMenuItem = styled(({to, children, ...p}: MenuItemProps) => (
-  <MenuItem noAnchor>
-    {to ? (
-      // @ts-expect-error allow target _blank for this link to open in new window
-      <Link to={to} target="_blank">
-        <div {...p}>{children}</div>
-      </Link>
-    ) : (
-      <div className="dropdown-toggle">
-        <div {...p}>{children}</div>
-      </div>
-    )}
-  </MenuItem>
-))`
-  margin: 0;
-  display: flex;
-  flex-direction: row;
-  justify-content: space-between;
-`;
-
-const MenuItemCount = styled(({value, ...p}) => (
-  <div {...p}>
-    <Count value={value} />
-  </div>
-))`
-  text-align: right;
-  font-weight: bold;
-  padding-left: ${space(1)};
-`;
-
-const MenuItemText = styled('div')`
-  white-space: nowrap;
-  font-weight: normal;
+const CountTooltipContent = styled('div')`
+  display: grid;
+  grid-template-columns: 1fr max-content;
+  gap: ${p => p.theme.space.md} ${p => p.theme.space['2xl']};
   text-align: left;
-  padding-right: ${space(1)};
-`;
+  font-size: ${p => p.theme.font.size.md};
+  align-items: center;
 
-const ChartWrapper = styled('div')`
-  width: 160px;
-  margin: 0 ${space(2)};
-  align-self: center;
-`;
-
-const EventUserWrapper = styled('div')`
-  display: flex;
-  justify-content: flex-end;
-  align-self: center;
-  width: 60px;
-  margin: 0 ${space(2)};
-
-  @media (min-width: ${p => p.theme.breakpoints[3]}) {
-    width: 80px;
+  h4 {
+    color: ${p => p.theme.tokens.content.secondary};
+    font-size: ${p => p.theme.font.size.xs};
+    text-transform: uppercase;
+    grid-column: 1 / -1;
+    margin-bottom: ${p => p.theme.space['2xs']};
   }
 `;
 
-const AssigneeWrapper = styled('div')`
-  width: 80px;
-  margin: 0 ${space(2)};
-  align-self: center;
-`;
-
-// Reprocessing
-const StartedColumn = styled('div')`
-  align-self: center;
-  margin: 0 ${space(2)};
-  color: ${p => p.theme.gray500};
-  ${overflowEllipsis};
-  width: 85px;
-
-  @media (min-width: ${p => p.theme.breakpoints[0]}) {
-    display: block;
-    width: 140px;
-  }
-`;
-
-const EventsReprocessedColumn = styled('div')`
-  align-self: center;
-  margin: 0 ${space(2)};
-  color: ${p => p.theme.gray500};
-  ${overflowEllipsis};
-  width: 75px;
-
-  @media (min-width: ${p => p.theme.breakpoints[0]}) {
-    width: 140px;
-  }
-`;
-
-const ProgressColumn = styled('div')`
-  margin: 0 ${space(2)};
-  align-self: center;
-  display: none;
-
-  @media (min-width: ${p => p.theme.breakpoints[0]}) {
-    display: block;
-    width: 160px;
-  }
+// Needs to be positioned so that hovering events don't get swallowed by the anchor pseudo-element
+const PositionedTimeSince = styled(TimeSince)`
+  position: relative;
 `;

@@ -1,68 +1,46 @@
-import React, {CSSProperties} from 'react';
+import {useImperativeHandle, useRef} from 'react';
 import classNames from 'classnames';
 
-import {isRenderFunc} from 'app/utils/isRenderFunc';
-import {selectText} from 'app/utils/selectText';
-
-type ChildRenderProps = {
-  doSelect: () => void;
-  doMount: (el: HTMLElement) => void;
-};
-
-type ChildFunction = (props: ChildRenderProps) => React.ReactNode;
+import {selectText} from 'sentry/utils/selectText';
 
 type Props = {
-  /**
-   * Can be a `node` for a simple auto select div container.
-   * When children is a render function, it is passed 2 functions:
-   * - `doMount` - should be applied on parent element's `ref` whose
-   * children is the text to be copied
-   * - `doSelect` - selects text
-   */
-  children: React.ReactNode | ChildFunction;
+  children: React.ReactNode;
   className?: string;
-  style?: CSSProperties;
+  ref?: React.Ref<AutoSelectHandle>;
+  style?: React.CSSProperties;
 };
 
-class AutoSelectText extends React.Component<Props> {
-  private el: HTMLElement | undefined;
+type AutoSelectHandle = {
+  selectText: () => void;
+};
 
-  selectText = () => {
-    if (!this.el) {
+export function AutoSelectText({children, className, ref, ...props}: Props) {
+  const element = useRef<HTMLSpanElement>(null);
+
+  function handleClick() {
+    if (!element.current) {
       return;
     }
-
-    selectText(this.el);
-  };
-
-  handleMount = (el: HTMLElement) => {
-    this.el = el;
-  };
-
-  render() {
-    const {children, className, ...props} = this.props;
-
-    if (isRenderFunc<ChildFunction>(children)) {
-      return children({
-        doMount: this.handleMount,
-        doSelect: this.selectText,
-      });
-    }
-
-    // use an inner span here for the selection as otherwise the selectText
-    // function will create a range that includes the entire part of the
-    // div (including the div itself) which causes newlines to be selected
-    // in chrome.
-    return (
-      <div
-        {...props}
-        onClick={this.selectText}
-        className={classNames('auto-select-text', className)}
-      >
-        <span ref={this.handleMount}>{children}</span>
-      </div>
-    );
+    selectText(element.current);
   }
-}
 
-export default AutoSelectText;
+  // We need to expose a selectText method to parent components
+  // and need an imperative ref handle.
+  useImperativeHandle(ref, () => ({
+    selectText: () => handleClick(),
+  }));
+
+  // use an inner span here for the selection as otherwise the selectText
+  // function will create a range that includes the entire part of the
+  // div (including the div itself) which causes newlines to be selected
+  // in chrome.
+  return (
+    <div
+      {...props}
+      onClick={handleClick}
+      className={classNames('auto-select-text', className)}
+    >
+      <span ref={element}>{children}</span>
+    </div>
+  );
+}

@@ -1,168 +1,181 @@
-import React from 'react';
-import {RouteComponentProps} from 'react-router';
+import {z} from 'zod';
 
-import AlertLink from 'app/components/alertLink';
-import Button from 'app/components/button';
-import {PanelAlert} from 'app/components/panels';
-import PluginList from 'app/components/pluginList';
-import {fields} from 'app/data/forms/projectAlerts';
-import {IconMail} from 'app/icons';
-import {t} from 'app/locale';
-import {Organization, Plugin, Project} from 'app/types';
-import routeTitleGen from 'app/utils/routeTitle';
-import AsyncView from 'app/views/asyncView';
-import Form from 'app/views/settings/components/forms/form';
-import JsonForm from 'app/views/settings/components/forms/jsonForm';
-import SettingsPageHeader from 'app/views/settings/components/settingsPageHeader';
-import PermissionAlert from 'app/views/settings/project/permissionAlert';
+import {Alert} from '@sentry/scraps/alert';
+import {LinkButton} from '@sentry/scraps/button';
+import {AutoSaveForm, FieldGroup, FormSearch} from '@sentry/scraps/form';
+import {Flex} from '@sentry/scraps/layout';
+import {Link} from '@sentry/scraps/link';
 
-type RouteParams = {orgId: string; projectId: string};
-type Props = RouteComponentProps<RouteParams, {}> &
-  AsyncView['props'] & {
-    canEditRule: boolean;
-    organization: Organization;
-    project: Project;
+import {SentryDocumentTitle} from 'sentry/components/sentryDocumentTitle';
+import {t, tct} from 'sentry/locale';
+import type {DetailedProject} from 'sentry/types/project';
+import {getApiUrl} from 'sentry/utils/api/getApiUrl';
+import {useUpdateProjectMutationOptions} from 'sentry/utils/project/useUpdateProject';
+import {fetchMutation} from 'sentry/utils/queryClient';
+import {RequestError} from 'sentry/utils/requestError/requestError';
+import {routeTitleGen} from 'sentry/utils/routeTitle';
+import {useOrganization} from 'sentry/utils/useOrganization';
+import {makeMonitorBasePathname} from 'sentry/views/detectors/pathnames';
+import {SettingsPageHeader} from 'sentry/views/settings/components/settingsPageHeader';
+import {ProjectPermissionAlert} from 'sentry/views/settings/project/projectPermissionAlert';
+import {useProjectAlertsOutlet} from 'sentry/views/settings/projectAlerts';
+
+const alertSettingsSchema = z.object({
+  subjectTemplate: z.string(),
+  digestsMinDelay: z.number(),
+  digestsMaxDelay: z.number(),
+});
+
+export default function ProjectAlertSettings() {
+  const organization = useOrganization();
+  const {canEditRule, project} = useProjectAlertsOutlet();
+
+  const alertRulesTo = {
+    pathname: makeMonitorBasePathname(organization.slug),
+    query: {project: project?.id},
   };
 
-type State = AsyncView['state'] & {
-  project: Project | null;
-  pluginList: Array<Plugin> | null;
-};
+  const projectMutationOptions = useUpdateProjectMutationOptions(project);
 
-class Settings extends AsyncView<Props, State> {
-  getDefaultState() {
-    return {
-      ...super.getDefaultState(),
-      project: null,
-      pluginList: [],
-    };
-  }
-  getProjectEndpoint({orgId, projectId}: RouteParams) {
-    return `/projects/${orgId}/${projectId}/`;
-  }
-
-  getEndpoints(): ReturnType<AsyncView['getEndpoints']> {
-    const {params} = this.props;
-    const {orgId, projectId} = params;
-    const projectEndpoint = this.getProjectEndpoint(params);
-    return [
-      ['project', projectEndpoint],
-      ['pluginList', `/projects/${orgId}/${projectId}/plugins/`],
-    ];
-  }
-
-  handleEnablePlugin = (plugin: Plugin) => {
-    this.setState(prevState => ({
-      pluginList: (prevState.pluginList ?? []).map(p => {
-        if (p.id !== plugin.id) {
-          return p;
+  // When the maximum delay is set below the minimum, the API rejects the save
+  // with the error keyed under `digestsMinDelay`. The max field's form only
+  // knows about `digestsMaxDelay`, so re-key the error onto it — that way
+  // AutoSaveForm surfaces the message on the field the user just changed
+  // instead of falling back to a generic "Failed to save".
+  const maxDelayMutationOptions = {
+    ...projectMutationOptions,
+    mutationFn: (data: Partial<DetailedProject>) =>
+      fetchMutation<DetailedProject>({
+        method: 'PUT',
+        url: getApiUrl('/projects/$organizationIdOrSlug/$projectIdOrSlug/', {
+          path: {organizationIdOrSlug: organization.slug, projectIdOrSlug: project.slug},
+        }),
+        data,
+      }).catch((error: unknown) => {
+        if (
+          error instanceof RequestError &&
+          error.responseJSON?.digestsMinDelay &&
+          !error.responseJSON.digestsMaxDelay
+        ) {
+          error.responseJSON.digestsMaxDelay = error.responseJSON.digestsMinDelay;
         }
-        return {
-          ...plugin,
-          enabled: true,
-        };
+        throw error;
       }),
-    }));
   };
 
-  handleDisablePlugin = (plugin: Plugin) => {
-    this.setState(prevState => ({
-      pluginList: (prevState.pluginList ?? []).map(p => {
-        if (p.id !== plugin.id) {
-          return p;
-        }
-        return {
-          ...plugin,
-          enabled: false,
-        };
-      }),
-    }));
-  };
+  return (
+    <FormSearch route="/settings/:orgId/projects/:projectId/alerts/">
+      <SentryDocumentTitle
+        title={routeTitleGen(t('Alerts Settings'), project.slug, false)}
+      />
+      <SettingsPageHeader title={t('Alerts Settings')} />
+      <ProjectPermissionAlert project={project} />
 
-  getTitle() {
-    const {projectId} = this.props.params;
-    return routeTitleGen(t('Alerts Settings'), projectId, false);
-  }
+      <Flex justify="end" paddingBottom="sm">
+        <LinkButton to={alertRulesTo} size="sm">
+          {t('View Alert Rules')}
+        </LinkButton>
+      </Flex>
 
-  renderBody() {
-    const {canEditRule, organization, params} = this.props;
-    const {orgId} = params;
-    const {project, pluginList} = this.state;
-
-    if (!project) {
-      return null;
-    }
-
-    const projectEndpoint = this.getProjectEndpoint(params);
-
-    return (
-      <React.Fragment>
-        <SettingsPageHeader
-          title={t('Alerts Settings')}
-          action={
-            <Button
-              to={{
-                pathname: `/organizations/${orgId}/alerts/rules/`,
-                query: {project: project.id},
-              }}
-              size="small"
-            >
-              {t('View Alert Rules')}
-            </Button>
-          }
-        />
-        <PermissionAlert />
-        <AlertLink to="/settings/account/notifications/" icon={<IconMail />}>
-          {t(
-            'Looking to fine-tune your personal notification preferences? Visit your Account Settings'
+      <FieldGroup title={t('Email Settings')}>
+        <Alert variant="info" system>
+          {tct(
+            'Looking to fine-tune your personal notification preferences? Visit your [link:Account Settings].',
+            {link: <Link to="/settings/account/notifications/" />}
           )}
-        </AlertLink>
+        </Alert>
 
-        <Form
-          saveOnBlur
-          allowUndo
-          initialData={{
-            subjectTemplate: project.subjectTemplate,
-            digestsMinDelay: project.digestsMinDelay,
-            digestsMaxDelay: project.digestsMaxDelay,
-          }}
-          apiMethod="PUT"
-          apiEndpoint={projectEndpoint}
+        <AutoSaveForm
+          name="subjectTemplate"
+          schema={alertSettingsSchema}
+          initialValue={project.subjectTemplate}
+          mutationOptions={projectMutationOptions}
         >
-          <JsonForm
-            disabled={!canEditRule}
-            title={t('Email Settings')}
-            fields={[fields.subjectTemplate]}
-          />
+          {field => (
+            <field.Layout.Row
+              label={t('Subject Template')}
+              hintText={t(
+                'The email subject to use (excluding the prefix) for individual alerts. Usable variables include: $title, $shortID, $projectID, $orgID, and ${tag:key}, such as ${tag:environment} or ${tag:release}.'
+              )}
+            >
+              <field.Input
+                value={field.state.value}
+                onChange={field.handleChange}
+                placeholder="e.g. $shortID - $title"
+                disabled={!canEditRule}
+              />
+            </field.Layout.Row>
+          )}
+        </AutoSaveForm>
+      </FieldGroup>
 
-          <JsonForm
-            title={t('Digests')}
-            disabled={!canEditRule}
-            fields={[fields.digestsMinDelay, fields.digestsMaxDelay]}
-            renderHeader={() => (
-              <PanelAlert type="info">
-                {t(
-                  'Sentry will automatically digest alerts sent by some services to avoid flooding your inbox with individual issue notifications. To control how frequently notifications are delivered, use the sliders below.'
-                )}
-              </PanelAlert>
-            )}
-          />
-        </Form>
+      <FieldGroup title={t('Digests')}>
+        <Alert variant="info" system>
+          {t(
+            'Sentry will automatically digest alerts sent by some services to avoid flooding your inbox with individual issue notifications. To control how frequently notifications are delivered, use the sliders below.'
+          )}
+        </Alert>
 
-        {canEditRule && (
-          <PluginList
-            organization={organization}
-            project={project}
-            pluginList={(pluginList ?? []).filter(
-              p => p.type === 'notification' && p.hasConfiguration
-            )}
-            onEnablePlugin={this.handleEnablePlugin}
-            onDisablePlugin={this.handleDisablePlugin}
-          />
-        )}
-      </React.Fragment>
-    );
-  }
+        <AutoSaveForm
+          name="digestsMinDelay"
+          schema={alertSettingsSchema}
+          initialValue={project.digestsMinDelay}
+          mutationOptions={projectMutationOptions}
+        >
+          {field => (
+            <field.Layout.Row
+              label={t('Minimum delivery interval')}
+              hintText={t('Notifications will be delivered at most this often.')}
+            >
+              <field.Range
+                aria-label={t('Minimum delivery interval')}
+                value={field.state.value / 60}
+                onChange={minutes => field.handleChange(minutes * 60)}
+                min={1}
+                max={60}
+                step={1}
+                formatOptions={{
+                  style: 'unit',
+                  unit: 'minute',
+                  unitDisplay: 'long',
+                }}
+                disabled={!canEditRule}
+              />
+            </field.Layout.Row>
+          )}
+        </AutoSaveForm>
+
+        <AutoSaveForm
+          name="digestsMaxDelay"
+          schema={alertSettingsSchema}
+          initialValue={project.digestsMaxDelay}
+          mutationOptions={maxDelayMutationOptions}
+        >
+          {field => (
+            <field.Layout.Row
+              label={t('Maximum delivery interval')}
+              hintText={t('Notifications will be delivered at least this often.')}
+            >
+              <field.Range
+                aria-label={t('Maximum delivery interval')}
+                // The slider works in minutes so formatOptions can render the
+                // value natively; the stored value stays in seconds.
+                value={field.state.value / 60}
+                onChange={minutes => field.handleChange(minutes * 60)}
+                min={1}
+                max={60}
+                step={1}
+                formatOptions={{
+                  style: 'unit',
+                  unit: 'minute',
+                  unitDisplay: 'long',
+                }}
+                disabled={!canEditRule}
+              />
+            </field.Layout.Row>
+          )}
+        </AutoSaveForm>
+      </FieldGroup>
+    </FormSearch>
+  );
 }
-
-export default Settings;

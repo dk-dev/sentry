@@ -1,26 +1,56 @@
-import React from 'react';
+import {useMemo, useState} from 'react';
 import styled from '@emotion/styled';
+import {useQuery} from '@tanstack/react-query';
 import memoize from 'lodash/memoize';
-import moment from 'moment-timezone';
 
-import AsyncComponent from 'app/components/asyncComponent';
-import Button from 'app/components/button';
-import Checkbox from 'app/components/checkbox';
-import DateTime from 'app/components/dateTime';
-import DropdownButton from 'app/components/dropdownButton';
-import DropdownControl, {DropdownItem} from 'app/components/dropdownControl';
-import ExternalLink from 'app/components/links/externalLink';
-import LoadingIndicator from 'app/components/loadingIndicator';
-import {Panel, PanelBody, PanelHeader, PanelItem} from 'app/components/panels';
-import Tag from 'app/components/tag';
-import {IconChevron, IconFlag, IconOpen} from 'app/icons';
-import {t} from 'app/locale';
-import space from 'app/styles/space';
-import {SentryApp, SentryAppSchemaIssueLink, SentryAppWebhookRequest} from 'app/types';
-import EmptyMessage from 'app/views/settings/components/emptyMessage';
+import {Tag, type TagProps} from '@sentry/scraps/badge';
+import {Button, ButtonBar} from '@sentry/scraps/button';
+import {CompactSelect} from '@sentry/scraps/compactSelect';
+import InteractionStateLayer from '@sentry/scraps/interactionStateLayer';
+import {Flex, Stack} from '@sentry/scraps/layout';
+import {OverlayTrigger} from '@sentry/scraps/overlayTrigger';
+import {Switch} from '@sentry/scraps/switch';
+import type {TableColumnConfig} from '@sentry/scraps/table';
+import {Heading, Text} from '@sentry/scraps/text';
+
+import {sentryAppWebhookRequestsApiOptions} from 'sentry/actionCreators/sentryApps';
+import {DateTime} from 'sentry/components/dateTime';
+import {LoadingError} from 'sentry/components/loadingError';
+import {PerformanceDuration} from 'sentry/components/performanceDuration';
+import {SimpleTable} from 'sentry/components/tables/simpleTable';
+import {IconChevron} from 'sentry/icons';
+import {t} from 'sentry/locale';
+import type {SentryApp, SentryAppSchemaIssueLink} from 'sentry/types/integrations';
+import {shouldUse24Hours} from 'sentry/utils/dates';
+import {defined} from 'sentry/utils/defined';
+import {useOrganization} from 'sentry/utils/useOrganization';
+import {granularWebhookEvents} from 'sentry/views/settings/organizationDeveloperSettings/constants';
+
+import {useRequestLogDetailsDrawer} from './requestLogDetails';
+import {getWebhookSubjectLabel, WebhookSubject} from './webhookSubjects';
+
+const REQUEST_COLUMNS: TableColumnConfig[] = [
+  {key: 'time', width: '1fr'},
+  {key: 'statusCode', width: '0.5fr'},
+  {key: 'organization', width: '1fr'},
+  {key: 'eventType', width: '1fr'},
+  {key: 'subjectType', width: '0.75fr'},
+  {key: 'subjectId', width: '1fr'},
+  {key: 'duration', width: '0.5fr'},
+];
+
+const INTERNAL_REQUEST_COLUMNS = REQUEST_COLUMNS.filter(
+  column => column.key !== 'organization'
+);
 
 const ALL_EVENTS = t('All Events');
 const MAX_PER_PAGE = 10;
+const EMPTY_VALUE = '—';
+
+const NO_RESPONSE_STATUS_LABELS: Record<number, string> = {
+  0: t('timeout'),
+  [-1]: t('connection error'),
+};
 
 const componentHasSelectUri = (issueLinkComponent: SentryAppSchemaIssueLink): boolean => {
   const hasSelectUri = (fields: any[]): boolean =>
@@ -46,7 +76,7 @@ const getEventTypes = memoize((app: SentryApp) => {
   );
   if (issueLinkComponent) {
     issueLinkEvents = ['external_issue.created', 'external_issue.linked'];
-    if (componentHasSelectUri(issueLinkComponent as SentryAppSchemaIssueLink)) {
+    if (componentHasSelectUri(issueLinkComponent)) {
       issueLinkEvents.push('select_options.requested');
     }
   }
@@ -54,13 +84,10 @@ const getEventTypes = memoize((app: SentryApp) => {
   const events = [
     ALL_EVENTS,
     // Internal apps don't have installation webhooks
-    ...(app.status !== 'internal'
-      ? ['installation.created', 'installation.deleted']
-      : []),
-    ...(app.events.includes('error') ? ['error.created'] : []),
-    ...(app.events.includes('issue')
-      ? ['issue.created', 'issue.resolved', 'issue.ignored', 'issue.assigned']
-      : []),
+    ...(app.status === 'internal'
+      ? []
+      : ['installation.created', 'installation.deleted']),
+    ...granularWebhookEvents(app.webhookEvents),
     ...(app.isAlertable
       ? [
           'event_alert.triggered',
@@ -76,293 +103,199 @@ const getEventTypes = memoize((app: SentryApp) => {
   return events;
 });
 
-const ResponseCode = ({code}: {code: number}) => {
-  let type: React.ComponentProps<typeof Tag>['type'] = 'error';
+export function ResponseCode({code}: {code: number}) {
+  let variant: TagProps['variant'] = 'danger';
   if (code <= 399 && code >= 300) {
-    type = 'warning';
+    variant = 'warning';
   } else if (code <= 299 && code >= 100) {
-    type = 'success';
+    variant = 'success';
   }
 
-  return (
-    <Tags>
-      <StyledTag type={type}>{code === 0 ? 'timeout' : code}</StyledTag>
-    </Tags>
-  );
-};
-
-const TimestampLink = ({date, link}: {date: moment.MomentInput; link?: string}) =>
-  link ? (
-    <ExternalLink href={link}>
-      <DateTime date={date} />
-      <StyledIconOpen size="12px" />
-    </ExternalLink>
-  ) : (
-    <DateTime date={date} />
-  );
-
-type Props = AsyncComponent['props'] & {
-  app: SentryApp;
-};
-
-type State = AsyncComponent['state'] & {
-  eventType: string;
-  errorsOnly: boolean;
-  currentPage: number;
-  requests: SentryAppWebhookRequest[];
-};
-
-export default class RequestLog extends AsyncComponent<Props, State> {
-  shouldReload = true;
-
-  get hasNextPage() {
-    return (this.state.currentPage + 1) * MAX_PER_PAGE < this.state.requests.length;
-  }
-
-  get hasPrevPage() {
-    return this.state.currentPage > 0;
-  }
-
-  getEndpoints(): ReturnType<AsyncComponent['getEndpoints']> {
-    const {slug} = this.props.app;
-
-    const query: any = {};
-    if (this.state) {
-      if (this.state.eventType !== ALL_EVENTS) {
-        query.eventType = this.state.eventType;
-      }
-      if (this.state.errorsOnly) {
-        query.errorsOnly = true;
-      }
-    }
-
-    return [['requests', `/sentry-apps/${slug}/requests/`, {query}]];
-  }
-
-  getDefaultState() {
-    return {
-      ...super.getDefaultState(),
-      requests: [],
-      eventType: ALL_EVENTS,
-      errorsOnly: false,
-      currentPage: 0,
-    };
-  }
-
-  handleChangeEventType = (eventType: string) => {
-    this.setState(
-      {
-        eventType,
-        currentPage: 0,
-      },
-      this.remountComponent
-    );
-  };
-
-  handleChangeErrorsOnly = () => {
-    this.setState(
-      {
-        errorsOnly: !this.state.errorsOnly,
-        currentPage: 0,
-      },
-      this.remountComponent
-    );
-  };
-
-  handleNextPage = () => {
-    this.setState({
-      currentPage: this.state.currentPage + 1,
-    });
-  };
-
-  handlePrevPage = () => {
-    this.setState({
-      currentPage: this.state.currentPage - 1,
-    });
-  };
-
-  renderLoading() {
-    return this.renderBody();
-  }
-
-  renderBody() {
-    const {requests, eventType, errorsOnly, currentPage} = this.state;
-    const {app} = this.props;
-
-    const currentRequests = requests.slice(
-      currentPage * MAX_PER_PAGE,
-      (currentPage + 1) * MAX_PER_PAGE
-    );
-
-    return (
-      <React.Fragment>
-        <h5>{t('Request Log')}</h5>
-
-        <div>
-          <p>
-            {t(
-              'This log shows the status of any outgoing webhook requests from Sentry to your integration.'
-            )}
-          </p>
-
-          <RequestLogFilters>
-            <DropdownControl
-              label={eventType}
-              menuWidth="220px"
-              button={({isOpen, getActorProps}) => (
-                <StyledDropdownButton {...getActorProps()} isOpen={isOpen}>
-                  {eventType}
-                </StyledDropdownButton>
-              )}
-            >
-              {getEventTypes(app).map(type => (
-                <DropdownItem
-                  key={type}
-                  onSelect={this.handleChangeEventType}
-                  eventKey={type}
-                  isActive={eventType === type}
-                >
-                  {type}
-                </DropdownItem>
-              ))}
-            </DropdownControl>
-
-            <StyledErrorsOnlyButton onClick={this.handleChangeErrorsOnly}>
-              <ErrorsOnlyCheckbox>
-                <Checkbox checked={errorsOnly} onChange={() => {}} />
-                {t('Errors Only')}
-              </ErrorsOnlyCheckbox>
-            </StyledErrorsOnlyButton>
-          </RequestLogFilters>
-        </div>
-
-        <Panel>
-          <PanelHeader>
-            <TableLayout hasOrganization={app.status !== 'internal'}>
-              <div>{t('Time')}</div>
-              <div>{t('Status Code')}</div>
-              {app.status !== 'internal' && <div>{t('Organization')}</div>}
-              <div>{t('Event Type')}</div>
-              <div>{t('Webhook URL')}</div>
-            </TableLayout>
-          </PanelHeader>
-
-          {!this.state.loading ? (
-            <PanelBody>
-              {currentRequests.length > 0 ? (
-                currentRequests.map((request, idx) => (
-                  <PanelItem key={idx}>
-                    <TableLayout hasOrganization={app.status !== 'internal'}>
-                      <TimestampLink date={request.date} link={request.errorUrl} />
-                      <ResponseCode code={request.responseCode} />
-                      {app.status !== 'internal' && (
-                        <div>
-                          {request.organization ? request.organization.name : null}
-                        </div>
-                      )}
-                      <div>{request.eventType}</div>
-                      <OverflowBox>{request.webhookUrl}</OverflowBox>
-                    </TableLayout>
-                  </PanelItem>
-                ))
-              ) : (
-                <EmptyMessage icon={<IconFlag size="xl" />}>
-                  {t('No requests found in the last 30 days.')}
-                </EmptyMessage>
-              )}
-            </PanelBody>
-          ) : (
-            <LoadingIndicator />
-          )}
-        </Panel>
-
-        <PaginationButtons>
-          <Button
-            icon={<IconChevron direction="left" size="sm" />}
-            onClick={this.handlePrevPage}
-            disabled={!this.hasPrevPage}
-            label={t('Previous page')}
-          />
-          <Button
-            icon={<IconChevron direction="right" size="sm" />}
-            onClick={this.handleNextPage}
-            disabled={!this.hasNextPage}
-            label={t('Next page')}
-          />
-        </PaginationButtons>
-      </React.Fragment>
-    );
-  }
+  return <Tag variant={variant}>{NO_RESPONSE_STATUS_LABELS[code] ?? code}</Tag>;
 }
 
-const TableLayout = styled('div')<{hasOrganization: boolean}>`
-  display: grid;
-  grid-template-columns: 1fr 0.5fr ${p => (p.hasOrganization ? '1fr' : '')} 1fr 1fr;
-  grid-column-gap: ${space(1.5)};
-  width: 100%;
-  align-items: center;
-`;
+interface RequestLogProps {
+  app: SentryApp;
+}
 
-const OverflowBox = styled('div')`
-  word-break: break-word;
-`;
+export function RequestLog({app}: RequestLogProps) {
+  const organization = useOrganization();
+  const timeFormat = shouldUse24Hours() ? 'MMM D, YYYY HH:mm:ss z' : 'll LTS z';
+  const [currentPage, setCurrentPage] = useState(0);
+  const [errorsOnly, setErrorsOnly] = useState(false);
+  const [eventType, setEventType] = useState(ALL_EVENTS);
 
-const PaginationButtons = styled('div')`
-  display: flex;
-  justify-content: flex-end;
-  align-items: center;
+  const {slug, status} = app;
+  const isInternal = status === 'internal';
+  const openDetails = useRequestLogDetailsDrawer({isInternal, organization});
 
-  > :first-child {
-    border-top-right-radius: 0;
-    border-bottom-right-radius: 0;
-  }
+  const {
+    data: requests = [],
+    isPending,
+    isError,
+  } = useQuery(
+    sentryAppWebhookRequestsApiOptions({
+      appSlug: slug,
+      eventType: eventType === ALL_EVENTS ? undefined : eventType,
+      errorsOnly: errorsOnly || undefined,
+    })
+  );
 
-  > :nth-child(2) {
-    margin-left: -1px;
-    border-top-left-radius: 0;
-    border-bottom-left-radius: 0;
-  }
-`;
+  const currentRequests = useMemo(
+    () => requests.slice(currentPage * MAX_PER_PAGE, (currentPage + 1) * MAX_PER_PAGE),
+    [currentPage, requests]
+  );
 
-const RequestLogFilters = styled('div')`
-  display: flex;
-  align-items: center;
-  padding-bottom: ${space(1)};
-`;
+  const hasNextPage = (currentPage + 1) * MAX_PER_PAGE < requests.length;
+  const hasPrevPage = currentPage > 0;
 
-const ErrorsOnlyCheckbox = styled('div')`
-  input {
-    margin: 0 ${space(1)} 0 0;
-  }
+  const handleChangeEventType = (newEventType: string) => {
+    setEventType(newEventType);
+    setCurrentPage(0);
+  };
 
-  display: flex;
-  align-items: center;
-`;
+  const handleChangeErrorsOnly = () => {
+    setErrorsOnly(!errorsOnly);
+    setCurrentPage(0);
+  };
 
-const StyledDropdownButton = styled(DropdownButton)`
-  z-index: ${p => p.theme.zIndex.header - 1};
-  white-space: nowrap;
+  return (
+    <Stack gap="xl">
+      <Stack gap="md">
+        <Heading as="h5">{t('Request Log')}</Heading>
 
-  border-top-right-radius: 0;
-  border-bottom-right-radius: 0;
-`;
+        <Text>
+          {t(
+            'This log shows the status of any outgoing webhook requests from Sentry to your integration.'
+          )}
+        </Text>
 
-const StyledErrorsOnlyButton = styled(Button)`
-  margin-left: -1px;
-  border-top-left-radius: 0;
-  border-bottom-left-radius: 0;
-`;
+        <Flex align="center" gap="2xl">
+          <CompactSelect
+            trigger={triggerProps => (
+              <OverlayTrigger.Button {...triggerProps}>{eventType}</OverlayTrigger.Button>
+            )}
+            value={eventType}
+            options={getEventTypes(app).map(type => ({
+              value: type,
+              label: type,
+            }))}
+            onChange={opt => handleChangeEventType(opt?.value)}
+          />
 
-const StyledIconOpen = styled(IconOpen)`
-  margin-left: 6px;
-  color: ${p => p.theme.subText};
-`;
+          <Flex as="label" align="center" gap="md" marginBottom="0">
+            <Text>{t('Errors Only')}</Text>
+            <Switch checked={errorsOnly} onChange={handleChangeErrorsOnly} />
+          </Flex>
+        </Flex>
+      </Stack>
 
-const Tags = styled('div')`
-  margin: -${space(0.5)};
-`;
+      {isError ? (
+        <LoadingError />
+      ) : (
+        <SimpleTable
+          columns={isInternal ? INTERNAL_REQUEST_COLUMNS : REQUEST_COLUMNS}
+          header={
+            <SimpleTable.HeaderRow>
+              <SimpleTable.HeaderCell>{t('Time')}</SimpleTable.HeaderCell>
+              <SimpleTable.HeaderCell>{t('Status Code')}</SimpleTable.HeaderCell>
+              {!isInternal && (
+                <SimpleTable.HeaderCell>{t('Organization')}</SimpleTable.HeaderCell>
+              )}
+              <SimpleTable.HeaderCell>{t('Event Type')}</SimpleTable.HeaderCell>
+              <SimpleTable.HeaderCell>{t('Subject Type')}</SimpleTable.HeaderCell>
+              <SimpleTable.HeaderCell>{t('Subject ID')}</SimpleTable.HeaderCell>
+              <SimpleTable.HeaderCell>{t('Duration')}</SimpleTable.HeaderCell>
+            </SimpleTable.HeaderRow>
+          }
+        >
+          {isPending && <SimpleTable.Loading />}
 
-const StyledTag = styled(Tag)`
-  padding: ${space(0.5)};
-  display: inline-flex;
+          {!isPending && currentRequests.length === 0 && (
+            <SimpleTable.Empty>
+              {t('No requests found in the last 30 days.')}
+            </SimpleTable.Empty>
+          )}
+
+          {!isPending &&
+            currentRequests.map((request, idx) => (
+              <SimpleTable.Row
+                key={currentPage * MAX_PER_PAGE + idx}
+                data-test-id="request-item"
+              >
+                <SimpleTable.RowCell>
+                  <RowButton
+                    aria-label={t('View request details')}
+                    onClick={() => openDetails(request)}
+                  >
+                    <InteractionStateLayer />
+                    <Text>
+                      <DateTime date={request.date} format={timeFormat} />
+                    </Text>
+                  </RowButton>
+                </SimpleTable.RowCell>
+                <SimpleTable.RowCell>
+                  <ResponseCode code={request.responseCode} />
+                </SimpleTable.RowCell>
+                {!isInternal && (
+                  <SimpleTable.RowCell>
+                    <Text ellipsis>{request.organization?.name}</Text>
+                  </SimpleTable.RowCell>
+                )}
+                <SimpleTable.RowCell>
+                  <Text ellipsis>{request.eventType}</Text>
+                </SimpleTable.RowCell>
+                <SimpleTable.RowCell>
+                  <Text ellipsis>{getWebhookSubjectLabel(request.subjectType)}</Text>
+                </SimpleTable.RowCell>
+                <SimpleTable.RowCell>
+                  <WebhookSubject
+                    subjectType={request.subjectType}
+                    subjectId={request.subjectId}
+                    isInternal={isInternal}
+                    organization={organization}
+                    display="id"
+                  />
+                </SimpleTable.RowCell>
+                <SimpleTable.RowCell>
+                  {defined(request.durationMs) ? (
+                    <PerformanceDuration milliseconds={request.durationMs} abbreviation />
+                  ) : (
+                    <Text>{EMPTY_VALUE}</Text>
+                  )}
+                </SimpleTable.RowCell>
+              </SimpleTable.Row>
+            ))}
+        </SimpleTable>
+      )}
+
+      <Flex justify="end">
+        <ButtonBar>
+          <Button
+            icon={<IconChevron direction="left" />}
+            onClick={() => setCurrentPage(currentPage - 1)}
+            disabled={!hasPrevPage}
+            aria-label={t('Previous page')}
+          />
+          <Button
+            icon={<IconChevron direction="right" />}
+            onClick={() => setCurrentPage(currentPage + 1)}
+            disabled={!hasNextPage}
+            aria-label={t('Next page')}
+          />
+        </ButtonBar>
+      </Flex>
+    </Stack>
+  );
+}
+
+const RowButton = styled('button')`
+  ${SimpleTable.rowLinkStyle}
+
+  background: none;
+  border: none;
+  text-align: left;
+  color: inherit;
+  font: inherit;
+  flex-grow: 1;
 `;

@@ -1,0 +1,345 @@
+import logging
+from collections.abc import Mapping, Sequence
+from datetime import datetime
+from typing import TYPE_CHECKING, Any, TypedDict
+
+from django.contrib.auth.models import AnonymousUser
+
+from sentry.api.serializers import Serializer, register, serialize
+from sentry.api.serializers.models.activity import _ActivitySentryAppEmbed
+from sentry.api.serializers.models.commit import CommitWithReleaseSerializer
+from sentry.issues.action_log.read_metrics import (
+    ActivityReadFallbackReason,
+    ActivityReadResult,
+    record_activity_read,
+)
+from sentry.issues.action_log.types import (
+    ACTION_TYPES_WITH_COMMIT_DATA,
+    COMMENT_MUTATION_ACTION_TYPES,
+    COMMIT_ACTION_TYPES,
+    PULL_REQUEST_ACTION_TYPES,
+    CommentAction,
+    CommentDeleteAction,
+    CommentEditAction,
+    GroupActionType,
+    GroupActorType,
+)
+from sentry.issues.derived.gate import should_serve_action_log_activity
+from sentry.issues.models.groupactionlogentry import GroupActionLogEntry
+from sentry.models.commit import Commit
+from sentry.models.pullrequest import PullRequest
+from sentry.sentry_apps.api.serializers.sentry_app_avatar import SentryAppAvatarSerializer
+from sentry.sentry_apps.services.app import app_service
+from sentry.sentry_apps.services.app.model import RpcSentryApp
+from sentry.types.activity import ActivityType
+from sentry.types.group import PriorityLevel
+from sentry.users.models.user import User
+from sentry.users.services.user.model import RpcUser
+from sentry.users.services.user.serial import serialize_generic_user
+from sentry.users.services.user.service import user_service
+from sentry.utils.action_log.activity_translator import (
+    GROUP_ACTION_TYPE_TO_ACTIVITY_KEYS,
+    GROUP_ACTION_TYPE_TO_ACTIVITY_TYPE,
+)
+
+if TYPE_CHECKING:
+    from sentry.models.group import Group
+
+logger = logging.getLogger(__name__)
+
+MAX_ACTIVITY_REFETCHES = 3
+
+
+class GroupActionLogEntrySerializerResponse(TypedDict):
+    id: str
+    # The reference accepted by the notes endpoints, or null for non-comments.
+    commentId: str | None
+    # the serialized acting user when actorType is USER, otherwise null
+    user: dict[str, Any] | None
+    sentry_app: _ActivitySentryAppEmbed | None
+    type: str
+    source: str | None
+    data: dict[str, Any]
+    dateCreated: datetime
+
+
+def serialize_first_seen_entry(group: "Group") -> GroupActionLogEntrySerializerResponse:
+    """
+    GALE has no FIRST_SEEN action type, so synthesize the entry the same way
+    ActivityManager.get_activities_for_group does.
+    """
+    initial_priority_value = group.get_event_metadata().get("initial_priority")
+    initial_priority = (
+        PriorityLevel(initial_priority_value).to_str() if initial_priority_value else None
+    )
+    return {
+        "id": "0",
+        "commentId": None,
+        "user": None,
+        "sentry_app": None,
+        "type": ActivityType.FIRST_SEEN.name.lower(),
+        "source": None,
+        "data": {"priority": initial_priority},
+        "dateCreated": group.first_seen,
+    }
+
+
+def _serialized_comment_id(obj: GroupActionLogEntry) -> str | None:
+    """
+    The comment reference accepted by the notes endpoints.
+
+    The notes endpoints resolve ``note_id`` against ``Activity.id``, so a COMMENT
+    references its ``comment_id`` (the Activity it mirrors).
+    COMMENT_EDIT and COMMENT_DELETE carry a ``comment_id`` too, but theirs points
+    at the GALE id of the COMMENT they supersede, not an addressable comment.
+    """
+    if obj.type == GroupActionType.COMMENT.value:
+        match obj.action:
+            case CommentAction(comment_id=comment_id):
+                return str(comment_id)
+    return None
+
+
+def _fold_comment_mutations(
+    entries: Sequence[GroupActionLogEntry],
+) -> tuple[list[GroupActionLogEntry], dict[int, str | None]]:
+    """
+    Resolve COMMENT_EDIT and COMMENT_DELETE against the comments they supersede.
+
+    The log is append-only, so editing or deleting a comment appends an entry rather than
+    rewriting the COMMENT. Returns the entries to serialize — mutations dropped, deleted
+    comments removed — and the current text of each edited comment, keyed by the id of the
+    COMMENT itself, which is what a mutation's ``comment_id`` points at.
+    """
+    latest_text_by_comment: dict[int, str | None] = {}
+    deleted_comment_ids: set[int] = set()
+    for entry in entries:
+        if entry.type not in COMMENT_MUTATION_ACTION_TYPES:
+            continue
+        match entry.action:
+            case CommentEditAction(comment_id=comment_id, text=text):
+                # Entries arrive newest-first, so the first edit seen wins.
+                latest_text_by_comment.setdefault(comment_id, text)
+            case CommentDeleteAction(comment_id=comment_id):
+                deleted_comment_ids.add(comment_id)
+
+    kept = [
+        entry
+        for entry in entries
+        if entry.type not in COMMENT_MUTATION_ACTION_TYPES and entry.id not in deleted_comment_ids
+    ]
+    return kept, latest_text_by_comment
+
+
+def get_serialized_activity_items(
+    group: "Group",
+    user: User | RpcUser | AnonymousUser | None,
+    *,
+    endpoint: str,
+    limit: int = 99,
+) -> list[dict[str, Any]] | None:
+    """
+    Activity-shaped items for a group, read from the action log.
+
+    Comment edits and deletes are folded into the comments they supersede. Expand the fetch
+    window as needed to fill the page with surviving entries, then append first-seen.
+
+    Returns None when the log can't back the response — either the gate is closed or it's
+    open and the log is empty — and the caller should fall back to Activity. Reports the
+    read outcome in both cases, so callers don't have to.
+    """
+    if not should_serve_action_log_activity(group.project, user, endpoint=endpoint):
+        return None
+
+    # Start with 25% headroom to absorb a few mutations without a refetch.
+    fetch_limit = limit + (limit // 4)
+    action_log = GroupActionLogEntry.objects.get_actions_for_group(group, fetch_limit)
+    if not action_log:
+        record_activity_read(
+            endpoint, ActivityReadResult.FELL_BACK, ActivityReadFallbackReason.EMPTY_LOG
+        )
+        logger.info(
+            "issues.action_log.activity_read.not_found",
+            extra={"endpoint": endpoint, "group_id": group.id},
+        )
+        return None
+
+    entries, latest_text_by_comment = _fold_comment_mutations(action_log)
+    for _ in range(MAX_ACTIVITY_REFETCHES):
+        if len(entries) >= limit or len(action_log) < fetch_limit:
+            break
+        # A full raw window may have displaced entries with mutations that the fold
+        # drops. Refetch a larger window within the budget above.
+        # Refold the entire window rather than combining rows from separate reads.
+        fetch_limit *= 2
+        action_log = GroupActionLogEntry.objects.get_actions_for_group(group, fetch_limit)
+        entries, latest_text_by_comment = _fold_comment_mutations(action_log)
+    entries = entries[:limit]
+
+    items = serialize(entries, user)
+    for entry, item in zip(entries, items):
+        if entry.id in latest_text_by_comment:
+            item["data"] = {**item["data"], "text": latest_text_by_comment[entry.id]}
+
+    record_activity_read(endpoint, ActivityReadResult.GAL)
+    return [*items, serialize_first_seen_entry(group)]
+
+
+@register(GroupActionLogEntry)
+class GroupActionLogEntrySerializer(Serializer):
+    def get_attrs(
+        self,
+        item_list: Sequence[GroupActionLogEntry],
+        user: User | RpcUser | AnonymousUser,
+        **kwargs: Any,
+    ) -> dict[GroupActionLogEntry, Any]:
+        user_ids = [
+            i.actor_id for i in item_list if i.actor_id and i.actor_type == GroupActorType.USER
+        ]
+        users = {}
+        if user_ids:
+            user_list = user_service.serialize_many(
+                filter={"user_ids": user_ids}, as_user=serialize_generic_user(user)
+            )
+            users = {u["id"]: u for u in user_list}
+
+        # add sentry app data
+
+        # If an entry is created by a Sentry App, attach it to the payload. For
+        # SENTRY_APP entries, actor_id is the SentryApp id (not its proxy user id).
+        sentry_app_ids = [
+            i.actor_id
+            for i in item_list
+            if i.actor_id and i.actor_type == GroupActorType.SENTRY_APP
+        ]
+        sentry_apps_list: list[RpcSentryApp] = []
+        if sentry_app_ids:
+            sentry_apps_list = app_service.get_sentry_apps_by_ids(ids=sentry_app_ids)
+        # Minimal Sentry App serialization to keep the payload minimal
+        all_avatars = [avatar for app in sentry_apps_list for avatar in app.avatars]
+        serialized_avatars = serialize(all_avatars, user, serializer=SentryAppAvatarSerializer())
+        sentry_apps: dict[str, _ActivitySentryAppEmbed] = {}
+        avatar_offset = 0
+        for app in sentry_apps_list:
+            avatar_count = len(app.avatars)
+            sentry_apps[str(app.id)] = {
+                "id": str(app.id),
+                "name": app.name,
+                "slug": app.slug,
+                "avatars": serialized_avatars[avatar_offset : avatar_offset + avatar_count],
+            }
+            avatar_offset += avatar_count
+
+        # add commit data
+        commit_ids = {
+            i.data["commit"]
+            for i in item_list
+            if i.type in ACTION_TYPES_WITH_COMMIT_DATA and i.data and i.data.get("commit")
+        }
+        if commit_ids:
+            commit_list = list(Commit.objects.filter(id__in=commit_ids))
+            commits_by_id = {
+                c.id: d
+                for c, d in zip(
+                    commit_list,
+                    serialize(commit_list, user, serializer=CommitWithReleaseSerializer()),
+                )
+            }
+            commits = {
+                i: commits_by_id.get(i.data["commit"])
+                for i in item_list
+                if i.type in ACTION_TYPES_WITH_COMMIT_DATA and i.data and i.data.get("commit")
+            }
+        else:
+            commits = {}
+
+        # add pull request data
+        pull_request_ids = {
+            i.data["pull_request"]
+            for i in item_list
+            if i.type in PULL_REQUEST_ACTION_TYPES and i.data and i.data.get("pull_request")
+        }
+        if pull_request_ids:
+            pull_request_list = list(PullRequest.objects.filter(id__in=pull_request_ids))
+            pull_requests_by_id = {
+                c.id: d for c, d in zip(pull_request_list, serialize(pull_request_list, user))
+            }
+            pull_requests = {
+                i: pull_requests_by_id.get(i.data["pull_request"])
+                for i in item_list
+                if i.type in PULL_REQUEST_ACTION_TYPES and i.data and i.data.get("pull_request")
+            }
+        else:
+            pull_requests = {}
+
+        return {
+            item: {
+                "user": (
+                    users.get(str(item.actor_id))
+                    if item.actor_type == GroupActorType.USER
+                    else None
+                ),
+                "sentry_app": (
+                    sentry_apps.get(str(item.actor_id))
+                    if item.actor_type == GroupActorType.SENTRY_APP
+                    else None
+                ),
+                "commit": commits.get(item),
+                "pull_request": pull_requests.get(item),
+            }
+            for item in item_list
+        }
+
+    def serialize(
+        self,
+        obj: GroupActionLogEntry,
+        attrs: Mapping[Any, Any],
+        user: User | RpcUser | AnonymousUser,
+        **kwargs: Any,
+    ) -> GroupActionLogEntrySerializerResponse:
+        activity_type = GROUP_ACTION_TYPE_TO_ACTIVITY_TYPE.get(obj.type)
+        type_display = (
+            ActivityType(activity_type).name.lower()
+            if activity_type is not None
+            else obj.get_type_display()
+        )
+
+        if (
+            obj.type == GroupActionType.SET_RESOLVED_IN_RELEASE.value
+            and obj.data
+            and obj.data.get("commit")
+        ):
+            data = {**obj.data, "commit": attrs["commit"]}
+        elif obj.type in COMMIT_ACTION_TYPES:
+            data = {"commit": attrs["commit"]}
+        elif obj.type in PULL_REQUEST_ACTION_TYPES:
+            data = {"pullRequest": attrs["pull_request"]}
+        elif obj.type == GroupActionType.MERGE_FROM_OTHER.value:
+            # Activity stores merged issues as a list of objects; GALE stores only ids.
+            counterpart_group_ids = (obj.data or {}).get("counterpart_group_ids", [])
+            data = {"issues": [{"id": str(group_id)} for group_id in counterpart_group_ids]}
+        else:
+            raw_data = obj.data or {}
+            key_translations = GROUP_ACTION_TYPE_TO_ACTIVITY_KEYS.get(obj.type)
+            if key_translations:
+                data = {key_translations.get(key, key): value for key, value in raw_data.items()}
+            else:
+                data = dict(raw_data)
+            data.pop("mentions", None)
+
+        if (
+            obj.type == GroupActionType.SET_RESOLVED_IN_RELEASE.value
+            and data.get("current_release_version") is None
+        ):
+            data.pop("current_release_version", None)
+
+        return {
+            "id": str(obj.id),
+            "commentId": _serialized_comment_id(obj),
+            "type": type_display,
+            "user": attrs["user"],
+            "sentry_app": attrs["sentry_app"],
+            "data": data,
+            "source": obj.source,
+            "dateCreated": obj.date_added,
+        }

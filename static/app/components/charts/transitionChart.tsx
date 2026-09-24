@@ -1,26 +1,27 @@
-import React from 'react';
+import {Component, Fragment} from 'react';
 
-import LoadingPanel from 'app/components/charts/loadingPanel';
+import {LoadingPanel} from 'sentry/components/charts/loadingPanel';
 
 const defaultProps = {
   height: '200px',
 };
 
 type Props = {
-  reloading: boolean;
   loading: boolean;
+  reloading: boolean;
+  children?: React.ReactNode;
 } & typeof defaultProps;
 
 type State = {
-  prevReloading: boolean;
-  prevLoading: boolean;
   key: number;
+  prevLoading: boolean;
+  prevReloading: boolean;
 };
 
-class TransitionChart extends React.Component<Props, State> {
+export class TransitionChart extends Component<Props, State> {
   static defaultProps = defaultProps;
 
-  state = {
+  state: State = {
     prevReloading: this.props.reloading,
     prevLoading: this.props.loading,
     key: 1,
@@ -32,7 +33,7 @@ class TransitionChart extends React.Component<Props, State> {
     // - reloading (also called pending in other apps)
     //
     // This component remounts the chart to ensure the stable transition
-    // from one data set to the next.
+    // from one dataset to the next.
 
     const prevReloading = state.prevReloading;
     const nextReloading = props.reloading;
@@ -95,10 +96,6 @@ class TransitionChart extends React.Component<Props, State> {
 
     // We make use of the key prop to explicitly remount the children
     // https://reactjs.org/docs/lists-and-keys.html#keys
-    return (
-      <React.Fragment key={String(this.state.key)}>{this.props.children}</React.Fragment>
-    );
+    return <Fragment key={String(this.state.key)}>{this.props.children}</Fragment>;
   }
 }
-
-export default TransitionChart;

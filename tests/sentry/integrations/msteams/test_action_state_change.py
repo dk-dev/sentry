@@ -1,81 +1,91 @@
 import time
+from typing import Any
+from unittest.mock import MagicMock, patch
 
+import orjson
 import responses
 from django.http import HttpResponse
+from django.test import override_settings
+from django.urls import reverse
+from requests import PreparedRequest
+from rest_framework.response import Response
 
-from sentry.integrations.msteams.card_builder import build_linking_card
+from sentry.api.client import ApiClient
+from sentry.constants import ObjectStatus
+from sentry.integrations.models.organization_integration import OrganizationIntegration
+from sentry.integrations.msteams.card_builder.identity import build_linking_card
+from sentry.integrations.msteams.constants import SALT
 from sentry.integrations.msteams.link_identity import build_linking_url
 from sentry.integrations.msteams.utils import ACTION_TYPE
-from sentry.models import (
-    AuthIdentity,
-    AuthProvider,
-    Group,
-    GroupAssignee,
-    GroupStatus,
-    Identity,
-    IdentityProvider,
-    IdentityStatus,
-    Integration,
-    OrganizationIntegration,
-)
-from sentry.testutils import APITestCase
-from sentry.testutils.asserts import assert_mock_called_once_with_partial
-from sentry.utils import json
-from sentry.utils.compat.mock import patch
+from sentry.integrations.types import EventLifecycleOutcome
+from sentry.models.activity import Activity, ActivityIntegration
+from sentry.models.authidentity import AuthIdentity
+from sentry.models.authprovider import AuthProvider
+from sentry.models.group import Group, GroupStatus
+from sentry.models.groupassignee import GroupAssignee
+from sentry.silo.base import SiloMode
+from sentry.testutils.asserts import assert_mock_called_once_with_partial, assert_slo_metric
+from sentry.testutils.cases import APITestCase
+from sentry.testutils.silo import assume_test_silo_mode
+from sentry.testutils.skips import requires_snuba
+from sentry.users.models.identity import Identity, IdentityStatus
+
+pytestmark = [requires_snuba]
 
 
-class BaseEventTest(APITestCase):
-    def setUp(self):
+class StatusActionTest(APITestCase):
+    def setUp(self) -> None:
         super().setUp()
         self.user = self.create_user(is_superuser=False)
         owner = self.create_user()
         self.org = self.create_organization(owner=owner)
         self.team = self.create_team(organization=self.org, members=[self.user])
 
-        self.integration = Integration.objects.create(
-            provider="msteams",
-            name="Fellowship of the Ring",
-            external_id="f3ll0wsh1p",
-            metadata={
-                "service_url": "https://smba.trafficmanager.net/amer",
-                "access_token": "y0u_5h4ll_n07_p455",
-                "expires_at": int(time.time()) + 86400,
-            },
-        )
-        OrganizationIntegration.objects.create(organization=self.org, integration=self.integration)
+        with assume_test_silo_mode(SiloMode.CONTROL):
+            self.integration = self.create_provider_integration(
+                provider="msteams",
+                name="Fellowship of the Ring",
+                external_id="f3ll0wsh1p",
+                metadata={
+                    "service_url": "https://smba.trafficmanager.net/amer",
+                    "access_token": "y0u_5h4ll_n07_p455",
+                    "expires_at": int(time.time()) + 86400,
+                },
+            )
+            self.create_organization_integration(
+                organization_id=self.org.id, integration=self.integration
+            )
 
-        self.idp = IdentityProvider.objects.create(
-            type="msteams", external_id="f3ll0wsh1p", config={}
-        )
-        self.identity = Identity.objects.create(
-            external_id="g4nd4lf",
-            idp=self.idp,
-            user=self.user,
-            status=IdentityStatus.VALID,
-            scopes=[],
-        )
+            self.idp = self.create_identity_provider(type="msteams", external_id="f3ll0wsh1p")
+            self.identity = Identity.objects.create(
+                external_id="g4nd4lf",
+                idp=self.idp,
+                user=self.user,
+                status=IdentityStatus.VALID,
+                scopes=[],
+            )
 
         self.project1 = self.create_project(organization=self.org)
         self.event1 = self.store_event(
             data={"message": "oh no"},
             project_id=self.project1.id,
         )
+        assert self.event1.group is not None
         self.group1 = self.event1.group
 
     def post_webhook(
         self,
-        action_type="dummy",
-        user_id="g4nd4lf",
-        team_id="f3ll0wsh1p",
-        tenant_id="m17hr4nd1r",
-        conversation_type="channel",
-        channel_id=None,
-        group_id=None,
-        resolve_input=None,
-        ignore_input=None,
-        assign_input=None,
-    ):
-
+        action_type: str = "dummy",
+        user_id: str = "g4nd4lf",
+        team_id: str = "f3ll0wsh1p",
+        tenant_id: str = "m17hr4nd1r",
+        conversation_type: str = "channel",
+        channel_id: str | None = None,
+        group_id: str | None = None,
+        resolve_input: str | None = None,
+        archive_input: str | None = None,
+        assign_input: str | None = None,
+    ) -> Response:
         replyToId = "12345"
 
         channel_data = {"tenant": {"id": tenant_id}}
@@ -107,29 +117,31 @@ class BaseEventTest(APITestCase):
                     "integrationId": self.integration.id,
                 },
                 "resolveInput": resolve_input,
-                "ignoreInput": ignore_input,
+                "archiveInput": archive_input,
                 "assignInput": assign_input,
             },
             "replyToId": replyToId,
         }
 
-        return self.client.post("/extensions/msteams/webhook/", data=payload)
+        webhook_url = reverse("sentry-integration-msteams-webhooks")
+        return self.client.post(webhook_url, data=payload)
 
-
-class StatusActionTest(BaseEventTest):
     @patch("sentry.integrations.msteams.webhook.verify_signature", return_vaue=True)
     @patch("sentry.integrations.msteams.link_identity.sign")
     @responses.activate
-    def test_ask_linking(self, sign, verify):
+    def test_ask_linking(self, sign: MagicMock, verify: MagicMock) -> None:
         sign.return_value = "signed_parameters"
 
-        def user_conversation_id_callback(request):
-            payload = json.loads(request.body)
+        def user_conversation_id_callback(
+            request: PreparedRequest,
+        ) -> tuple[int, dict[str, str], str]:
+            assert request.body is not None
+            payload = orjson.loads(request.body)
             if payload["members"] == [{"id": "s4ur0n"}] and payload["channelData"] == {
                 "tenant": {"id": "7h3_gr347"}
             }:
-                return (200, {}, json.dumps({"id": "d4rk_l0rd"}))
-            return (404, {}, json.dumps({}))
+                return 200, {}, orjson.dumps({"id": "d4rk_l0rd"}).decode()
+            return 404, {}, orjson.dumps({}).decode()
 
         responses.add_callback(
             method=responses.POST,
@@ -145,12 +157,21 @@ class StatusActionTest(BaseEventTest):
         )
 
         resp = self.post_webhook(user_id="s4ur0n", tenant_id="7h3_gr347")
+        # assert sign is called with the right arguments
+        assert sign.call_args.kwargs == {
+            "salt": SALT,
+            "integration_id": self.integration.id,
+            "organization_id": self.org.id,
+            "teams_user_id": "s4ur0n",
+            "team_id": "f3ll0wsh1p",
+            "tenant_id": "7h3_gr347",
+        }
 
         linking_url = build_linking_url(
             self.integration, self.org, "s4ur0n", "f3ll0wsh1p", "7h3_gr347"
         )
 
-        data = json.loads(responses.calls[1].request.body)
+        data = orjson.loads(responses.calls[1].request.body)
 
         assert resp.status_code == 201
         assert "attachments" in data
@@ -158,8 +179,8 @@ class StatusActionTest(BaseEventTest):
 
     @responses.activate
     @patch("sentry.integrations.msteams.webhook.verify_signature", return_value=True)
-    def test_ignore_issue(self, verify):
-        resp = self.post_webhook(action_type=ACTION_TYPE.IGNORE, ignore_input="-1")
+    def test_archive_issue(self, verify: MagicMock) -> None:
+        resp = self.post_webhook(action_type=ACTION_TYPE.ARCHIVE, archive_input="-1")
         self.group1 = Group.objects.get(id=self.group1.id)
 
         assert resp.status_code == 200, resp.content
@@ -167,8 +188,8 @@ class StatusActionTest(BaseEventTest):
 
     @responses.activate
     @patch("sentry.integrations.msteams.webhook.verify_signature", return_value=True)
-    def test_no_ignore_input(self, verify):
-        resp = self.post_webhook(action_type=ACTION_TYPE.IGNORE, ignore_input="")
+    def test_no_archive_input(self, verify: MagicMock) -> None:
+        resp = self.post_webhook(action_type=ACTION_TYPE.ARCHIVE, archive_input="")
         self.group1 = Group.objects.get(id=self.group1.id)
 
         assert resp.status_code == 200, resp.content
@@ -176,22 +197,23 @@ class StatusActionTest(BaseEventTest):
 
     @responses.activate
     @patch("sentry.integrations.msteams.webhook.verify_signature", return_value=True)
-    def test_ignore_issue_with_additional_user_auth(self, verify):
-        auth_idp = AuthProvider.objects.create(organization=self.org, provider="nobody")
-        AuthIdentity.objects.create(auth_provider=auth_idp, user=self.user)
+    def test_archive_issue_with_additional_user_auth(self, verify: MagicMock) -> None:
+        with assume_test_silo_mode(SiloMode.CONTROL):
+            auth_idp = AuthProvider.objects.create(organization_id=self.org.id, provider="nobody")
+            AuthIdentity.objects.create(auth_provider=auth_idp, user=self.user)
 
-        resp = self.post_webhook(action_type=ACTION_TYPE.IGNORE, ignore_input="-1")
+        resp = self.post_webhook(action_type=ACTION_TYPE.ARCHIVE, archive_input="-1")
         self.group1 = Group.objects.get(id=self.group1.id)
 
         assert resp.status_code == 200, resp.content
         assert self.group1.get_status() == GroupStatus.IGNORED
 
     @responses.activate
-    @patch("sentry.api.client.put")
+    @patch.object(ApiClient, "put")
     @patch("sentry.integrations.msteams.webhook.verify_signature", return_value=True)
-    def test_ignore_with_params(self, verify, client_put):
+    def test_archive_with_params(self, verify: MagicMock, client_put: MagicMock) -> None:
         client_put.return_value = HttpResponse(status=200)
-        self.post_webhook(action_type=ACTION_TYPE.IGNORE, ignore_input="100")
+        self.post_webhook(action_type=ACTION_TYPE.ARCHIVE, archive_input="100")
 
         expected_data = {"status": "ignored", "statusDetails": {"ignoreCount": 100}}
 
@@ -199,87 +221,184 @@ class StatusActionTest(BaseEventTest):
 
     @responses.activate
     @patch("sentry.integrations.msteams.webhook.verify_signature", return_value=True)
-    def test_assign_to_team(self, verify):
+    def test_assign_to_team(self, verify: MagicMock) -> None:
         resp = self.post_webhook(
             action_type=ACTION_TYPE.ASSIGN, assign_input=f"team:{self.team.id}"
         )
 
         assert resp.status_code == 200, resp.content
         assert GroupAssignee.objects.filter(group=self.group1, team=self.team).exists()
+        activity = Activity.objects.get(group=self.group1)
+        assert activity.data == {
+            "assignee": str(self.team.id),
+            "assigneeEmail": None,
+            "assigneeName": self.team.name,
+            "assigneeType": "team",
+            "integration": ActivityIntegration.MSTEAMS.value,
+        }
 
     @responses.activate
+    @patch("sentry.integrations.utils.metrics.EventLifecycle.record_event")
     @patch("sentry.integrations.msteams.webhook.verify_signature", return_value=True)
-    def test_assign_to_me(self, verify):
+    def test_assign_to_me(self, verify: MagicMock, mock_record: MagicMock) -> None:
         resp = self.post_webhook(action_type=ACTION_TYPE.ASSIGN, assign_input="ME")
 
         assert resp.status_code == 200, resp.content
-        assert GroupAssignee.objects.filter(group=self.group1, user=self.user).exists()
+        assert GroupAssignee.objects.filter(group=self.group1, user_id=self.user.id).exists()
 
         assert b"Unassign" in responses.calls[0].request.body
-        assert f"Assigned to {self.user.email}".encode("utf-8") in responses.calls[0].request.body
+        assert f"Assigned to {self.user.email}".encode() in responses.calls[0].request.body
+        activity = Activity.objects.get(group=self.group1)
+        assert activity.data == {
+            "assignee": str(self.user.id),
+            "assigneeEmail": self.user.email,
+            "assigneeName": self.user.name,
+            "assigneeType": "user",
+            "integration": ActivityIntegration.MSTEAMS.value,
+        }
+
+        assert_slo_metric(mock_record, EventLifecycleOutcome.SUCCESS)
 
     @responses.activate
     @patch("sentry.integrations.msteams.webhook.verify_signature", return_value=True)
-    def test_assign_to_me_personal_message(self, verify):
+    def test_assign_to_me_personal_message(self, verify: MagicMock) -> None:
         resp = self.post_webhook(
             action_type=ACTION_TYPE.ASSIGN, assign_input="ME", conversation_type="personal"
         )
 
         assert resp.status_code == 200, resp.content
-        assert GroupAssignee.objects.filter(group=self.group1, user=self.user).exists()
+        assert GroupAssignee.objects.filter(group=self.group1, user_id=self.user.id).exists()
 
         assert b"Unassign" in responses.calls[0].request.body
         assert "user_conversation_id" in responses.calls[0].request.url
-        assert f"Assigned to {self.user.email}".encode("utf-8") in responses.calls[0].request.body
+        assert f"Assigned to {self.user.email}".encode() in responses.calls[0].request.body
 
     @responses.activate
     @patch("sentry.integrations.msteams.webhook.verify_signature", return_value=True)
-    def test_assign_to_me_channel_message(self, verify):
+    def test_assign_to_me_channel_message(self, verify: MagicMock) -> None:
         resp = self.post_webhook(
             action_type=ACTION_TYPE.ASSIGN, assign_input="ME", channel_id="some_channel_id"
         )
 
         assert resp.status_code == 200, resp.content
-        assert GroupAssignee.objects.filter(group=self.group1, user=self.user).exists()
+        assert GroupAssignee.objects.filter(group=self.group1, user_id=self.user.id).exists()
 
         assert b"Unassign" in responses.calls[0].request.body
         assert "some_channel_id" in responses.calls[0].request.url
-        assert f"Assigned to {self.user.email}".encode("utf-8") in responses.calls[0].request.body
+        assert f"Assigned to {self.user.email}".encode() in responses.calls[0].request.body
 
     @responses.activate
     @patch("sentry.integrations.msteams.webhook.verify_signature", return_value=True)
-    def test_assign_to_me_multiple_identities(self, verify):
+    def test_action_rejected_when_organization_integration_is_not_active(
+        self, verify: MagicMock
+    ) -> None:
+        with assume_test_silo_mode(SiloMode.CONTROL):
+            OrganizationIntegration.objects.filter(
+                organization_id=self.org.id,
+                integration=self.integration,
+            ).update(status=ObjectStatus.PENDING_DELETION)
+
+        resp = self.post_webhook(action_type=ACTION_TYPE.ARCHIVE, archive_input="-1")
+
+        assert resp.status_code == 404
+        self.group1.refresh_from_db()
+        assert self.group1.get_status() == GroupStatus.UNRESOLVED
+
+    @responses.activate
+    @patch("sentry.integrations.msteams.webhook.verify_signature", return_value=True)
+    def test_action_rejected_when_group_org_not_linked_to_integration(
+        self, verify: MagicMock
+    ) -> None:
+        attacker = self.create_user(is_superuser=False)
+        other_org = self.create_organization(owner=attacker)
+        with assume_test_silo_mode(SiloMode.CONTROL):
+            other_integration = self.create_provider_integration(
+                provider="msteams",
+                name="Army of Mordor",
+                external_id="54rum4n",
+                metadata={
+                    "service_url": "https://smba.trafficmanager.net/amer",
+                    "access_token": "y0u_h4v3_ch053n_d347h",
+                    "expires_at": int(time.time()) + 86400,
+                },
+            )
+            self.create_organization_integration(
+                organization_id=other_org.id, integration=other_integration
+            )
+            other_idp = self.create_identity_provider(type="msteams", external_id="54rum4n")
+            Identity.objects.create(
+                external_id="7h3_gr3y",
+                idp=other_idp,
+                user=attacker,
+                status=IdentityStatus.VALID,
+                scopes=[],
+            )
+
+        # Attacker references their own integration but a group from self.org.
+        payload = {
+            "type": "message",
+            "from": {"id": "7h3_gr3y"},
+            "channelData": {
+                "tenant": {"id": "m0rd0r"},
+                "team": {"id": "54rum4n"},
+                "channel": {"id": "54rum4n"},
+            },
+            "conversation": {"conversationType": "channel", "id": "54rum4n"},
+            "value": {
+                "payload": {
+                    "groupId": self.group1.id,
+                    "eventId": self.event1.event_id,
+                    "actionType": ACTION_TYPE.ARCHIVE,
+                    "rules": [],
+                    "integrationId": other_integration.id,
+                },
+                "archiveInput": "-1",
+            },
+            "replyToId": "12345",
+        }
+
+        webhook_url = reverse("sentry-integration-msteams-webhooks")
+        resp = self.client.post(webhook_url, data=payload)
+
+        assert resp.status_code == 404
+        self.group1.refresh_from_db()
+        assert self.group1.get_status() == GroupStatus.UNRESOLVED
+
+    @responses.activate
+    @patch("sentry.integrations.msteams.webhook.verify_signature", return_value=True)
+    def test_assign_to_me_multiple_identities(self, verify: MagicMock) -> None:
         org2 = self.create_organization(owner=None)
 
-        integration2 = Integration.objects.create(
-            provider="msteams",
-            name="Army of Mordor",
-            external_id="54rum4n",
-            metadata={
-                "service_url": "https://smba.trafficmanager.net/amer",
-                "access_token": "y0u_h4v3_ch053n_d347h",
-                "expires_at": int(time.time()) + 86400,
-            },
-        )
-        OrganizationIntegration.objects.create(organization=org2, integration=integration2)
+        with assume_test_silo_mode(SiloMode.CONTROL):
+            integration2 = self.create_provider_integration(
+                provider="msteams",
+                name="Army of Mordor",
+                external_id="54rum4n",
+                metadata={
+                    "service_url": "https://smba.trafficmanager.net/amer",
+                    "access_token": "y0u_h4v3_ch053n_d347h",
+                    "expires_at": int(time.time()) + 86400,
+                },
+            )
+            self.create_organization_integration(organization_id=org2.id, integration=integration2)
 
-        idp2 = IdentityProvider.objects.create(type="msteams", external_id="54rum4n", config={})
-        Identity.objects.create(
-            external_id="7h3_gr3y",
-            idp=idp2,
-            user=self.user,
-            status=IdentityStatus.VALID,
-            scopes=[],
-        )
+            idp2 = self.create_identity_provider(type="msteams", external_id="54rum4n")
+            Identity.objects.create(
+                external_id="7h3_gr3y",
+                idp=idp2,
+                user=self.user,
+                status=IdentityStatus.VALID,
+                scopes=[],
+            )
 
         resp = self.post_webhook(action_type=ACTION_TYPE.ASSIGN, assign_input="ME")
 
         assert resp.status_code == 200, resp.content
-        assert GroupAssignee.objects.filter(group=self.group1, user=self.user).exists()
+        assert GroupAssignee.objects.filter(group=self.group1, user_id=self.user.id).exists()
 
     @responses.activate
     @patch("sentry.integrations.msteams.webhook.verify_signature", return_value=True)
-    def test_resolve_issue(self, verify):
+    def test_resolve_issue(self, verify: MagicMock) -> None:
         resp = self.post_webhook(action_type=ACTION_TYPE.RESOLVE, resolve_input="resolved")
         self.group1 = Group.objects.get(id=self.group1.id)
 
@@ -289,7 +408,7 @@ class StatusActionTest(BaseEventTest):
 
     @responses.activate
     @patch("sentry.integrations.msteams.webhook.verify_signature", return_value=True)
-    def test_no_resolve_input(self, verify):
+    def test_no_resolve_input(self, verify: MagicMock) -> None:
         resp = self.post_webhook(action_type=ACTION_TYPE.RESOLVE, resolve_input="")
         self.group1 = Group.objects.get(id=self.group1.id)
 
@@ -299,19 +418,19 @@ class StatusActionTest(BaseEventTest):
 
     @responses.activate
     @patch("sentry.integrations.msteams.webhook.verify_signature", return_value=True)
-    def test_unassign_issue(self, verify):
-        GroupAssignee.objects.create(group=self.group1, project=self.project1, user=self.user)
+    def test_unassign_issue(self, verify: MagicMock) -> None:
+        GroupAssignee.objects.create(group=self.group1, project=self.project1, user_id=self.user.id)
         resp = self.post_webhook(action_type=ACTION_TYPE.UNASSIGN, resolve_input="resolved")
         self.group1 = Group.objects.get(id=self.group1.id)
 
         assert resp.status_code == 200, resp.content
-        assert not GroupAssignee.objects.filter(group=self.group1, user=self.user).exists()
+        assert not GroupAssignee.objects.filter(group=self.group1, user_id=self.user.id).exists()
         assert b"Assign" in responses.calls[0].request.body
 
     @responses.activate
-    @patch("sentry.api.client.put")
+    @patch.object(ApiClient, "put")
     @patch("sentry.integrations.msteams.webhook.verify_signature", return_value=True)
-    def test_resolve_with_params(self, verify, client_put):
+    def test_resolve_with_params(self, verify: MagicMock, client_put: MagicMock) -> None:
         client_put.return_value = HttpResponse(status=200)
         self.post_webhook(
             action_type=ACTION_TYPE.RESOLVE, resolve_input="resolved:inCurrentRelease"
@@ -322,8 +441,34 @@ class StatusActionTest(BaseEventTest):
         assert_mock_called_once_with_partial(client_put, data=expected_data)
 
     @responses.activate
+    @override_settings(SENTRY_VIEWER_CONTEXT_ENABLED=True)
     @patch("sentry.integrations.msteams.webhook.verify_signature", return_value=True)
-    def test_no_integration(self, verify):
-        self.integration.delete()
+    def test_action_submitted_sets_viewer_context(self, verify: MagicMock) -> None:
+        """ViewerContext is set with org_id and actor_type=INTEGRATION during action handling."""
+        from sentry.viewer_context import ActorType, ViewerContext, get_viewer_context
+
+        captured_contexts: list[ViewerContext | None] = []
+
+        original_refresh = Group.refresh_from_db
+
+        def capturing_refresh(self_group: Any, *args: Any, **kwargs: Any) -> None:
+            captured_contexts.append(get_viewer_context())
+            return original_refresh(self_group, *args, **kwargs)
+
+        with patch.object(Group, "refresh_from_db", capturing_refresh):
+            resp = self.post_webhook(action_type=ACTION_TYPE.RESOLVE, resolve_input="resolved")
+
+        assert resp.status_code == 200
+        assert len(captured_contexts) == 1
+        ctx = captured_contexts[0]
+        assert ctx is not None
+        assert ctx.organization_id == self.org.id
+        assert ctx.actor_type == ActorType.INTEGRATION
+
+    @responses.activate
+    @patch("sentry.integrations.msteams.webhook.verify_signature", return_value=True)
+    def test_no_integration(self, verify: MagicMock) -> None:
+        with assume_test_silo_mode(SiloMode.CONTROL):
+            self.integration.delete()
         resp = self.post_webhook()
         assert resp.status_code == 404

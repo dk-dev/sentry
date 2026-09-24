@@ -1,0 +1,94 @@
+import {useCallback, useMemo} from 'react';
+
+import {DiscoverDatasets} from 'sentry/utils/discover/types';
+import {useChartInterval} from 'sentry/utils/useChartInterval';
+import {useOrganization} from 'sentry/utils/useOrganization';
+import {formatSort} from 'sentry/views/explore/contexts/pageParamsContext/sortBys';
+import {shouldTriggerHighAccuracy} from 'sentry/views/explore/hooks/useExploreTimeseries';
+import {
+  useProgressiveQuery,
+  type RPCQueryExtras,
+} from 'sentry/views/explore/hooks/useProgressiveQuery';
+import {useTopEvents} from 'sentry/views/explore/hooks/useTopEvents';
+import type {TraceMetric} from 'sentry/views/explore/metrics/metricQuery';
+import {useMetricVisualizes} from 'sentry/views/explore/metrics/metricsQueryParams';
+import {
+  useQueryParamsAggregateSortBys,
+  useQueryParamsGroupBys,
+  useQueryParamsSearch,
+} from 'sentry/views/explore/queryParams/context';
+import {isVisualizeEquation} from 'sentry/views/explore/queryParams/visualize';
+import {useSortedTimeSeries} from 'sentry/views/insights/common/queries/useSortedTimeSeries';
+
+interface UseMetricTimeseriesOptions {
+  enabled: boolean;
+  traceMetric: TraceMetric;
+}
+
+export function useMetricTimeseries({traceMetric, enabled}: UseMetricTimeseriesOptions) {
+  const visualizes = useMetricVisualizes();
+
+  const topEvents = useTopEvents();
+  const canTriggerHighAccuracy = useCallback(
+    (result: ReturnType<typeof useMetricTimeseriesImpl>['result']) => {
+      return shouldTriggerHighAccuracy(result.data, visualizes, !!topEvents);
+    },
+    [topEvents, visualizes]
+  );
+  return useProgressiveQuery<typeof useMetricTimeseriesImpl>({
+    queryHookImplementation: useMetricTimeseriesImpl, // oxlint-disable-line react/hooks -- useProgressiveQuery takes the query hook as a value and calls it per accuracy tier.
+    queryHookArgs: {traceMetric, queryExtras: undefined, enabled},
+    queryOptions: {
+      canTriggerHighAccuracy,
+    },
+  });
+}
+
+interface UseMetricTimeseriesImplOptions extends UseMetricTimeseriesOptions {
+  queryExtras?: RPCQueryExtras;
+}
+
+function useMetricTimeseriesImpl({
+  traceMetric,
+  queryExtras,
+  enabled,
+}: UseMetricTimeseriesImplOptions) {
+  const visualizes = useMetricVisualizes();
+  const groupBys = useQueryParamsGroupBys();
+  const [interval] = useChartInterval();
+  const topEvents = useTopEvents();
+  const search = useQueryParamsSearch();
+  const sortBys = useQueryParamsAggregateSortBys();
+  const organization = useOrganization();
+
+  const yAxis = useMemo(() => {
+    return visualizes.map(v => v.yAxis);
+  }, [visualizes]);
+
+  const timeseriesResult = useSortedTimeSeries(
+    {
+      search,
+      yAxis,
+      interval,
+      fields: [...groupBys, ...yAxis],
+      enabled:
+        enabled &&
+        (Boolean(traceMetric.name) ||
+          visualizes.some(
+            visualize => isVisualizeEquation(visualize) && visualize.expression.text
+          )),
+      topEvents,
+      orderby: sortBys.map(formatSort),
+      includeMeasuredIngestionDelayMetadata: organization.features.includes(
+        'measured-ingestion-delay-ui'
+      ),
+      ...queryExtras,
+    },
+    'api.explore.tracemetrics-timeseries',
+    DiscoverDatasets.TRACEMETRICS
+  );
+
+  return {
+    result: timeseriesResult,
+  };
+}

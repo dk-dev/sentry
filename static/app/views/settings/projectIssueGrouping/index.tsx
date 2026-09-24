@@ -1,128 +1,288 @@
-import React from 'react';
-import {RouteComponentProps} from 'react-router';
+import {z} from 'zod';
 
-import ProjectActions from 'app/actions/projectActions';
-import Feature from 'app/components/acl/feature';
-import ExternalLink from 'app/components/links/externalLink';
-import {fields} from 'app/data/forms/projectIssueGrouping';
-import {t, tct} from 'app/locale';
-import {EventGroupingConfig, Organization, Project} from 'app/types';
-import routeTitleGen from 'app/utils/routeTitle';
-import AsyncView from 'app/views/asyncView';
-import Form from 'app/views/settings/components/forms/form';
-import JsonForm from 'app/views/settings/components/forms/jsonForm';
-import SettingsPageHeader from 'app/views/settings/components/settingsPageHeader';
-import TextBlock from 'app/views/settings/components/text/textBlock';
+import {Alert} from '@sentry/scraps/alert';
+import {
+  defaultFormOptions,
+  FieldGroup,
+  FormSearch,
+  setFieldErrors,
+  useScrapsForm,
+} from '@sentry/scraps/form';
+import {Container, Flex, Stack} from '@sentry/scraps/layout';
+import {ExternalLink} from '@sentry/scraps/link';
+import {Text} from '@sentry/scraps/text';
+import {TextArea} from '@sentry/scraps/textarea';
 
-import UpgradeGrouping from './upgradeGrouping';
+import {addErrorMessage, addSuccessMessage} from 'sentry/actionCreators/indicator';
+import {hasEveryAccess} from 'sentry/components/acl/access';
+import {SentryDocumentTitle} from 'sentry/components/sentryDocumentTitle';
+import {t, tct} from 'sentry/locale';
+import type {DetailedProject} from 'sentry/types/project';
+import {useUpdateProject} from 'sentry/utils/project/useUpdateProject';
+import {RequestError} from 'sentry/utils/requestError/requestError';
+import {requestErrorToFieldErrors} from 'sentry/utils/requestError/requestErrorToFieldErrors';
+import {routeTitleGen} from 'sentry/utils/routeTitle';
+import {useOrganization} from 'sentry/utils/useOrganization';
+import {SettingsPageHeader} from 'sentry/views/settings/components/settingsPageHeader';
+import {ProjectPermissionAlert} from 'sentry/views/settings/project/projectPermissionAlert';
+import {useProjectSettingsOutlet} from 'sentry/views/settings/project/projectSettingsLayout';
 
-type Props = RouteComponentProps<{orgId: string; projectId: string}, {}> & {
-  organization: Organization;
-  project: Project;
-};
+function FingerprintRulesForm({
+  project,
+  hasAccess,
+}: {
+  hasAccess: boolean;
+  project: DetailedProject;
+}) {
+  const updateProject = useUpdateProject(project);
 
-type State = {
-  groupingConfigs: EventGroupingConfig[] | null;
-} & AsyncView['state'];
+  const form = useScrapsForm({
+    ...defaultFormOptions,
+    defaultValues: {fingerprintingRules: project.fingerprintingRules ?? ''},
+    validators: {onDynamic: z.object({fingerprintingRules: z.string()})},
+    onSubmit: ({value, formApi}) =>
+      updateProject
+        .mutateAsync(value)
+        .then(() => {
+          formApi.reset(value);
+          addSuccessMessage(t('Fingerprint rules updated.'));
+        })
+        .catch((error: unknown) => {
+          // Surface API validation errors (e.g. invalid rule syntax) inline.
+          if (
+            error instanceof RequestError &&
+            setFieldErrors(
+              formApi,
+              requestErrorToFieldErrors(error, formApi.state.values)
+            )
+          ) {
+            return;
+          }
+          addErrorMessage(t('Unable to save changes.'));
+        }),
+  });
 
-class ProjectDebugSymbols extends AsyncView<Props, State> {
-  getTitle() {
-    const {projectId} = this.props.params;
+  return (
+    <form.AppForm form={form}>
+      <FormSearch route="/settings/:orgId/projects/:projectId/issue-grouping/">
+        <FieldGroup title={t('Fingerprint Rules')}>
+          <form.AppField name="fingerprintingRules">
+            {field => (
+              <field.Layout.Stack label={t('Fingerprint Rules')}>
+                <Stack gap="md">
+                  <Text as="p" variant="muted" size="sm">
+                    {tct(
+                      `This can be used to modify the fingerprint rules on the server with custom rules. Rules follow the pattern [pattern]. To learn more about fingerprint rules, [docs:read the docs].`,
+                      {
+                        pattern: <code>matcher:glob -&gt; fingerprint, values</code>,
+                        docs: (
+                          <ExternalLink href="https://docs.sentry.io/product/data-management-settings/event-grouping/fingerprint-rules/" />
+                        ),
+                      }
+                    )}
+                  </Text>
+                  <Container background="secondary" padding="md lg" radius="md">
+                    <Text as="div" monospace size="sm" wrap="pre-wrap">
+                      {`# force all errors of the same type to have the same fingerprint
+error.type:DatabaseUnavailable -> system-down
+# force all memory allocation errors to be grouped together
+stack.function:malloc -> memory-allocation-error`}
+                    </Text>
+                  </Container>
+                  <field.TextArea
+                    value={field.state.value}
+                    onChange={field.handleChange}
+                    disabled={!hasAccess}
+                    monospace
+                    autosize
+                    rows={2}
+                    maxRows={20}
+                    placeholder={t(
+                      'error.type:MyException -> fingerprint-value\nstack.function:some_panic_function -> fingerprint-value'
+                    )}
+                  />
+                </Stack>
+              </field.Layout.Stack>
+            )}
+          </form.AppField>
 
-    return routeTitleGen(t('Issue Grouping'), projectId, false);
-  }
-
-  getDefaultState() {
-    return {
-      ...super.getDefaultState(),
-      groupingConfigs: [],
-    };
-  }
-
-  getEndpoints(): ReturnType<AsyncView['getEndpoints']> {
-    return [['groupingConfigs', '/grouping-configs/']];
-  }
-
-  handleSubmit = (response: Project) => {
-    // This will update our project context
-    ProjectActions.updateSuccess(response);
-  };
-
-  renderBody() {
-    const {groupingConfigs} = this.state;
-    const {organization, project, params} = this.props;
-    const {orgId, projectId} = params;
-    const endpoint = `/projects/${orgId}/${projectId}/`;
-    const access = new Set(organization.access);
-    const jsonFormProps = {
-      additionalFieldProps: {
-        organization,
-        groupingConfigs,
-      },
-      features: new Set(organization.features),
-      access,
-      disabled: !access.has('project:write'),
-    };
-
-    return (
-      <React.Fragment>
-        <SettingsPageHeader title={t('Issue Grouping')} />
-
-        <TextBlock>
-          {tct(
-            `All events have a fingerprint. Events with the same fingerprint are grouped together into an issue. To learn more about issue grouping, [link: read the docs].`,
-            {
-              link: (
-                <ExternalLink href="https://docs.sentry.io/platform-redirect/?next=%2Fdata-management%2Fevent-grouping%2F" />
-              ),
-            }
+          {hasAccess && (
+            <Stack gap="lg">
+              <form.Subscribe selector={state => state.isDirty}>
+                {isDirty =>
+                  isDirty ? (
+                    <Alert variant="info" showIcon={false}>
+                      {t(
+                        'Changing fingerprint rules will apply to future events only (can take up to a minute).'
+                      )}
+                    </Alert>
+                  ) : null
+                }
+              </form.Subscribe>
+              <Flex gap="sm" justify="end">
+                <form.ResetButton>{t('Cancel')}</form.ResetButton>
+                <form.SubmitButton>{t('Save')}</form.SubmitButton>
+              </Flex>
+            </Stack>
           )}
-        </TextBlock>
-
-        <Form
-          saveOnBlur
-          allowUndo
-          initialData={project}
-          apiMethod="PUT"
-          apiEndpoint={endpoint}
-          onSubmitSuccess={this.handleSubmit}
-        >
-          <JsonForm
-            {...jsonFormProps}
-            title={t('Fingerprint Rules')}
-            fields={[fields.fingerprintingRules]}
-          />
-
-          <JsonForm
-            {...jsonFormProps}
-            title={t('Stack Trace Rules')}
-            fields={[fields.groupingEnhancements]}
-          />
-
-          <Feature features={['set-grouping-config']} organization={organization}>
-            <JsonForm
-              {...jsonFormProps}
-              title={t('Change defaults')}
-              fields={[
-                fields.groupingConfig,
-                fields.secondaryGroupingConfig,
-                fields.secondaryGroupingExpiry,
-              ]}
-            />
-          </Feature>
-
-          <UpgradeGrouping
-            groupingConfigs={groupingConfigs ?? []}
-            organization={organization}
-            projectId={params.projectId}
-            project={project}
-            api={this.api}
-            onUpgrade={this.fetchData}
-          />
-        </Form>
-      </React.Fragment>
-    );
-  }
+        </FieldGroup>
+      </FormSearch>
+    </form.AppForm>
+  );
 }
 
-export default ProjectDebugSymbols;
+function StackTraceRulesForm({
+  project,
+  hasAccess,
+}: {
+  hasAccess: boolean;
+  project: DetailedProject;
+}) {
+  const updateProject = useUpdateProject(project);
+
+  const form = useScrapsForm({
+    ...defaultFormOptions,
+    defaultValues: {groupingEnhancements: project.groupingEnhancements ?? ''},
+    validators: {onDynamic: z.object({groupingEnhancements: z.string()})},
+    onSubmit: ({value, formApi}) =>
+      updateProject
+        .mutateAsync(value)
+        .then(() => {
+          formApi.reset(value);
+          addSuccessMessage(t('Stack trace rules updated.'));
+        })
+        .catch((error: unknown) => {
+          // Surface API validation errors (e.g. invalid rule syntax) inline.
+          if (
+            error instanceof RequestError &&
+            setFieldErrors(
+              formApi,
+              requestErrorToFieldErrors(error, formApi.state.values)
+            )
+          ) {
+            return;
+          }
+          addErrorMessage(t('Unable to save changes.'));
+        }),
+  });
+
+  return (
+    <form.AppForm form={form}>
+      <FormSearch route="/settings/:orgId/projects/:projectId/issue-grouping/">
+        <FieldGroup title={t('Stack Trace Rules')}>
+          <form.AppField name="groupingEnhancements">
+            {field => (
+              <field.Layout.Stack label={t('Stack Trace Rules')}>
+                <Stack gap="md">
+                  <Text as="p" variant="muted" size="sm">
+                    {tct(
+                      `This can be used to enhance the grouping algorithm with custom rules. Rules follow the pattern [pattern]. To learn more about stack trace rules, [docs:read the docs].`,
+                      {
+                        pattern: <code>matcher:glob [v^]?[+-]flag</code>,
+                        docs: (
+                          <ExternalLink href="https://docs.sentry.io/product/data-management-settings/event-grouping/stack-trace-rules/" />
+                        ),
+                      }
+                    )}
+                  </Text>
+                  <Container background="secondary" padding="md lg" radius="md">
+                    <Text as="div" monospace size="sm" wrap="pre-wrap">
+                      {`# remove all frames above a certain function from grouping
+stack.function:panic_handler ^-group
+# mark all functions following a prefix in-app
+stack.function:mylibrary_* +app`}
+                    </Text>
+                  </Container>
+                  <field.TextArea
+                    value={field.state.value}
+                    onChange={field.handleChange}
+                    disabled={!hasAccess}
+                    monospace
+                    autosize
+                    rows={2}
+                    maxRows={20}
+                    placeholder={t(
+                      'stack.function:raise_an_exception ^-group\nstack.function:namespace::* +app'
+                    )}
+                  />
+                </Stack>
+              </field.Layout.Stack>
+            )}
+          </form.AppField>
+
+          {hasAccess && (
+            <Stack gap="lg">
+              <form.Subscribe selector={state => state.isDirty}>
+                {isDirty =>
+                  isDirty ? (
+                    <Alert variant="info" showIcon={false}>
+                      {t(
+                        'Changing stack trace rules will apply to future events only (can take up to a minute).'
+                      )}
+                    </Alert>
+                  ) : null
+                }
+              </form.Subscribe>
+              <Flex gap="sm" justify="end">
+                <form.ResetButton>{t('Cancel')}</form.ResetButton>
+                <form.SubmitButton>{t('Save')}</form.SubmitButton>
+              </Flex>
+            </Stack>
+          )}
+        </FieldGroup>
+      </FormSearch>
+    </form.AppForm>
+  );
+}
+
+function DerivedGroupingEnhancements({project}: {project: DetailedProject}) {
+  return (
+    <FieldGroup title={t('Derived Grouping Enhancements')}>
+      <Stack gap="md">
+        <Text as="p" variant="muted" size="sm">
+          {t(
+            'These rules are automatically derived for some languages for organizations that have the GitHub integration. These rules are not editable but they can be negated by adding you own rules in the Stack Trace Rules section.'
+          )}
+        </Text>
+        <TextArea
+          aria-label={t('Derived Grouping Enhancements')}
+          value={project.derivedGroupingEnhancements ?? ''}
+          disabled
+          monospace
+          autosize
+          rows={2}
+          maxRows={20}
+          readOnly
+        />
+      </Stack>
+    </FieldGroup>
+  );
+}
+
+export default function ProjectIssueGrouping() {
+  const organization = useOrganization();
+  const {project} = useProjectSettingsOutlet();
+
+  const hasAccess = hasEveryAccess(['project:write'], {organization, project});
+
+  return (
+    <SentryDocumentTitle title={routeTitleGen(t('Issue Grouping'), project.slug, false)}>
+      <SettingsPageHeader
+        title={t('Issue Grouping')}
+        subtitle={tct(
+          'All events have a fingerprint. Events with the same fingerprint are grouped together into an issue. To learn more about issue grouping, [link: read the docs].',
+          {
+            link: (
+              <ExternalLink href="https://docs.sentry.io/product/data-management-settings/event-grouping/" />
+            ),
+          }
+        )}
+      />
+
+      <ProjectPermissionAlert project={project} />
+      <FingerprintRulesForm project={project} hasAccess={hasAccess} />
+      <StackTraceRulesForm project={project} hasAccess={hasAccess} />
+      <DerivedGroupingEnhancements project={project} />
+    </SentryDocumentTitle>
+  );
+}

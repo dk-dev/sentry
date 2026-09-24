@@ -1,150 +1,237 @@
-import React from 'react';
-import styled from '@emotion/styled';
+import {Fragment} from 'react';
+import {useQuery} from '@tanstack/react-query';
 
-import {addErrorMessage, addSuccessMessage} from 'app/actionCreators/indicator';
-import AsyncComponent from 'app/components/asyncComponent';
-import Avatar from 'app/components/avatar';
-import EventOrGroupHeader from 'app/components/eventOrGroupHeader';
-import LinkWithConfirmation from 'app/components/links/linkWithConfirmation';
-import Pagination from 'app/components/pagination';
-import {Panel, PanelItem} from 'app/components/panels';
-import Tooltip from 'app/components/tooltip';
-import {IconDelete} from 'app/icons';
-import {t} from 'app/locale';
-import space from 'app/styles/space';
-import {GroupTombstone} from 'app/types';
-import EmptyMessage from 'app/views/settings/components/emptyMessage';
+import {UserAvatar} from '@sentry/scraps/avatar';
+import {Button} from '@sentry/scraps/button';
+import {Pagination} from '@sentry/scraps/pagination';
+import type {TableColumnConfig} from '@sentry/scraps/table';
+import {Heading} from '@sentry/scraps/text';
 
-type RowProps = {
+import {addErrorMessage, addSuccessMessage} from 'sentry/actionCreators/indicator';
+import {Access} from 'sentry/components/acl/access';
+import {Confirm} from 'sentry/components/confirm';
+import {Count} from 'sentry/components/count';
+import {ErrorBoundary} from 'sentry/components/errorBoundary';
+import {EventMessage} from 'sentry/components/events/eventMessage';
+import {LoadingError} from 'sentry/components/loadingError';
+import {LoadingIndicator} from 'sentry/components/loadingIndicator';
+import {Panel} from 'sentry/components/panels/panel';
+import {SimpleTable} from 'sentry/components/tables/simpleTable';
+import {TimeSince} from 'sentry/components/timeSince';
+import {IconDelete} from 'sentry/icons';
+import {t} from 'sentry/locale';
+import type {GroupTombstone} from 'sentry/types/group';
+import type {Project} from 'sentry/types/project';
+import {apiOptions, selectJsonWithHeaders} from 'sentry/utils/api/apiOptions';
+import {getApiUrl} from 'sentry/utils/api/getApiUrl';
+import {defined} from 'sentry/utils/defined';
+import {getMessage, getTitle} from 'sentry/utils/events';
+import {useApi} from 'sentry/utils/useApi';
+import {useLocation} from 'sentry/utils/useLocation';
+import {useOrganization} from 'sentry/utils/useOrganization';
+
+const TOMBSTONE_COLUMNS: TableColumnConfig[] = [
+  {key: 'issue', width: 'minmax(220px, 1fr)'},
+  {key: 'dateDiscarded', width: 'max-content'},
+  {key: 'lastSeen', width: 'max-content'},
+  {key: 'events', width: 'max-content'},
+  {key: 'member', width: 'max-content'},
+  {key: 'actions', width: 'max-content'},
+];
+
+interface GroupTombstoneRowProps {
   data: GroupTombstone;
+  disabled: boolean;
   onUndiscard: (id: string) => void;
-};
+}
 
-function GroupTombstoneRow({data, onUndiscard}: RowProps) {
+function GroupTombstoneRow({data, disabled, onUndiscard}: GroupTombstoneRowProps) {
   const actor = data.actor;
+  const tombstone = {...data, isTombstone: true as const};
+  const {title} = getTitle(tombstone);
 
   return (
-    <PanelItem center>
-      <StyledBox>
-        <EventOrGroupHeader
-          includeLink={false}
-          hideIcons
-          className="truncate"
-          size="normal"
-          data={data}
-        />
-      </StyledBox>
-      <AvatarContainer>
-        {actor && (
-          <Avatar
+    <SimpleTable.Row>
+      <SimpleTable.RowCell>
+        <div>
+          <Heading as="h5" size="lg">
+            {title}
+          </Heading>
+          <EventMessage
+            level={data.level}
+            message={getMessage(tombstone)}
+            type={data.type}
+          />
+        </div>
+      </SimpleTable.RowCell>
+      <SimpleTable.RowCell justify="end">
+        {data.dateAdded ? (
+          <TimeSince date={data.dateAdded} unitStyle="short" suffix="ago" />
+        ) : (
+          '-'
+        )}
+      </SimpleTable.RowCell>
+      <SimpleTable.RowCell justify="end">
+        {data.lastSeen && defined(data.timesSeen) && data.timesSeen > 0 ? (
+          <TimeSince
+            date={data.lastSeen}
+            unitStyle="short"
+            suffix="ago"
+            disabledAbsoluteTooltip
+          />
+        ) : (
+          '-'
+        )}
+      </SimpleTable.RowCell>
+      <SimpleTable.RowCell justify="end">
+        {defined(data.timesSeen) ? <Count value={data.timesSeen} /> : '-'}
+      </SimpleTable.RowCell>
+      <SimpleTable.RowCell justify="center">
+        {actor ? (
+          <UserAvatar
             user={actor}
             hasTooltip
             tooltip={t('Discarded by %s', actor.name || actor.email)}
           />
+        ) : (
+          '-'
         )}
-      </AvatarContainer>
-      <ActionContainer>
-        <Tooltip title={t('Undiscard')}>
-          <LinkWithConfirmation
-            title={t('Undiscard')}
-            className="group-remove btn btn-default btn-sm"
-            message={t(
-              'Undiscarding this issue means that ' +
-                'incoming events that match this will no longer be discarded. ' +
-                'New incoming events will count toward your event quota ' +
-                'and will display on your issues dashboard. ' +
-                'Are you sure you wish to continue?'
-            )}
-            onConfirm={() => {
-              onUndiscard(data.id);
+      </SimpleTable.RowCell>
+      <SimpleTable.RowCell justify="center">
+        <Confirm
+          message={t(
+            'Undiscarding this issue means that incoming events that match this will no longer be discarded. New incoming events will count toward your event quota and will display on your issues dashboard. Are you sure you wish to continue?'
+          )}
+          onConfirm={() => onUndiscard(data.id)}
+          disabled={disabled}
+        >
+          <Button
+            aria-label={t('Undiscard')}
+            tooltipProps={{
+              title: disabled
+                ? t('You do not have permission to perform this action')
+                : t('Undiscard'),
             }}
-          >
-            <IconDelete className="undiscard" />
-          </LinkWithConfirmation>
-        </Tooltip>
-      </ActionContainer>
-    </PanelItem>
+            size="sm"
+            icon={<IconDelete />}
+            disabled={disabled}
+          />
+        </Confirm>
+      </SimpleTable.RowCell>
+    </SimpleTable.Row>
   );
 }
 
-type Props = AsyncComponent['props'] & {
-  orgId: string;
-  projectId: string;
-};
+interface GroupTombstonesProps {
+  project: Project;
+}
 
-type State = {
-  tombstones: GroupTombstone[];
-  tombstonesPageLinks: null | string;
-} & AsyncComponent['state'];
+export function GroupTombstones({project}: GroupTombstonesProps) {
+  const api = useApi();
+  const location = useLocation();
+  const organization = useOrganization();
+  const {
+    data: tombstonesResp,
+    isPending,
+    isError,
+    refetch,
+  } = useQuery({
+    ...apiOptions.as<GroupTombstone[]>()(
+      '/projects/$organizationIdOrSlug/$projectIdOrSlug/tombstones/',
+      {
+        path: {organizationIdOrSlug: organization.slug, projectIdOrSlug: project.slug},
+        query: {...location.query},
+        staleTime: 0,
+      }
+    ),
+    select: selectJsonWithHeaders,
+  });
+  const tombstones = tombstonesResp?.json;
+  const tombstonesPageLinks = tombstonesResp?.headers.Link;
 
-class GroupTombstones extends AsyncComponent<Props, State> {
-  getEndpoints(): ReturnType<AsyncComponent['getEndpoints']> {
-    const {orgId, projectId} = this.props;
-    return [
-      ['tombstones', `/projects/${orgId}/${projectId}/tombstones/`, {}, {paginate: true}],
-    ];
-  }
-
-  handleUndiscard = (tombstoneId: GroupTombstone['id']) => {
-    const {orgId, projectId} = this.props;
-    const path = `/projects/${orgId}/${projectId}/tombstones/${tombstoneId}/`;
-    this.api
-      .requestPromise(path, {
-        method: 'DELETE',
-      })
+  const handleUndiscard = (tombstoneId: GroupTombstone['id']) => {
+    api
+      .requestPromise(
+        getApiUrl(
+          '/projects/$organizationIdOrSlug/$projectIdOrSlug/tombstones/$tombstoneId/',
+          {
+            path: {
+              organizationIdOrSlug: organization.slug,
+              projectIdOrSlug: project.slug,
+              tombstoneId,
+            },
+          }
+        ),
+        {
+          method: 'DELETE',
+        }
+      )
       .then(() => {
         addSuccessMessage(t('Events similar to these will no longer be filtered'));
-        this.fetchData();
       })
       .catch(() => {
         addErrorMessage(t('We were unable to undiscard this issue'));
-        this.fetchData();
+      })
+      .finally(() => {
+        refetch();
       });
   };
 
-  renderEmpty() {
+  if (isPending) {
     return (
       <Panel>
-        <EmptyMessage>{t('You have no discarded issues')}</EmptyMessage>
+        <LoadingIndicator />
       </Panel>
     );
   }
 
-  renderBody() {
-    const {tombstones, tombstonesPageLinks} = this.state;
-
-    return tombstones.length ? (
-      <React.Fragment>
-        <Panel>
-          {tombstones.map(data => (
-            <GroupTombstoneRow
-              key={data.id}
-              data={data}
-              onUndiscard={this.handleUndiscard}
-            />
-          ))}
-        </Panel>
-        {tombstonesPageLinks && <Pagination pageLinks={tombstonesPageLinks} />}
-      </React.Fragment>
-    ) : (
-      this.renderEmpty()
-    );
+  if (isError) {
+    return <LoadingError onRetry={refetch} />;
   }
+
+  return (
+    <ErrorBoundary>
+      <Access access={['project:write']} project={project}>
+        {({hasAccess}) => (
+          <Fragment>
+            <SimpleTable
+              columns={TOMBSTONE_COLUMNS}
+              header={
+                <SimpleTable.HeaderRow>
+                  <SimpleTable.HeaderCell>{t('Issue')}</SimpleTable.HeaderCell>
+                  <SimpleTable.HeaderCell align="right">
+                    {t('Date Discarded')}
+                  </SimpleTable.HeaderCell>
+                  <SimpleTable.HeaderCell align="right">
+                    {t('Last Seen')}
+                  </SimpleTable.HeaderCell>
+                  <SimpleTable.HeaderCell align="right">
+                    {t('Events')}
+                  </SimpleTable.HeaderCell>
+                  <SimpleTable.HeaderCell align="center">
+                    {t('Member')}
+                  </SimpleTable.HeaderCell>
+                  <SimpleTable.HeaderCell />
+                </SimpleTable.HeaderRow>
+              }
+            >
+              {tombstones?.length ? (
+                tombstones.map(data => (
+                  <GroupTombstoneRow
+                    key={data.id}
+                    data={data}
+                    disabled={!hasAccess}
+                    onUndiscard={handleUndiscard}
+                  />
+                ))
+              ) : (
+                <SimpleTable.Empty>{t('You have no discarded issues')}</SimpleTable.Empty>
+              )}
+            </SimpleTable>
+            {tombstonesPageLinks && <Pagination pageLinks={tombstonesPageLinks} />}
+          </Fragment>
+        )}
+      </Access>
+    </ErrorBoundary>
+  );
 }
-
-const StyledBox = styled('div')`
-  flex: 1;
-  align-items: center;
-  min-width: 0; /* keep child content from stretching flex item */
-`;
-
-const AvatarContainer = styled('div')`
-  margin: 0 ${space(4)};
-  width: ${space(3)};
-`;
-
-const ActionContainer = styled('div')`
-  width: ${space(4)};
-`;
-
-export default GroupTombstones;

@@ -1,0 +1,123 @@
+import {GroupFixture} from 'sentry-fixture/group';
+
+import {
+  render,
+  screen,
+  userEvent,
+  waitFor,
+  waitForElementToBeRemoved,
+} from 'sentry-test/reactTestingLibrary';
+
+import {GroupDataContextProvider} from 'sentry/views/issueDetails/groupDataContext';
+
+import {FlagDetailsDrawerContent} from './flagDetailsDrawerContent';
+
+describe('FlagDetailsDrawerContent', () => {
+  beforeEach(() => {
+    MockApiClient.addMockResponse({
+      url: '/organizations/org-slug/flags/logs/',
+      query: {flag: 'test-flag-key'},
+      body: {
+        data: [
+          {
+            id: '1',
+            provider: 'test-provider',
+            flag: 'test-flag-key',
+            action: 'updated',
+            createdAt: '2021-01-01T00:00:00Z',
+          },
+        ],
+      },
+    });
+  });
+
+  afterEach(() => {
+    MockApiClient.clearMockResponses();
+  });
+
+  it('renders a list of tag values', async () => {
+    const group = GroupFixture();
+    const {router} = render(
+      <GroupDataContextProvider group={group} project={group.project}>
+        <FlagDetailsDrawerContent group={group} />
+      </GroupDataContextProvider>
+    );
+
+    await waitForElementToBeRemoved(() => screen.queryByTestId('loading-indicator'));
+
+    expect(screen.getByText('Provider')).toBeInTheDocument();
+    expect(screen.getByText('Flag Name')).toBeInTheDocument();
+    expect(screen.getByText('Date')).toBeInTheDocument();
+    expect(screen.getByText('Action')).toBeInTheDocument();
+
+    // Displays dropdown menu
+    await userEvent.hover(screen.getByText('test-flag-key'));
+    expect(
+      screen.getByRole('button', {name: 'Flag Audit Log Actions Menu'})
+    ).toBeInTheDocument();
+    await userEvent.click(
+      screen.getByRole('button', {name: 'Flag Audit Log Actions Menu'})
+    );
+    expect(
+      screen.getByRole('menuitemradio', {
+        name: 'Search issues where this flag value is FALSE',
+      })
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole('menuitemradio', {
+        name: 'Search issues where this flag value is TRUE',
+      })
+    ).toBeInTheDocument();
+    expect(
+      await screen.findByRole('menuitemradio', {name: 'Copy flag value to clipboard'})
+    ).toBeInTheDocument();
+
+    await userEvent.click(
+      screen.getByRole('menuitemradio', {
+        name: 'Search issues where this flag value is TRUE',
+      })
+    );
+    await waitFor(() => {
+      expect(router.location.pathname).toBe('/organizations/org-slug/issues/');
+    });
+    expect(router.location.query).toEqual({
+      query: 'flags[test-flag-key]:"true"',
+    });
+  });
+
+  it('renders an error message if flag values request fails', async () => {
+    MockApiClient.addMockResponse({
+      url: '/organizations/org-slug/flags/logs/',
+      statusCode: 500,
+    });
+
+    const group = GroupFixture();
+    render(
+      <GroupDataContextProvider group={group} project={group.project}>
+        <FlagDetailsDrawerContent group={group} />
+      </GroupDataContextProvider>
+    );
+
+    expect(
+      await screen.findByText('There was an error loading feature flag details.')
+    ).toBeInTheDocument();
+  });
+
+  it('renders an empty state message if audit log values are empty', async () => {
+    MockApiClient.addMockResponse({
+      url: '/organizations/org-slug/flags/logs/',
+      body: {data: []},
+    });
+
+    const group = GroupFixture();
+    render(
+      <GroupDataContextProvider group={group} project={group.project}>
+        <FlagDetailsDrawerContent group={group} />
+      </GroupDataContextProvider>
+    );
+
+    expect(
+      await screen.findByText('No audit logs were found for this feature flag.')
+    ).toBeInTheDocument();
+  });
+});

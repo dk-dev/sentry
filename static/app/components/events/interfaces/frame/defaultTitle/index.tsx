@@ -1,41 +1,66 @@
-import React from 'react';
+import {Fragment} from 'react';
 import styled from '@emotion/styled';
 
-import AnnotatedText from 'app/components/events/meta/annotatedText';
-import {getMeta} from 'app/components/events/meta/metaProxy';
-import ExternalLink from 'app/components/links/externalLink';
-import {STACKTRACE_PREVIEW_TOOLTIP_DELAY} from 'app/components/stacktracePreview';
-import Tooltip from 'app/components/tooltip';
-import Truncate from 'app/components/truncate';
-import {IconOpen, IconQuestion} from 'app/icons';
-import {t} from 'app/locale';
-import space from 'app/styles/space';
-import {Frame, Meta, PlatformType} from 'app/types';
-import {defined, isUrl} from 'app/utils';
+import {ExternalLink} from '@sentry/scraps/link';
+import {Tooltip} from '@sentry/scraps/tooltip';
 
-import FunctionName from '../functionName';
-import {getPlatform, isDotnet, trimPackage} from '../utils';
+import {openNavigateToExternalLinkModal} from 'sentry/actionCreators/modal';
+import {FunctionName} from 'sentry/components/events/interfaces/frame/functionName';
+import {
+  getPlatform,
+  isDotnet,
+  trimPackage,
+} from 'sentry/components/events/interfaces/frame/utils';
+import {AnnotatedText} from 'sentry/components/events/meta/annotatedText';
+import {QuestionTooltip} from 'sentry/components/questionTooltip';
+import {Truncate} from 'sentry/components/truncate';
+import {SLOW_TOOLTIP_DELAY} from 'sentry/constants';
+import {IconOpen, IconQuestion} from 'sentry/icons';
+import {t} from 'sentry/locale';
+import type {Frame} from 'sentry/types/event';
+import type {Meta} from 'sentry/types/group';
+import type {PlatformKey} from 'sentry/types/platform';
+import {defined} from 'sentry/utils/defined';
+import {isValidUrl} from 'sentry/utils/string/isValidUrl';
 
-import OriginalSourceInfo from './originalSourceInfo';
+/**
+ * File paths can get very long, so increase it for the tooltips within this component.
+ */
+export const FRAME_TOOLTIP_MAX_WIDTH = 750;
 
 type Props = {
   frame: Frame;
-  platform: PlatformType;
+  platform: PlatformKey;
   /**
    * Is the stack trace being previewed in a hovercard?
    */
   isHoverPreviewed?: boolean;
+  /**
+   * Determines if the frame potentially originates from a third party
+   */
+  isPotentiallyThirdParty?: boolean;
+  meta?: Record<any, any>;
 };
 
 type GetPathNameOutput = {key: string; value: string; meta?: Meta};
 
-const DefaultTitle = ({frame, platform, isHoverPreviewed}: Props) => {
-  const title: Array<React.ReactElement> = [];
+export function DefaultTitle({
+  frame,
+  platform,
+  isHoverPreviewed,
+  meta,
+  isPotentiallyThirdParty,
+}: Props) {
+  const title: React.ReactElement[] = [];
   const framePlatform = getPlatform(frame.platform, platform);
-  const tooltipDelay = isHoverPreviewed ? STACKTRACE_PREVIEW_TOOLTIP_DELAY : undefined;
+  const tooltipDelay = isHoverPreviewed ? SLOW_TOOLTIP_DELAY : undefined;
 
   const handleExternalLink = (event: React.MouseEvent<HTMLAnchorElement>) => {
     event.stopPropagation();
+    if (isPotentiallyThirdParty && frame.absPath && isValidUrl(frame.absPath)) {
+      event.preventDefault();
+      openNavigateToExternalLinkModal({linkText: frame.absPath});
+    }
   };
 
   const getModule = (): GetPathNameOutput | undefined => {
@@ -43,7 +68,7 @@ const DefaultTitle = ({frame, platform, isHoverPreviewed}: Props) => {
       return {
         key: 'module',
         value: frame.module,
-        meta: getMeta(frame, 'module'),
+        meta: meta?.module?.[''],
       };
     }
 
@@ -61,7 +86,7 @@ const DefaultTitle = ({frame, platform, isHoverPreviewed}: Props) => {
         return {
           key: 'filename',
           value: frame.filename,
-          meta: getMeta(frame, 'filename'),
+          meta: meta?.filename?.[''],
         };
       }
       return undefined;
@@ -71,7 +96,7 @@ const DefaultTitle = ({frame, platform, isHoverPreviewed}: Props) => {
       return {
         key: 'filename',
         value: frame.filename,
-        meta: getMeta(frame, 'filename'),
+        meta: meta?.filename?.[''],
       };
     }
 
@@ -88,10 +113,7 @@ const DefaultTitle = ({frame, platform, isHoverPreviewed}: Props) => {
     // prioritize module name for Java as filename is often only basename
     const shouldPrioritizeModuleName = framePlatform === 'java';
 
-    // we do not want to show path in title on csharp platform
-    const pathNameOrModule = isDotnet(framePlatform)
-      ? getModule()
-      : getPathNameOrModule(shouldPrioritizeModuleName);
+    const pathNameOrModule = getPathNameOrModule(shouldPrioritizeModuleName);
     const enablePathTooltip =
       defined(frame.absPath) && frame.absPath !== pathNameOrModule?.value;
 
@@ -102,12 +124,20 @@ const DefaultTitle = ({frame, platform, isHoverPreviewed}: Props) => {
           title={frame.absPath}
           disabled={!enablePathTooltip}
           delay={tooltipDelay}
+          maxWidth={FRAME_TOOLTIP_MAX_WIDTH}
+          position="auto-start"
         >
-          <code key="filename" className="filename">
-            <AnnotatedText
-              value={<Truncate value={pathNameOrModule.value} maxLength={100} leftTrim />}
-              meta={pathNameOrModule.meta}
-            />
+          <code key="filename" className="filename" data-test-id="filename">
+            {isPotentiallyThirdParty && frame.absPath ? (
+              <Truncate value={frame.absPath} maxLength={100} leftTrim />
+            ) : !!pathNameOrModule.meta && !pathNameOrModule.value ? (
+              <AnnotatedText
+                value={pathNameOrModule.value}
+                meta={pathNameOrModule.meta}
+              />
+            ) : (
+              <Truncate value={pathNameOrModule.value} maxLength={100} leftTrim />
+            )}
           </code>
         </Tooltip>
       );
@@ -117,7 +147,13 @@ const DefaultTitle = ({frame, platform, isHoverPreviewed}: Props) => {
     // we want to show a litle (?) icon that on hover shows the actual filename
     if (shouldPrioritizeModuleName && frame.filename) {
       title.push(
-        <Tooltip key={frame.filename} title={frame.filename} delay={tooltipDelay}>
+        <Tooltip
+          key={frame.filename}
+          title={frame.filename}
+          delay={tooltipDelay}
+          maxWidth={FRAME_TOOLTIP_MAX_WIDTH}
+          position="auto-start"
+        >
           <a className="in-at real-filename">
             <IconQuestion size="xs" />
           </a>
@@ -125,7 +161,7 @@ const DefaultTitle = ({frame, platform, isHoverPreviewed}: Props) => {
       );
     }
 
-    if (frame.absPath && isUrl(frame.absPath)) {
+    if (frame.absPath && isValidUrl(frame.absPath)) {
       title.push(
         <StyledExternalLink href={frame.absPath} key="share" onClick={handleExternalLink}>
           <IconOpen size="xs" />
@@ -146,7 +182,15 @@ const DefaultTitle = ({frame, platform, isHoverPreviewed}: Props) => {
   }
 
   if (defined(frame.function) || defined(frame.rawFunction)) {
-    title.push(<FunctionName frame={frame} key="function" className="function" />);
+    title.push(
+      <FunctionName
+        frame={frame}
+        key="function"
+        className="function"
+        data-test-id="function"
+        meta={meta}
+      />
+    );
   }
 
   // we don't want to render out zero line numbers which are used to
@@ -174,32 +218,41 @@ const DefaultTitle = ({frame, platform, isHoverPreviewed}: Props) => {
     );
   }
 
-  if (defined(frame.origAbsPath)) {
+  if (defined(frame.origAbsPath) && (frame.mapUrl || frame.map)) {
+    const text = (frame.mapUrl ?? frame.map)!;
     title.push(
-      <Tooltip
+      <StyledQuestionTooltip
         key="info-tooltip"
-        title={<OriginalSourceInfo mapUrl={frame.mapUrl} map={frame.map} />}
+        size="xs"
         delay={tooltipDelay}
-      >
-        <a className="in-at original-src">
-          <IconQuestion size="xs" />
-        </a>
-      </Tooltip>
+        overlayStyle={{maxWidth: 400, wordBreak: 'break-all'}}
+        skipWrapper
+        title={
+          <Fragment>
+            <div>
+              <strong>{t('Source Map')}</strong>
+            </div>
+            {text}
+          </Fragment>
+        }
+      />
     );
   }
 
-  return <React.Fragment>{title}</React.Fragment>;
-};
-
-export default DefaultTitle;
+  return <Fragment>{title}</Fragment>;
+}
 
 const StyledExternalLink = styled(ExternalLink)`
   position: relative;
-  top: ${space(0.25)};
-  margin-left: ${space(0.5)};
+  top: ${p => p.theme.space['2xs']};
+  margin-left: ${p => p.theme.space.xs};
 `;
 
 const InFramePosition = styled('span')`
-  color: ${p => p.theme.textColor};
+  color: ${p => p.theme.tokens.content.primary};
   opacity: 0.6;
+`;
+
+const StyledQuestionTooltip = styled(QuestionTooltip)`
+  margin-left: ${p => p.theme.space.xs};
 `;

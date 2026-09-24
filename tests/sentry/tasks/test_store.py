@@ -1,51 +1,48 @@
 from time import time
+from unittest import mock
 
 import pytest
-from django.test.utils import override_settings
 
-from sentry import quotas
-from sentry.event_manager import EventManager, HashDiscarded
-from sentry.plugins.base.v2 import Plugin2
+from sentry import options, quotas
+from sentry.event_manager import EventManager
+from sentry.exceptions import HashDiscarded
 from sentry.tasks.store import (
+    is_process_disabled,
     preprocess_event,
     process_event,
     save_event,
-    symbolicate_event,
-    time_synthetic_monitoring_event,
+    save_event_transaction,
+    should_process,
 )
-from sentry.utils.compat import mock
+from sentry.testutils.pytest.fixtures import django_db_all
+from sentry.viewer_context import ActorType, get_viewer_context
 
 EVENT_ID = "cc3e6c2bb6b6498097f336d1e6979f4b"
 
 
-class BasicPreprocessorPlugin(Plugin2):
-    def get_event_preprocessors(self, data):
-        def remove_extra(data):
-            del data["extra"]
-            return data
+def _remove_extra(data):
+    del data["extra"]
+    return data
 
-        def put_on_hold(data):
-            data["unprocessed"] = True
-            return data
 
-        if data.get("platform") == "mattlang":
-            return [remove_extra, lambda x: None]
+def _noop(data):
+    return None
 
-        if data.get("platform") == "noop":
-            return [lambda data: None]
 
-        if data.get("platform") == "holdmeclose":
-            return [put_on_hold]
-
-        return []
-
-    def is_enabled(self, project=None):
-        return True
+def _put_on_hold(data):
+    data["unprocessed"] = True
+    return data
 
 
 @pytest.fixture
 def mock_save_event():
     with mock.patch("sentry.tasks.store.save_event") as m:
+        yield m
+
+
+@pytest.fixture
+def mock_save_event_transaction():
+    with mock.patch("sentry.tasks.store.save_event_transaction") as m:
         yield m
 
 
@@ -57,19 +54,19 @@ def mock_process_event():
 
 @pytest.fixture
 def mock_symbolicate_event():
-    with mock.patch("sentry.tasks.store.symbolicate_event") as m:
-        yield m
-
-
-@pytest.fixture
-def mock_get_symbolication_function():
-    with mock.patch("sentry.lang.native.processing.get_symbolication_function") as m:
+    with mock.patch("sentry.tasks.symbolication.symbolicate_event") as m:
         yield m
 
 
 @pytest.fixture
 def mock_event_processing_store():
-    with mock.patch("sentry.tasks.store.event_processing_store") as m:
+    with mock.patch("sentry.services.eventstore.processing.event_processing_store") as m:
+        yield m
+
+
+@pytest.fixture
+def mock_transaction_processing_store():
+    with mock.patch("sentry.services.eventstore.processing.transaction_processing_store") as m:
         yield m
 
 
@@ -80,16 +77,20 @@ def mock_refund():
 
 
 @pytest.fixture
-def mock_metrics_timing():
-    with mock.patch("sentry.tasks.store.metrics.timing") as m:
+def mock_get_preprocessors():
+    with mock.patch("sentry.tasks.store.get_event_preprocessors") as m:
         yield m
 
 
-@pytest.mark.django_db
+@django_db_all
 def test_move_to_process_event(
-    default_project, mock_process_event, mock_save_event, mock_symbolicate_event, register_plugin
+    default_project,
+    mock_process_event,
+    mock_save_event,
+    mock_symbolicate_event,
+    mock_get_preprocessors,
 ):
-    register_plugin(globals(), BasicPreprocessorPlugin)
+    mock_get_preprocessors.return_value = [_remove_extra, _noop]
     data = {
         "project": default_project.id,
         "platform": "mattlang",
@@ -98,82 +99,49 @@ def test_move_to_process_event(
         "extra": {"foo": "bar"},
     }
 
-    preprocess_event(data=data)
+    preprocess_event(cache_key="", data=data)
 
     assert mock_symbolicate_event.delay.call_count == 0
     assert mock_process_event.delay.call_count == 1
     assert mock_save_event.delay.call_count == 0
 
 
-@pytest.mark.django_db
-def test_move_to_symbolicate_event(
-    default_project, mock_process_event, mock_save_event, mock_symbolicate_event, register_plugin
+@django_db_all
+def test_move_to_process_event_inline_save_event_still_submits_process_event(
+    default_project,
+    mock_process_event,
+    mock_save_event,
+    mock_symbolicate_event,
+    mock_get_preprocessors,
 ):
-    register_plugin(globals(), BasicPreprocessorPlugin)
+    mock_get_preprocessors.return_value = [_noop]
     data = {
         "project": default_project.id,
-        "platform": "native",
+        "platform": "noop",
         "logentry": {"formatted": "test"},
         "event_id": EVENT_ID,
         "extra": {"foo": "bar"},
     }
 
-    preprocess_event(data=data)
+    preprocess_event(cache_key="e:1", data=data, event_id=EVENT_ID, inline_save_event=True)
 
-    assert mock_symbolicate_event.delay.call_count == 1
-    assert mock_process_event.delay.call_count == 0
-    assert mock_save_event.delay.call_count == 0
-
-
-@pytest.mark.django_db
-def test_symbolicate_event_call_process_inline(
-    default_project,
-    mock_event_processing_store,
-    mock_process_event,
-    mock_save_event,
-    mock_get_symbolication_function,
-    register_plugin,
-):
-    register_plugin(globals(), BasicPreprocessorPlugin)
-    data = {
-        "project": default_project.id,
-        "platform": "native",
-        "event_id": EVENT_ID,
-        "extra": {"foo": "bar"},
-    }
-    mock_event_processing_store.get.return_value = data
-    mock_event_processing_store.store.return_value = "e:1"
-
-    symbolicated_data = {"type": "error"}
-
-    mock_get_symbolication_function.return_value = lambda _: symbolicated_data
-
-    with mock.patch("sentry.tasks.store._do_process_event") as mock_do_process_event:
-        symbolicate_event(cache_key="e:1", start_time=1)
-
-    # The event mutated, so make sure we save it back
-    ((_, (event,), _),) = mock_event_processing_store.store.mock_calls
-
-    assert event == symbolicated_data
-
-    assert mock_save_event.delay.call_count == 0
-    assert mock_process_event.delay.call_count == 0
-    mock_do_process_event.assert_called_once_with(
+    assert mock_symbolicate_event.delay.call_count == 0
+    mock_process_event.delay.assert_called_once_with(
         cache_key="e:1",
-        start_time=1,
+        start_time=None,
         event_id=EVENT_ID,
-        process_task=mock_process_event,
-        data=symbolicated_data,
-        data_has_changed=True,
-        from_symbolicate=True,
+        data_has_changed=False,
+        from_symbolicate=False,
+        has_attachments=False,
     )
+    assert mock_save_event.call_count == 0
+    assert mock_save_event.delay.call_count == 0
 
 
-@pytest.mark.django_db
+@django_db_all
 def test_move_to_save_event(
-    default_project, mock_process_event, mock_save_event, mock_symbolicate_event, register_plugin
+    default_project, mock_process_event, mock_save_event, mock_symbolicate_event
 ):
-    register_plugin(globals(), BasicPreprocessorPlugin)
     data = {
         "project": default_project.id,
         "platform": "NOTMATTLANG",
@@ -182,18 +150,44 @@ def test_move_to_save_event(
         "extra": {"foo": "bar"},
     }
 
-    preprocess_event(data=data)
+    preprocess_event(cache_key="", data=data)
 
     assert mock_symbolicate_event.delay.call_count == 0
     assert mock_process_event.delay.call_count == 0
     assert mock_save_event.delay.call_count == 1
 
 
-@pytest.mark.django_db
-def test_process_event_mutate_and_save(
-    default_project, mock_event_processing_store, mock_save_event, register_plugin
+@django_db_all
+def test_move_to_save_event_inline(
+    default_project, mock_process_event, mock_save_event, mock_symbolicate_event
 ):
-    register_plugin(globals(), BasicPreprocessorPlugin)
+    data = {
+        "project": default_project.id,
+        "platform": "NOTMATTLANG",
+        "logentry": {"formatted": "test"},
+        "event_id": EVENT_ID,
+        "extra": {"foo": "bar"},
+    }
+
+    preprocess_event(cache_key="e:1", data=data, event_id=EVENT_ID, inline_save_event=True)
+
+    assert mock_symbolicate_event.delay.call_count == 0
+    assert mock_process_event.delay.call_count == 0
+    mock_save_event.assert_called_once_with(
+        cache_key="e:1",
+        data=None,
+        start_time=None,
+        event_id=EVENT_ID,
+        project_id=default_project.id,
+    )
+    assert mock_save_event.delay.call_count == 0
+
+
+@django_db_all
+def test_process_event_mutate_and_save(
+    default_project, mock_event_processing_store, mock_save_event, mock_get_preprocessors
+):
+    mock_get_preprocessors.return_value = [_remove_extra, _noop]
 
     data = {
         "project": default_project.id,
@@ -218,11 +212,11 @@ def test_process_event_mutate_and_save(
     )
 
 
-@pytest.mark.django_db
+@django_db_all
 def test_process_event_no_mutate_and_save(
-    default_project, mock_event_processing_store, mock_save_event, register_plugin
+    default_project, mock_event_processing_store, mock_save_event, mock_get_preprocessors
 ):
-    register_plugin(globals(), BasicPreprocessorPlugin)
+    mock_get_preprocessors.return_value = [_noop]
 
     data = {
         "project": default_project.id,
@@ -244,11 +238,11 @@ def test_process_event_no_mutate_and_save(
     )
 
 
-@pytest.mark.django_db
+@django_db_all
 def test_process_event_unprocessed(
-    default_project, mock_event_processing_store, mock_save_event, register_plugin
+    default_project, mock_event_processing_store, mock_save_event, mock_get_preprocessors
 ):
-    register_plugin(globals(), BasicPreprocessorPlugin)
+    mock_get_preprocessors.return_value = [_put_on_hold]
 
     data = {
         "project": default_project.id,
@@ -271,10 +265,8 @@ def test_process_event_unprocessed(
     )
 
 
-@pytest.mark.django_db
-def test_hash_discarded_raised(default_project, mock_refund, register_plugin):
-    register_plugin(globals(), BasicPreprocessorPlugin)
-
+@django_db_all
+def test_hash_discarded_raised(default_project, mock_refund) -> None:
     data = {
         "project": default_project.id,
         "platform": "NOTMATTLANG",
@@ -291,6 +283,32 @@ def test_hash_discarded_raised(default_project, mock_refund, register_plugin):
         # should be caught
 
 
+@django_db_all
+def test_save_event_sets_viewer_context(default_project) -> None:
+    data = {
+        "project": default_project.id,
+        "platform": "python",
+        "logentry": {"formatted": "test"},
+        "event_id": EVENT_ID,
+        "extra": {"foo": "bar"},
+    }
+
+    captured_vc = None
+
+    def capture_vc(*args, **kwargs):
+        nonlocal captured_vc
+        captured_vc = get_viewer_context()
+        raise HashDiscarded("stop after capturing")
+
+    with mock.patch.object(EventManager, "save", side_effect=capture_vc):
+        save_event(data=data, start_time=time())
+
+    assert captured_vc is not None
+    assert captured_vc.organization_id == default_project.organization_id
+    assert captured_vc.project_id == default_project.id
+    assert captured_vc.actor_type == ActorType.SYSTEM
+
+
 @pytest.fixture(params=["org", "project"])
 def options_model(request, default_organization, default_project):
     if request.param == "org":
@@ -298,50 +316,42 @@ def options_model(request, default_organization, default_project):
     elif request.param == "project":
         return default_project
     else:
-        raise ValueError(request.param)
+        raise AssertionError(request.param)
 
 
-@pytest.mark.django_db
+@django_db_all
 @pytest.mark.parametrize("setting_method", ["datascrubbers", "piiconfig"])
 def test_scrubbing_after_processing(
     default_project,
     default_organization,
     mock_save_event,
-    register_plugin,
+    mock_get_preprocessors,
     mock_event_processing_store,
-    setting_method,
+    setting_method: str,
     options_model,
 ):
-    class TestPlugin(Plugin2):
-        def get_event_preprocessors(self, data):
-            # Right now we do not scrub data from event preprocessors
-            def more_extra(data):
-                data["extra"]["aaa2"] = "event preprocessor"
-                return data
+    def more_extra(data):
+        data["extra"]["ooo2"] = "event preprocessor"
+        return data
 
-            return [more_extra]
-
-        def is_enabled(self, project=None):
-            return True
-
-    register_plugin(globals(), TestPlugin)
+    mock_get_preprocessors.return_value = [more_extra]
 
     if setting_method == "datascrubbers":
-        options_model.update_option("sentry:sensitive_fields", ["a"])
+        options_model.update_option("sentry:sensitive_fields", ["o"])
         options_model.update_option("sentry:scrub_data", True)
     elif setting_method == "piiconfig":
         options_model.update_option(
-            "sentry:relay_pii_config", '{"applications": {"extra.aaa": ["@anything:replace"]}}'
+            "sentry:relay_pii_config", '{"applications": {"extra.ooo": ["@anything:replace"]}}'
         )
     else:
-        raise ValueError(setting_method)
+        raise AssertionError(setting_method)
 
     data = {
         "project": default_project.id,
         "platform": "python",
         "logentry": {"formatted": "test"},
         "event_id": EVENT_ID,
-        "extra": {"aaa": "remove me"},
+        "extra": {"ooo": "remove me"},
     }
 
     mock_event_processing_store.get.return_value = data
@@ -352,60 +362,167 @@ def test_scrubbing_after_processing(
     process_event(cache_key="e:1", start_time=1, data_has_changed=True)
 
     ((_, (event,), _),) = mock_event_processing_store.store.mock_calls
-    assert event["extra"] == {"aaa": "[Filtered]", "aaa2": "event preprocessor"}
+    assert event["extra"] == {"ooo": "[Filtered]", "ooo2": "event preprocessor"}
 
     mock_save_event.delay.assert_called_once_with(
         cache_key="e:1", data=None, start_time=1, event_id=EVENT_ID, project_id=default_project.id
     )
 
 
-def test_time_synthetic_monitoring_event_in_save_event_disabled(mock_metrics_timing):
-    data = {"project": 1}
-    with override_settings(SENTRY_SYNTHETIC_MONITORING_PROJECT_ID=None):
-        assert time_synthetic_monitoring_event(data, 1, time()) is False
-    assert mock_metrics_timing.call_count == 0
+@django_db_all
+def test_killswitch() -> None:
+    assert not is_process_disabled(1, "asdasdasd", "null")
+    options.set("store.load-shed-process-event-projects-gradual", {1: 0.0})
+    assert not is_process_disabled(1, "asdasdasd", "null")
+    options.set("store.load-shed-process-event-projects-gradual", {1: 1.0})
+    assert is_process_disabled(1, "asdasdasd", "null")
+    options.set("store.load-shed-process-event-projects-gradual", {})
 
 
-def test_time_synthetic_monitoring_event_in_save_event_not_matching_project(mock_metrics_timing):
-    data = {"project": 1}
-    with override_settings(SENTRY_SYNTHETIC_MONITORING_PROJECT_ID=2):
-        assert time_synthetic_monitoring_event(data, 1, time()) is False
-    assert mock_metrics_timing.call_count == 0
-
-
-def test_time_synthetic_monitoring_event_in_save_event_missing_extra(mock_metrics_timing):
-    data = {"project": 1}
-    with override_settings(SENTRY_SYNTHETIC_MONITORING_PROJECT_ID=1):
-        assert time_synthetic_monitoring_event(data, 1, time()) is False
-    assert mock_metrics_timing.call_count == 0
-
-
-def test_time_synthetic_monitoring_event_in_save_event(mock_metrics_timing):
-    tags = {
-        "source_region": "region-1",
-        "target": "target.io",
-        "source": "source-1",
-    }
-    extra = {"key": "value", "another": "val"}
-    extra.update(tags)
+@django_db_all
+def test_transactions_store(default_project, mock_transaction_processing_store) -> None:
     data = {
-        "project": 1,
+        "project": default_project.id,
+        "platform": "transaction",
+        "event_id": EVENT_ID,
+        "type": "transaction",
+        "transaction": "minimal_transaction",
         "timestamp": time(),
-        "extra": {"_sentry_synthetic_monitoring": extra},
+        "start_timestamp": time() - 1,
     }
-    with override_settings(SENTRY_SYNTHETIC_MONITORING_PROJECT_ID=1):
-        assert time_synthetic_monitoring_event(data, 1, time()) is True
 
-    to_ingest, to_process = mock_metrics_timing.mock_calls
+    mock_transaction_processing_store.store.return_value = "e:1"
+    mock_transaction_processing_store.get.return_value = data
+    with mock.patch("sentry.event_manager.EventManager.save", return_value=None):
+        save_event_transaction(
+            cache_key="e:1",
+            data=None,
+            start_time=1,
+            event_id=EVENT_ID,
+            project_id=default_project.id,
+        )
 
-    assert to_ingest.args == (
-        "events.synthetic-monitoring.time-to-ingest-total",
-        mock.ANY,
+    mock_transaction_processing_store.get.assert_called_once_with("e:1")
+
+
+@django_db_all
+def test_store_consumer_type(
+    default_project,
+    mock_save_event,
+    mock_save_event_transaction,
+    mock_event_processing_store,
+    mock_transaction_processing_store,
+):
+    data = {
+        "project": default_project.id,
+        "platform": "python",
+        "logentry": {"formatted": "test"},
+        "event_id": EVENT_ID,
+        "extra": {"foo": "bar"},
+        "timestamp": time(),
+    }
+
+    mock_event_processing_store.get.return_value = data
+    mock_event_processing_store.store.return_value = "e:2"
+
+    process_event(cache_key="e:2", start_time=1)
+
+    mock_event_processing_store.get.assert_called_once_with("e:2")
+
+    mock_save_event.delay.assert_called_once_with(
+        cache_key="e:2",
+        data=None,
+        start_time=1,
+        event_id=EVENT_ID,
+        project_id=default_project.id,
     )
-    assert to_ingest.kwargs == {"tags": tags, "sample_rate": 1.0}
 
-    assert to_process.args == (
-        "events.synthetic-monitoring.time-to-process",
-        mock.ANY,
-    )
-    assert to_process.kwargs == {"tags": tags, "sample_rate": 1.0}
+    transaction_data = {
+        "project": default_project.id,
+        "platform": "transaction",
+        "event_id": EVENT_ID,
+        "extra": {"foo": "bar"},
+        "timestamp": time(),
+        "start_timestamp": time() - 1,
+    }
+
+    mock_transaction_processing_store.get.return_value = transaction_data
+    mock_transaction_processing_store.store.return_value = "tx:3"
+
+    with mock.patch("sentry.event_manager.EventManager.save", return_value=None):
+        save_event_transaction(
+            cache_key="tx:3",
+            data=None,
+            start_time=1,
+            event_id=EVENT_ID,
+            project_id=default_project.id,
+        )
+
+    mock_transaction_processing_store.get.assert_called_once_with("tx:3")
+    mock_transaction_processing_store.delete_by_key.assert_called_once_with("tx:3")
+    mock_transaction_processing_store.store.assert_not_called()
+
+
+@django_db_all
+def test_should_process_new_path_js(default_project):
+    data = {
+        "project": default_project.id,
+        "platform": "javascript",
+        "event_id": EVENT_ID,
+    }
+    assert should_process(data) is True
+
+
+@django_db_all
+def test_should_process_new_path_java_proguard(default_project):
+    data = {
+        "project": default_project.id,
+        "platform": "java",
+        "event_id": EVENT_ID,
+        "debug_meta": {"images": [{"type": "proguard", "uuid": "1234-abcd"}]},
+    }
+    assert should_process(data) is True
+
+
+@django_db_all
+def test_should_process_new_path_no_preprocessor(default_project):
+    data = {
+        "project": default_project.id,
+        "platform": "python",
+        "event_id": EVENT_ID,
+    }
+    assert should_process(data) is False
+
+
+@django_db_all
+def test_process_event_new_path_js(default_project, mock_event_processing_store, mock_save_event):
+    data = {
+        "project": default_project.id,
+        "platform": "javascript",
+        "logentry": {"formatted": "test"},
+        "event_id": EVENT_ID,
+    }
+
+    mock_event_processing_store.get.return_value = data
+    mock_event_processing_store.store.return_value = "e:1"
+
+    process_event(cache_key="e:1", start_time=1)
+
+    mock_save_event.delay.assert_called_once()
+
+
+@django_db_all
+def test_preprocess_routes_to_save_new_path_python(
+    default_project, mock_process_event, mock_save_event, mock_symbolicate_event
+):
+    data = {
+        "project": default_project.id,
+        "platform": "python",
+        "logentry": {"formatted": "test"},
+        "event_id": EVENT_ID,
+    }
+
+    preprocess_event(cache_key="", data=data)
+
+    assert mock_process_event.delay.call_count == 0
+    assert mock_save_event.delay.call_count == 1

@@ -1,8 +1,6 @@
-/* global process */
-/* eslint import/no-nodejs-modules:0 */
+import {run} from 'jest';
 
 // Do this as the first thing so that any code reading it knows the right env.
-// process.env.BABEL_ENV = 'test';
 process.env.NODE_ENV = 'test';
 process.env.PUBLIC_URL = '';
 process.env.TZ = 'America/New_York';
@@ -14,14 +12,11 @@ process.on('unhandledRejection', err => {
   throw err;
 });
 
-// eslint-disable-next-line jest/no-jest-import
-const jest = require('jest');
+let argv = process.argv.slice(2);
 
-const argv = process.argv.slice(2);
-
-// Watch unless on CI or in coverage mode
-if (!process.env.CI && !process.env.SENTRY_PRECOMMIT && argv.indexOf('--coverage') < 0) {
-  argv.push('--watch');
+// Remove watch if in CI or in coverage mode
+if (process.env.CI || process.env.SENTRY_PRECOMMIT || argv.includes('--coverage')) {
+  argv = argv.filter(arg => arg !== '--watch');
 }
 
-jest.run(argv);
+run(argv);

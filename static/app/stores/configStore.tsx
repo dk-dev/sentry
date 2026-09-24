@@ -1,104 +1,58 @@
 import moment from 'moment-timezone';
-import * as qs from 'query-string';
-import Reflux from 'reflux';
+import {createStore} from 'reflux';
 
-import {setLocale} from 'app/locale';
-import {Config} from 'app/types';
+import type {Config} from 'sentry/types/system';
 
-type ConfigStoreInterface = {
-  config: Config;
+import type {StrictStoreDefinition} from './types';
 
+interface ConfigStoreDefinition extends StrictStoreDefinition<Config> {
   get<K extends keyof Config>(key: K): Config[K];
-  set<K extends keyof Config>(key: K, value: Config[K]): void;
-  getConfig(): Config;
-  updateTheme(theme: 'light' | 'dark'): void;
   loadInitialData(config: Config): void;
-};
+  set<K extends keyof Config>(key: K, value: Config[K]): void;
+}
 
-const configStoreConfig: Reflux.StoreDefinition & ConfigStoreInterface = {
+const storeConfig: ConfigStoreDefinition = {
   // When the app is booted we will _immediately_ hydrate the config store,
-  // effecively ensureing this is not empty.
-  config: {} as Config,
+  // effecively ensuring this is not empty.
+  state: {} as Config,
 
   init(): void {
-    this.config = {} as Config;
+    // XXX: Do not use `this.listenTo` in this store. We avoid usage of reflux
+    // listeners due to their leaky nature in tests.
+
+    this.state = {} as Config;
   },
 
   get(key) {
-    return this.config[key];
+    return this.state[key];
   },
 
   set(key, value) {
-    this.config = {
-      ...this.config,
-      [key]: value,
-    };
+    this.state = {...this.state, [key]: value};
     this.trigger({[key]: value});
-  },
-
-  /**
-   * This is only called by media query listener so that we can control
-   * the auto switching of color schemes without affecting manual toggle
-   */
-  updateTheme(theme) {
-    if (this.config.user?.options.theme !== 'system') {
-      return;
-    }
-
-    this.set('theme', theme);
-  },
-
-  getConfig() {
-    return this.config;
   },
 
   loadInitialData(config): void {
     const shouldUseDarkMode = config.user?.options.theme === 'dark';
 
-    this.config = {
+    this.state = {
       ...config,
       features: new Set(config.features || []),
       theme: shouldUseDarkMode ? 'dark' : 'light',
     };
 
-    // Language code is passed from django
-    let languageCode = config.languageCode;
-
     // TODO(dcramer): abstract this out of ConfigStore
-    if (config.user) {
-      config.user.permissions = new Set(config.user.permissions);
-      moment.tz.setDefault(config.user.options.timezone);
-
-      let queryString: qs.ParsedQuery = {};
-
-      // Parse query string for `lang`
-      try {
-        queryString = qs.parse(window.location.search) || {};
-      } catch (err) {
-        // ignore if this fails to parse
-        // this can happen if we have an invalid query string
-        // e.g. unencoded "%"
-      }
-
-      let queryStringLang = queryString.lang;
-
-      if (Array.isArray(queryStringLang)) {
-        queryStringLang = queryStringLang[0];
-      }
-
-      languageCode = queryStringLang || config.user.options.language || languageCode;
+    if (this.state.user) {
+      this.state.user.permissions = new Set(this.state.user.permissions);
+      moment.tz.setDefault(this.state.user.options.timezone);
     }
 
-    // Priority:
-    // "?lang=en" --> user configuration options --> django request.LANGUAGE_CODE --> "en"
-    setLocale(languageCode || 'en');
+    this.trigger(this.state);
+  },
 
-    this.trigger(config);
+  getState() {
+    return this.state;
   },
 };
 
-type ConfigStore = Reflux.Store & ConfigStoreInterface;
-
-const ConfigStore = Reflux.createStore(configStoreConfig) as ConfigStore;
-
-export default ConfigStore;
+export const ConfigStore = createStore(storeConfig);

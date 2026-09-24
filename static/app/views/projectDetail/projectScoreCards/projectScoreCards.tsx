@@ -1,62 +1,92 @@
-import React from 'react';
-import styled from '@emotion/styled';
+import type {Location} from 'history';
 
-import space from 'app/styles/space';
-import {GlobalSelection, Organization} from 'app/types';
+import {Grid} from '@sentry/scraps/layout';
 
-import ProjectApdexScoreCard from './projectApdexScoreCard';
-import ProjectStabilityScoreCard from './projectStabilityScoreCard';
-import ProjectVelocityScoreCard from './projectVelocityScoreCard';
+import type {PageFilters} from 'sentry/types/core';
+import type {Organization} from 'sentry/types/organization';
+import {SessionFieldWithOperation} from 'sentry/types/organization';
+import type {Project} from 'sentry/types/project';
+import {isPlatformANRCompatible} from 'sentry/views/projectDetail/utils';
+
+import {ProjectAnrScoreCard} from './projectAnrScoreCard';
+import {ProjectApdexScoreCard} from './projectApdexScoreCard';
+import {ProjectStabilityScoreCard} from './projectStabilityScoreCard';
+import {ProjectVelocityScoreCard} from './projectVelocityScoreCard';
 
 type Props = {
-  organization: Organization;
-  selection: GlobalSelection;
-  isProjectStabilized: boolean;
   hasSessions: boolean | null;
+  isProjectStabilized: boolean;
+  location: Location;
+  organization: Organization;
+  selection: PageFilters;
   hasTransactions?: boolean;
+  project?: Project;
+  query?: string;
 };
 
-function ProjectScoreCards({
+export function ProjectScoreCards({
   organization,
   selection,
   isProjectStabilized,
   hasSessions,
   hasTransactions,
+  query,
+  location,
+  project,
 }: Props) {
   return (
-    <CardWrapper>
+    <Grid
+      columns={{
+        zero: '1fr',
+        '3xl': 'repeat(2, minmax(0, 1fr))',
+        '5xl': 'repeat(4, minmax(0, 1fr))',
+      }}
+      gap="xl"
+      marginBottom="xl"
+    >
       <ProjectStabilityScoreCard
-        organization={organization}
         selection={selection}
         isProjectStabilized={isProjectStabilized}
         hasSessions={hasSessions}
+        query={query}
+        field={SessionFieldWithOperation.CRASH_FREE_RATE_SESSIONS}
+        project={project}
+      />
+
+      <ProjectStabilityScoreCard
+        selection={selection}
+        isProjectStabilized={isProjectStabilized}
+        hasSessions={hasSessions}
+        query={query}
+        field={SessionFieldWithOperation.CRASH_FREE_RATE_USERS}
+        project={project}
       />
 
       <ProjectVelocityScoreCard
         organization={organization}
         selection={selection}
         isProjectStabilized={isProjectStabilized}
+        query={query}
       />
 
-      <ProjectApdexScoreCard
-        organization={organization}
-        selection={selection}
-        isProjectStabilized={isProjectStabilized}
-        hasTransactions={hasTransactions}
-      />
-    </CardWrapper>
+      {isPlatformANRCompatible(project?.platform) ? (
+        <ProjectAnrScoreCard
+          organization={organization}
+          selection={selection}
+          isProjectStabilized={isProjectStabilized}
+          query={query}
+          location={location}
+          platform={project?.platform}
+        />
+      ) : (
+        <ProjectApdexScoreCard
+          organization={organization}
+          selection={selection}
+          isProjectStabilized={isProjectStabilized}
+          hasTransactions={hasTransactions}
+          query={query}
+        />
+      )}
+    </Grid>
   );
 }
-
-const CardWrapper = styled('div')`
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  grid-column-gap: ${space(2)};
-
-  @media (max-width: ${p => p.theme.breakpoints[0]}) {
-    grid-template-columns: 1fr;
-    grid-template-rows: repeat(3, 1fr);
-  }
-`;
-
-export default ProjectScoreCards;

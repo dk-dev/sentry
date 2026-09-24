@@ -1,7 +1,5 @@
 ---
-created: '2021-03-29T22:02:39.442289Z'
-creator: sentry
-source: tests/sentry/grouping/test_categorization.py
+source: tests/sentry/grouping/test_categorization.py::test_categorization
 ---
 
 
@@ -12,5 +10,5 @@ SIGSEGV:Segfault (thread_id:_, crashed:_)
                          /system/lib/libc.so  memcpy category=indirection
                          /system/lib/libc.so  ??? category=internals
                    /system/bin/app_process32  ??? category=internals
-                       /system/lib/libart.so  art::FaultManager::HandleFault category=gc
+                       /system/lib/libart.so  art::FaultManager::HandleFault category=internals
                        /system/lib/libart.so  art::FaultManager::IsInGeneratedCode category=internals

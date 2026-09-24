@@ -1,3 +1,5 @@
+import type {AvatarProject} from 'sentry/types/project';
+
 const platforms = [
   'dotnet',
   'android',
@@ -12,6 +14,7 @@ const platforms = [
   'node',
   'perl',
   'php',
+  'powershell',
   'python',
   'react-native',
   'ruby',
@@ -19,7 +22,7 @@ const platforms = [
   'unity',
 ] as const;
 
-export type DocPlatform = typeof platforms[number];
+type DocPlatform = (typeof platforms)[number];
 
 const performancePlatforms: DocPlatform[] = [
   'dotnet',
@@ -30,6 +33,7 @@ const performancePlatforms: DocPlatform[] = [
   'javascript',
   'node',
   'php',
+  'powershell',
   'python',
   'react-native',
   'ruby',
@@ -39,10 +43,7 @@ function validDocPlatform(platform: any): platform is DocPlatform {
   return platforms.includes(platform);
 }
 
-export function getDocsPlatform(
-  platform: string,
-  performanceOnly: boolean
-): DocPlatform | null {
+function getDocsPlatform(platform: string, performanceOnly: boolean): DocPlatform | null {
   // react-native is the only platform that has a dash, and supports performance so we can skip that check
   if (platform === 'react-native') {
     return 'react-native';
@@ -57,4 +58,14 @@ export function getDocsPlatform(
   }
   // can't find a matching docs platform
   return null;
+}
+
+export function getConfigurePerformanceDocsLink(
+  project: AvatarProject | undefined
+): string | null {
+  const platform = project?.platform ?? null;
+  const docsPlatform = platform ? getDocsPlatform(platform, true) : null;
+  return docsPlatform === null
+    ? null // this platform does not support performance
+    : `https://docs.sentry.io/platforms/${docsPlatform}/tracing/`;
 }

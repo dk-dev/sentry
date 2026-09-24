@@ -1,43 +1,129 @@
-import React from 'react';
+import {useCallback, useEffect} from 'react';
+import * as Sentry from '@sentry/react';
 
-import {Group} from 'app/types';
-import {Event} from 'app/types/event';
-import {objectIsEmpty} from 'app/utils';
-
-import Chunk from './chunk';
+import {ContextDataSection} from 'sentry/components/events/contexts/contextDataSection';
+import {eventHasSyntheticTrace} from 'sentry/components/events/interfaces/performance/utils';
+import type {Event, EventContexts as EventContextValues} from 'sentry/types/event';
+import {useProjects} from 'sentry/utils/useProjects';
 
 type Props = {
   event: Event;
-  group?: Group;
+  disableCollapsePersistence?: boolean;
 };
 
-function Contexts({event, group}: Props) {
-  const {user, contexts} = event;
-
-  return (
-    <React.Fragment>
-      {!objectIsEmpty(user) && (
-        <Chunk
-          key="user"
-          type="user"
-          alias="user"
-          group={group}
-          event={event}
-          value={user}
-        />
-      )}
-      {Object.entries(contexts).map(([key, value]) => (
-        <Chunk
-          key={key}
-          type={value?.type ?? ''}
-          alias={key}
-          group={group}
-          event={event}
-          value={value}
-        />
-      ))}
-    </React.Fragment>
-  );
+interface UnknownContextValue {
+  [key: string]: any;
+  type: 'default';
 }
 
-export default Contexts;
+/**
+ * Catch-all for context values, known and unknown
+ */
+export type ContextValue =
+  | EventContextValues[keyof EventContextValues]
+  | UnknownContextValue;
+
+export interface ContextItem {
+  alias: string;
+  type: string;
+  value: ContextValue;
+}
+
+export function getOrderedContextItems(event: Event): ContextItem[] {
+  return getOrderedContextItemsFromContexts({
+    contexts: event.contexts,
+    user: event.user,
+    hasSyntheticTrace: eventHasSyntheticTrace(event),
+  });
+}
+
+/**
+ * Prefer `getOrderedContextItems` when an `Event` is available.
+ */
+export function getOrderedContextItemsFromContexts({
+  contexts,
+  user,
+  hasSyntheticTrace = false,
+}: {
+  contexts: Event['contexts'] | undefined;
+  hasSyntheticTrace?: boolean;
+  user?: Event['user'];
+}): ContextItem[] {
+  const {data: customUserData, ...userContext} = user ?? {};
+
+  // hide `flags` in the contexts section since we display this
+  // info in the feature flag section below
+  const {
+    feedback,
+    response,
+    browser,
+    runtime,
+    os,
+    flags: _,
+    ...otherContexts
+  } = contexts ?? {};
+  const orderedContext: Array<[ContextItem['alias'], ContextValue]> = [
+    ['response', response],
+    ['feedback', feedback],
+    ['user', {...userContext, ...(customUserData as any)}],
+    ['browser', browser],
+    ['runtime', runtime],
+    ['os', os],
+    ...Object.entries(otherContexts),
+  ];
+  // For these context aliases, use the alias as 'type' rather than 'value.type'
+  const overrideTypesWithAliases = new Set([
+    'response',
+    'feedback',
+    'user',
+    'profile',
+    'replay',
+  ]);
+
+  const items = orderedContext
+    .filter(([alias, ctxValue]) => {
+      if (alias === 'trace' && hasSyntheticTrace) {
+        return false;
+      }
+      const contextKeys = Object.keys(ctxValue ?? {});
+      const isInvalid =
+        // Empty context
+        contextKeys.length === 0 ||
+        // Empty aside from 'type' key
+        (contextKeys.length === 1 && contextKeys[0] === 'type');
+      return !isInvalid;
+    })
+    .map<ContextItem>(([alias, ctx]) => ({
+      alias,
+      type: overrideTypesWithAliases.has(alias) ? alias : ctx?.type,
+      value: ctx,
+    }));
+
+  return items;
+}
+
+export function EventContexts({event, disableCollapsePersistence}: Props) {
+  const {projects} = useProjects();
+  const project = projects.find(p => p.id === event.projectID);
+  const {contexts, sdk} = event;
+
+  const usingOtel = useCallback(() => contexts.otel !== undefined, [contexts.otel]);
+
+  useEffect(() => {
+    const span = Sentry.getActiveSpan();
+    if (usingOtel() && span) {
+      const rootSpan = Sentry.getRootSpan(span);
+      rootSpan.setAttribute('otel_event', true);
+      rootSpan.setAttribute('otel_sdk', sdk?.name ?? undefined);
+      rootSpan.setAttribute('otel_sdk_version', sdk?.version ?? undefined);
+    }
+  }, [usingOtel, sdk]);
+
+  return (
+    <ContextDataSection
+      event={event}
+      project={project}
+      disableCollapsePersistence={disableCollapsePersistence}
+    />
+  );
+}

@@ -1,7 +1,6 @@
-import React from 'react';
-
-import {Client} from 'app/api';
-import getDisplayName from 'app/utils/getDisplayName';
+import type {Client} from 'sentry/api';
+import {getDisplayName} from 'sentry/utils/getDisplayName';
+import {useApi} from 'sentry/utils/useApi';
 
 type InjectedApiProps = {
   api: Client;
@@ -9,46 +8,26 @@ type InjectedApiProps = {
 
 type WrappedProps<P> = Omit<P, keyof InjectedApiProps> & Partial<InjectedApiProps>;
 
-type OptionProps = {
-  /**
-   * Enabling this option will disable clearing in-flight requests when the
-   * component is unmounted.
-   *
-   * This may be useful in situations where your component needs to finish up
-   * some where the client was passed into some type of action creator and the
-   * component is unmounted.
-   */
-  persistInFlight?: boolean;
-};
-
 /**
+ * XXX: Prefer useApi if you are wrapping a Function Component!
+ *
  * React Higher-Order Component (HoC) that provides "api" client when mounted,
  * and clears API requests when component is unmounted.
+ *
+ * If an `api` prop is provided when the component is invoked it will be passed
+ * through.
  */
-const withApi = <P extends InjectedApiProps>(
-  WrappedComponent: React.ComponentType<P>,
-  {persistInFlight}: OptionProps = {}
-) =>
-  class extends React.Component<WrappedProps<P>> {
-    static displayName = `withApi(${getDisplayName(WrappedComponent)})`;
+export const withApi = <P extends InjectedApiProps>(
+  WrappedComponent: React.ComponentType<P>
+) => {
+  function WithApi({api: propsApi, ...props}: WrappedProps<P>) {
+    const api = useApi({api: propsApi});
 
-    constructor(props: WrappedProps<P>) {
-      super(props);
-      this.api = new Client();
-    }
+    // TODO(any): HoC prop types not working w/ emotion https://github.com/emotion-js/emotion/issues/3261
+    return <WrappedComponent {...(props as any)} api={api} />;
+  }
 
-    componentWillUnmount() {
-      if (!persistInFlight) {
-        this.api.clear();
-      }
-    }
+  WithApi.displayName = `withApi(${getDisplayName(WrappedComponent)})`;
 
-    private api: Client;
-
-    render() {
-      const {api, ...props} = this.props;
-      return <WrappedComponent {...({api: api ?? this.api, ...props} as P)} />;
-    }
-  };
-
-export default withApi;
+  return WithApi;
+};

@@ -1,39 +1,39 @@
-import React from 'react';
+import {Fragment, useState} from 'react';
 import styled from '@emotion/styled';
 
-import {addErrorMessage, addSuccessMessage} from 'app/actionCreators/indicator';
-import {ModalRenderProps, TeamAccessRequestModalOptions} from 'app/actionCreators/modal';
-import {Client} from 'app/api';
-import Button from 'app/components/button';
-import {t, tct} from 'app/locale';
-import space from 'app/styles/space';
-import withApi from 'app/utils/withApi';
+import {Button} from '@sentry/scraps/button';
 
-type Props = ModalRenderProps &
-  TeamAccessRequestModalOptions & {
-    api: Client;
-    memberId: string;
-    teamId: string;
-    orgId: string;
-  };
+import {addErrorMessage, addSuccessMessage} from 'sentry/actionCreators/indicator';
+import type {
+  ModalRenderProps,
+  TeamAccessRequestModalOptions,
+} from 'sentry/actionCreators/modal';
+import type {Client} from 'sentry/api';
+import {t, tct} from 'sentry/locale';
+import {getApiUrl} from 'sentry/utils/api/getApiUrl';
+import {withApi} from 'sentry/utils/withApi';
 
-type State = {
-  createBusy: boolean;
-};
+export interface CreateTeamAccessRequestModalProps
+  extends ModalRenderProps, TeamAccessRequestModalOptions {
+  api: Client;
+  memberId: string;
+  orgId: string;
+  teamId: string;
+}
 
-class CreateTeamAccessRequest extends React.Component<Props, State> {
-  state: State = {
-    createBusy: false,
-  };
+function CreateTeamAccessRequestModal(props: CreateTeamAccessRequestModalProps) {
+  const [createBusy, setCreateBusy] = useState(false);
+  const {api, memberId, orgId, teamId, closeModal, Body, Footer} = props;
 
-  handleClick = async () => {
-    const {api, memberId, orgId, teamId, closeModal} = this.props;
-
-    this.setState({createBusy: true});
+  const handleClick = async () => {
+    setCreateBusy(true);
 
     try {
       await api.requestPromise(
-        `/organizations/${orgId}/members/${memberId}/teams/${teamId}/`,
+        getApiUrl(
+          '/organizations/$organizationIdOrSlug/members/$memberId/teams/$teamIdOrSlug/',
+          {path: {organizationIdOrSlug: orgId, memberId, teamIdOrSlug: teamId}}
+        ),
         {
           method: 'POST',
         }
@@ -42,43 +42,34 @@ class CreateTeamAccessRequest extends React.Component<Props, State> {
     } catch (err) {
       addErrorMessage(t('Unable to send team request'));
     }
-    this.setState({createBusy: false});
+    setCreateBusy(false);
     closeModal();
   };
 
-  render() {
-    const {Body, Footer, closeModal, teamId} = this.props;
-
-    return (
-      <React.Fragment>
-        <Body>
-          {tct(
-            'You do not have permission to add members to the #[team] team, but we will send a request to your organization admins for approval.',
-            {team: teamId}
-          )}
-        </Body>
-        <Footer>
-          <ButtonGroup>
-            <Button onClick={closeModal}>{t('Cancel')}</Button>
-            <Button
-              priority="primary"
-              onClick={this.handleClick}
-              busy={this.state.createBusy}
-              autoFocus
-            >
-              {t('Continue')}
-            </Button>
-          </ButtonGroup>
-        </Footer>
-      </React.Fragment>
-    );
-  }
+  return (
+    <Fragment>
+      <Body>
+        {tct(
+          'You do not have permission to add members to the #[team] team, but we will send a request to your organization admins for approval.',
+          {team: teamId}
+        )}
+      </Body>
+      <Footer>
+        <ButtonGroup>
+          <Button onClick={closeModal}>{t('Cancel')}</Button>
+          <Button variant="primary" onClick={handleClick} busy={createBusy} autoFocus>
+            {t('Continue')}
+          </Button>
+        </ButtonGroup>
+      </Footer>
+    </Fragment>
+  );
 }
 
 const ButtonGroup = styled('div')`
   display: grid;
   grid-template-columns: max-content max-content;
-  grid-gap: ${space(1)};
+  gap: ${p => p.theme.space.md};
 `;
 
-export default withApi(CreateTeamAccessRequest);
+export default withApi(CreateTeamAccessRequestModal);

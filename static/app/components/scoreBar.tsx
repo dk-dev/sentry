@@ -1,28 +1,28 @@
-import React from 'react';
+import {css} from '@emotion/react';
 import styled from '@emotion/styled';
 
-import theme from 'app/utils/theme';
+import {SIMILARITY_SCORE_COLORS} from './similarScoreCard';
+
+const DEFAULT_THICKNESS = 4;
 
 type Props = {
   score: number;
-  size?: number;
-  thickness?: number;
-  radius?: number;
-  palette?: Readonly<string[]>;
   className?: string;
-  paletteClassNames?: string[];
+  palette?: readonly string[];
+  radius?: number;
+  size?: number;
   vertical?: boolean;
 };
 
-const ScoreBar = ({
+function BaseScoreBar({
   score,
   className,
   vertical,
   size = 40,
-  thickness = 4,
   radius = 3,
-  palette = theme.similarity.colors,
-}: Props) => {
+  palette = SIMILARITY_SCORE_COLORS,
+  ...props
+}: Props) {
   const maxScore = palette.length;
 
   // Make sure score is between 0 and maxScore
@@ -33,31 +33,35 @@ const ScoreBar = ({
   // Size of bar, depends on orientation, although we could just apply a transformation via css
   const barProps = {
     vertical,
-    thickness,
+    thickness: DEFAULT_THICKNESS,
     size,
     radius,
   };
 
   return (
-    <div className={className}>
-      {[...Array(scoreInBounds)].map((_j, i) => (
+    <div className={className} {...props}>
+      {Array.from({length: scoreInBounds}, (_, i) => (
         <Bar {...barProps} key={i} color={palette[paletteIndex]} />
       ))}
-      {[...Array(maxScore - scoreInBounds)].map((_j, i) => (
+      {Array.from({length: maxScore - scoreInBounds}, (_, i) => (
         <Bar key={`empty-${i}`} {...barProps} empty />
       ))}
     </div>
   );
-};
+}
 
-const StyledScoreBar = styled(ScoreBar)`
+export const ScoreBar = styled(BaseScoreBar)`
   display: flex;
 
   ${p =>
     p.vertical
-      ? `flex-direction: column-reverse;
-    justify-content: flex-end;`
-      : 'min-width: 80px;'};
+      ? css`
+          flex-direction: column-reverse;
+          justify-content: flex-end;
+        `
+      : css`
+          min-width: 80px;
+        `}
 `;
 
 type BarProps = {
@@ -72,11 +76,9 @@ type BarProps = {
 const Bar = styled('div')<BarProps>`
   border-radius: ${p => p.radius}px;
   margin: 2px;
-  ${p => p.empty && `background-color: ${p.theme.similarity.empty};`};
-  ${p => p.color && `background-color: ${p.color};`};
+  /* @TODO(jonasbadalic) This used to be defined on the theme, but is component specific and had no dark mode color. */
+  background-color: ${p => (p.empty ? p.theme.colors.gray200 : p.color)};
 
-  width: ${p => (!p.vertical ? p.thickness : p.size)}px;
-  height: ${p => (!p.vertical ? p.size : p.thickness)}px;
+  width: ${p => (p.vertical ? p.size : p.thickness)}px;
+  height: ${p => (p.vertical ? p.thickness : p.size)}px;
 `;
-
-export default StyledScoreBar;

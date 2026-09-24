@@ -1,23 +1,26 @@
+from __future__ import annotations
+
 import logging
+from collections.abc import Mapping
+from typing import TYPE_CHECKING, Any
 
-from sentry.models import Integration
-from sentry.plugins import providers
-from sentry.shared_integrations.exceptions import ApiError, IntegrationError
+from sentry.integrations.services.repository.model import RpcRepository
+from sentry.integrations.services.repository.service import repository_service
+from sentry.integrations.types import IntegrationProviderSlug
+from sentry.organizations.services.organization.model import RpcOrganization
+from sentry.plugins.providers import IntegrationRepositoryProvider
+from sentry.plugins.providers.integration_repository import RepositoryConfig
+from sentry.shared_integrations.exceptions import ApiError
+
+if TYPE_CHECKING:
+    from sentry.integrations.gitlab.integration import GitlabIntegration  # NOQA
+
+logger = logging.getLogger("sentry.integrations.gitlab")
 
 
-class GitlabRepositoryProvider(providers.IntegrationRepositoryProvider):
+class GitlabRepositoryProvider(IntegrationRepositoryProvider["GitlabIntegration"]):
     name = "Gitlab"
-    logger = logging.getLogger("sentry.integrations.gitlab")
-
-    def get_installation(self, integration_id, organization_id):
-        if integration_id is None:
-            raise IntegrationError("%s requires an integration id." % self.name)
-
-        integration_model = Integration.objects.get(
-            id=integration_id, organizations=organization_id, provider="gitlab"
-        )
-
-        return integration_model.get_installation(organization_id)
+    repo_provider = IntegrationProviderSlug.GITLAB.value
 
     def get_repository_data(self, organization, config):
         installation = self.get_installation(config.get("installation"), organization.id)
@@ -29,28 +32,22 @@ class GitlabRepositoryProvider(providers.IntegrationRepositoryProvider):
         try:
             project = client.get_project(repo_id)
         except Exception as e:
-            installation.raise_error(e)
+            raise installation.raise_error(e)
         config.update(
             {
                 "instance": instance,
                 "path": project["path_with_namespace"],
                 "name": project["name_with_namespace"],
-                "external_id": "{}:{}".format(instance, project["id"]),
+                "external_id": installation.get_repo_external_id(project),
                 "project_id": project["id"],
                 "url": project["web_url"],
             }
         )
         return config
 
-    def build_repository_config(self, organization, data):
-
-        installation = self.get_installation(data.get("installation"), organization.id)
-        client = installation.get_client()
-        hook_id = None
-        try:
-            hook_id = client.create_project_webhook(data["project_id"])
-        except Exception as e:
-            installation.raise_error(e)
+    def build_repository_config(
+        self, organization: RpcOrganization, data: Mapping[str, Any]
+    ) -> RepositoryConfig:
         return {
             "name": data["name"],
             "external_id": data["external_id"],
@@ -58,25 +55,94 @@ class GitlabRepositoryProvider(providers.IntegrationRepositoryProvider):
             "config": {
                 "instance": data["instance"],
                 "path": data["path"],
-                "webhook_id": hook_id,
                 "project_id": data["project_id"],
             },
             "integration_id": data["installation"],
         }
 
+    def on_create_repository(self, repo: RpcRepository, organization: RpcOrganization) -> None:
+        # Namespaced under "gitlab.repository." so these attributes group together in the
+        # Sentry Logs UI.
+        log_extra = {
+            "gitlab.repository.organization_id": repo.organization_id,
+            "gitlab.repository.integration_id": repo.integration_id,
+            "gitlab.repository.repository_id": repo.id,
+            "gitlab.repository.project_id": repo.config["project_id"],
+        }
+        # Emitted on every invocation so we can gauge how often this path runs
+        # (and therefore how many webhook create calls we make to GitLab).
+        logger.info(
+            "gitlab.repository.on_create_repository",
+            extra={
+                **log_extra,
+                "gitlab.repository.has_existing_webhook": bool(repo.config.get("webhook_id")),
+            },
+        )
+        installation = self.get_installation(repo.integration_id, repo.organization_id)
+        client = installation.get_client()
+        project_id = repo.config["project_id"]
+        existing_webhook_id = repo.config.get("webhook_id")
+        try:
+            hook_id = client.ensure_project_webhook(project_id, existing_webhook_id)
+        except Exception as e:
+            raise installation.raise_error(e)
+        if hook_id != existing_webhook_id:
+            if not repository_service.update_repository_config(
+                organization_id=organization.id,
+                id=repo.id,
+                config_updates={"webhook_id": hook_id},
+                expected_integration_id=repo.integration_id,
+                expected_config={"webhook_id": existing_webhook_id},
+            ):
+                # The repository changed while we talked to GitLab, so nothing would
+                # ever reference or delete the new hook.
+                logger.info(
+                    "gitlab.repository.webhook_discarded",
+                    extra={**log_extra, "gitlab.repository.webhook_id": hook_id},
+                )
+                # The repository itself was linked fine, so a failed cleanup only leaves the
+                # hook orphaned; raising would report the link as failed.
+                try:
+                    client.delete_project_webhook(project_id, hook_id)
+                except ApiError as e:
+                    if e.code != 404:
+                        logger.warning(
+                            "gitlab.repository.webhook_discard_failed",
+                            extra={
+                                **log_extra,
+                                "gitlab.repository.webhook_id": hook_id,
+                                "gitlab.repository.status_code": e.code,
+                            },
+                        )
+                return
+            repo.config["webhook_id"] = hook_id
+            event = (
+                "gitlab.repository.webhook_recreated"
+                if existing_webhook_id
+                else "gitlab.repository.webhook_created"
+            )
+        else:
+            event = "gitlab.repository.webhook_updated"
+        logger.info(event, extra={**log_extra, "gitlab.repository.webhook_id": hook_id})
+
     def on_delete_repository(self, repo):
         """Clean up the attached webhook"""
+        webhook_id = repo.config.get("webhook_id")
+        # A repository whose hook creation failed has no webhook_id. There is no hook to
+        # clean up then, and raising would only stop the user from deleting the repository.
+        if not webhook_id:
+            return
         installation = self.get_installation(repo.integration_id, repo.organization_id)
         client = installation.get_client()
         try:
-            client.delete_project_webhook(repo.config["project_id"], repo.config["webhook_id"])
+            client.delete_project_webhook(repo.config["project_id"], webhook_id)
         except ApiError as e:
             if e.code == 404:
                 return
-            installation.raise_error(e)
+            raise installation.raise_error(e)
 
     def compare_commits(self, repo, start_sha, end_sha):
-        """Fetch the commit list and diffed files between two shas"""
+        """Fetch the commit list and diffed files between two SHAs"""
         installation = self.get_installation(repo.integration_id, repo.organization_id)
         client = installation.get_client()
         try:
@@ -87,7 +153,7 @@ class GitlabRepositoryProvider(providers.IntegrationRepositoryProvider):
                 res = client.compare_commits(repo.config["project_id"], start_sha, end_sha)
                 return self._format_commits(client, repo, res["commits"])
         except Exception as e:
-            installation.raise_error(e)
+            raise installation.raise_error(e)
 
     def _format_commits(self, client, repo, commit_list):
         """Convert GitLab commits into our internal format"""
@@ -126,7 +192,7 @@ class GitlabRepositoryProvider(providers.IntegrationRepositoryProvider):
 
         return file_changes
 
-    def pull_request_url(self, repo, pull_request):
+    def pull_request_url(self, repo, pull_request) -> str:
         return f"{repo.url}/merge_requests/{pull_request.key}"
 
     def repository_external_slug(self, repo):

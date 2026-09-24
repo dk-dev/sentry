@@ -1,142 +1,136 @@
-import React from 'react';
-import {browserHistory, RouteComponentProps} from 'react-router';
+import {Fragment} from 'react';
 
-import {addLoadingMessage} from 'app/actionCreators/indicator';
+import {Button} from '@sentry/scraps/button';
+
+import {addLoadingMessage} from 'sentry/actionCreators/indicator';
 import {
   changeOrganizationSlug,
   removeAndRedirectToRemainingOrganization,
   updateOrganization,
-} from 'app/actionCreators/organizations';
-import {Client} from 'app/api';
-import Button from 'app/components/button';
-import Confirm from 'app/components/confirm';
-import {Panel, PanelHeader} from 'app/components/panels';
-import SentryDocumentTitle from 'app/components/sentryDocumentTitle';
-import {t, tct} from 'app/locale';
-import {Organization} from 'app/types';
-import withApi from 'app/utils/withApi';
-import withOrganization from 'app/utils/withOrganization';
-import Field from 'app/views/settings/components/forms/field';
-import SettingsPageHeader from 'app/views/settings/components/settingsPageHeader';
-import TextBlock from 'app/views/settings/components/text/textBlock';
-import PermissionAlert from 'app/views/settings/organization/permissionAlert';
+} from 'sentry/actionCreators/organizations';
+import {Confirm} from 'sentry/components/confirm';
+import {FieldGroup} from 'sentry/components/forms/fieldGroup';
+import {List} from 'sentry/components/list';
+import {ListItem} from 'sentry/components/list/listItem';
+import {Panel} from 'sentry/components/panels/panel';
+import {PanelHeader} from 'sentry/components/panels/panelHeader';
+import {SentryDocumentTitle} from 'sentry/components/sentryDocumentTitle';
+import {t, tct} from 'sentry/locale';
+import {ConfigStore} from 'sentry/stores/configStore';
+import {testableWindowLocation} from 'sentry/utils/testableWindowLocation';
+import {useApi} from 'sentry/utils/useApi';
+import {useNavigate} from 'sentry/utils/useNavigate';
+import {useOrganization} from 'sentry/utils/useOrganization';
+import {useProjects} from 'sentry/utils/useProjects';
+import {SettingsPageHeader} from 'sentry/views/settings/components/settingsPageHeader';
+import {TextBlock} from 'sentry/views/settings/components/text/textBlock';
+import {OrganizationPermissionAlert} from 'sentry/views/settings/organization/organizationPermissionAlert';
+import {defaultEnableSeerFeaturesValue} from 'sentry/views/settings/organizationGeneralSettings/aiFeatureSettings';
 
-import OrganizationSettingsForm from './organizationSettingsForm';
+import {OrganizationSettingsForm} from './organizationSettingsForm';
 
-type Props = {
-  api: Client;
-  organization: Organization;
-} & RouteComponentProps<{orgId: string}, {}>;
+export default function OrganizationGeneralSettings() {
+  const api = useApi();
+  const organization = useOrganization();
+  const {projects} = useProjects();
+  const navigate = useNavigate();
+  const removeConfirmMessage = (
+    <Fragment>
+      <TextBlock>
+        {tct(
+          'Removing the organization, [name] is permanent and cannot be undone! Are you sure you want to continue?',
+          {
+            name: organization && <strong>{organization.name}</strong>,
+          }
+        )}
+      </TextBlock>
 
-class OrganizationGeneralSettings extends React.Component<Props> {
-  handleRemoveOrganization = () => {
-    const {api, organization, params} = this.props;
+      {!!projects.length && (
+        <Fragment>
+          <TextBlock>
+            {t('This will also remove the following associated projects:')}
+          </TextBlock>
+          <List symbol="bullet" data-test-id="removed-projects-list">
+            {projects.map(project => (
+              <ListItem key={project.slug}>{project.slug}</ListItem>
+            ))}
+          </List>
+        </Fragment>
+      )}
+    </Fragment>
+  );
+
+  const handleSaveForm: React.ComponentProps<
+    typeof OrganizationSettingsForm
+  >['onSave'] = (prevData, updated) => {
+    if (updated.slug && updated.slug !== prevData.slug) {
+      changeOrganizationSlug(prevData, updated);
+
+      if (ConfigStore.get('features').has('system:multi-region')) {
+        const {organizationUrl} = updated.links;
+        testableWindowLocation.replace(`${organizationUrl}/settings/organization/`);
+      } else {
+        navigate(`/settings/${updated.slug}/`, {replace: true});
+      }
+    } else {
+      // This will update OrganizationStore (as well as OrganizationsStore
+      // which is slightly incorrect because it has summaries vs a detailed org)
+      updateOrganization(updated);
+    }
+  };
+
+  const handleConfirmRemoveOrg = () => {
     if (!organization) {
       return;
     }
 
     addLoadingMessage();
     removeAndRedirectToRemainingOrganization(api, {
-      orgId: params.orgId,
+      navigate,
+      orgId: organization.slug,
       successMessage: `${organization.name} is queued for deletion.`,
       errorMessage: `Error removing the ${organization.name} organization`,
     });
   };
 
-  handleSave = (prevData: Organization, data: Partial<Organization>) => {
-    if (data.slug && data.slug !== prevData.slug) {
-      changeOrganizationSlug(
-        prevData,
-        data as Partial<Organization> & Pick<Organization, 'slug'>
-      );
-      browserHistory.replace(`/settings/${data.slug}/`);
-    } else {
-      // This will update OrganizationStore (as well as OrganizationsStore
-      // which is slightly incorrect because it has summaries vs a detailed org)
-      updateOrganization(data);
-    }
-  };
+  return (
+    <Fragment>
+      <SentryDocumentTitle title={t('General Settings')} orgSlug={organization.slug} />
+      <div>
+        <SettingsPageHeader title={t('Organization Settings')} />
+        <OrganizationPermissionAlert />
 
-  render() {
-    const {organization, params} = this.props;
-    const {orgId} = params;
-    const access = new Set(organization.access);
-    const hasProjects = organization.projects && !!organization.projects.length;
+        <OrganizationSettingsForm
+          initialData={{
+            ...organization,
+            hideAiFeatures: defaultEnableSeerFeaturesValue(organization),
+          }}
+          onSave={handleSaveForm}
+        />
 
-    return (
-      <React.Fragment>
-        <SentryDocumentTitle title={t('General Settings')} orgSlug={orgId} />
-        <div>
-          <SettingsPageHeader title={t('Organization Settings')} />
-          <PermissionAlert />
-
-          <OrganizationSettingsForm
-            {...this.props}
-            initialData={organization}
-            access={access}
-            onSave={this.handleSave}
-          />
-
-          {access.has('org:admin') && !organization.isDefault && (
-            <Panel>
-              <PanelHeader>{t('Remove Organization')}</PanelHeader>
-              <Field
-                label={t('Remove Organization')}
-                help={t(
-                  'Removing this organization will delete all data including projects and their associated events.'
-                )}
-              >
-                <div>
-                  <Confirm
-                    priority="danger"
-                    confirmText={t('Remove Organization')}
-                    message={
-                      <div>
-                        <TextBlock>
-                          {tct(
-                            'Removing the organization, [name] is permanent and cannot be undone! Are you sure you want to continue?',
-                            {
-                              name: organization && <strong>{organization.name}</strong>,
-                            }
-                          )}
-                        </TextBlock>
-
-                        {hasProjects && (
-                          <div>
-                            <TextBlock noMargin>
-                              {t(
-                                'This will also remove the following associated projects:'
-                              )}
-                            </TextBlock>
-                            <ul className="ref-projects">
-                              {organization.projects.map(project => (
-                                <li key={project.slug}>{project.slug}</li>
-                              ))}
-                            </ul>
-                          </div>
-                        )}
-                      </div>
-                    }
-                    onConfirm={this.handleRemoveOrganization}
-                  >
-                    <Button
-                      priority="danger"
-                      title={t(
-                        'Remove %s organization',
-                        organization && organization.name
-                      )}
-                    >
-                      {t('Remove Organization')}
-                    </Button>
-                  </Confirm>
-                </div>
-              </Field>
-            </Panel>
-          )}
-        </div>
-      </React.Fragment>
-    );
-  }
+        {organization.access.includes('org:admin') && !organization.isDefault && (
+          <Panel>
+            <PanelHeader>{t('Remove Organization')}</PanelHeader>
+            <FieldGroup
+              label={t('Remove Organization')}
+              help={t(
+                'Removing this organization will delete all data including projects and their associated events.'
+              )}
+            >
+              <div>
+                <Confirm
+                  priority="danger"
+                  confirmText={t('Remove Organization')}
+                  message={removeConfirmMessage}
+                  onConfirm={handleConfirmRemoveOrg}
+                >
+                  <Button variant="danger">{t('Remove Organization')}</Button>
+                </Confirm>
+              </div>
+            </FieldGroup>
+          </Panel>
+        )}
+      </div>
+    </Fragment>
+  );
 }
-
-export default withApi(withOrganization(OrganizationGeneralSettings));

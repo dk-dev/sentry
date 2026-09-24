@@ -1,12 +1,15 @@
-export default function parseApiError(resp: JQueryXHR): string {
-  const {detail} = (resp && resp.responseJSON) || ({} as object);
+import type {ResponseMeta} from 'sentry/types/api';
+import type {RequestError} from 'sentry/utils/requestError/requestError';
+
+export function parseApiError(resp: ResponseMeta | RequestError): string {
+  const {detail} = resp?.responseJSON || {};
 
   // return immediately if string
   if (typeof detail === 'string') {
     return detail;
   }
 
-  if (detail && detail.message) {
+  if (detail?.message) {
     return detail.message;
   }
 

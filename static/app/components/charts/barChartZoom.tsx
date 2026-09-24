@@ -1,103 +1,99 @@
-import React from 'react';
-import {browserHistory} from 'react-router';
-import {EChartOption} from 'echarts/lib/echarts';
-import {Location} from 'history';
+import type {Location} from 'history';
 
-import DataZoomInside from 'app/components/charts/components/dataZoomInside';
-import ToolBox from 'app/components/charts/components/toolBox';
-import {EChartChartReadyHandler, EChartDataZoomHandler} from 'app/types/echarts';
-import {callIfFunction} from 'app/utils/callIfFunction';
+import {dataZoomInside} from 'sentry/components/charts/components/dataZoomInside';
+import {getToolBox} from 'sentry/components/charts/components/toolBox';
+import {activateZoomAreaSelect} from 'sentry/components/charts/utils';
+import type {
+  EChartChartReadyHandler,
+  EChartDataZoomHandler,
+  EChartFinishedHandler,
+  ECharts,
+} from 'sentry/types/echarts';
+import {useNavigate} from 'sentry/utils/useNavigate';
 
-export type RenderProps = {
-  dataZoom: EChartOption['dataZoom'];
-  toolBox: EChartOption['toolbox'];
+type RenderProps = {
+  dataZoom: ReturnType<typeof dataZoomInside>;
   onChartReady: EChartChartReadyHandler;
   onDataZoom: EChartDataZoomHandler;
+  onFinished: EChartFinishedHandler;
+  toolBox: ReturnType<typeof getToolBox>;
 };
 
-export type BarChartBucket = {
-  start: number;
+type BarChartBucket = {
   end: number;
+  start: number;
 };
 
 type Props = {
-  location: Location;
-  /**
-   * This is the query parameter the start of the zoom will be propagated to.
-   */
-  paramStart: string;
-  /**
-   * This is the query parameter the end of the zoom will be propagated to.
-   */
-  paramEnd: string;
-  /**
-   * This is the minimum width of the zoom. If the targeted zoom area is
-   * smaller than is specified by this parameter, the zoom will be cancelled
-   * and the `onDataZoomCancelled` callback will be called.
-   */
-  minZoomWidth?: number;
   /**
    * This is the list of bucket start and end ranges. This is used by the
    * component to determine the start and end of the zoom.
    */
   buckets: BarChartBucket[];
   /**
+   * The children function that will receive the render props and return
+   * a rendered chart.
+   */
+  children: (props: RenderProps) => React.ReactNode;
+  location: Location;
+  /**
+   * This is the query parameter the end of the zoom will be propagated to.
+   */
+  paramEnd: string;
+  /**
+   * This is the query parameter the start of the zoom will be propagated to.
+   */
+  paramStart: string;
+  /**
    * If you need the dataZoom control to control more than one chart.
    * you can provide a list of the axis indexes.
    */
   xAxisIndex: number[];
   /**
-   * The children function that will receive the render props and return
-   * a rendered chart.
+   * This is the minimum width of the zoom. If the targeted zoom area is
+   * smaller than is specified by this parameter, the zoom will be cancelled.
    */
-  children: (props: RenderProps) => React.ReactNode;
+  minZoomWidth?: number;
   /**
    *
    */
   onHistoryPush?: (start: number, end: number) => void;
-  /**
-   * This callback is called when the zoom action was cancelled. It can happen
-   * when `minZoomWidth` is specified and the user tries to zoom on an area
-   * smaller than that.
-   */
-  onDataZoomCancelled?: () => void;
-  onChartReady?: EChartChartReadyHandler;
-  onDataZoom?: EChartDataZoomHandler;
 };
 
-class BarChartZoom extends React.Component<Props> {
+export function BarChartZoom({
+  buckets,
+  children,
+  location,
+  minZoomWidth,
+  onHistoryPush,
+  paramEnd,
+  paramStart,
+  xAxisIndex,
+}: Props) {
+  const navigate = useNavigate();
+
   /**
    * Enable zoom immediately instead of having to toggle to zoom
    */
-  handleChartReady = chart => {
-    chart.dispatchAction({
-      type: 'takeGlobalCursor',
-      key: 'dataZoomSelect',
-      dataZoomSelectActive: true,
-    });
+  const handleChartReady = (_chart: ECharts) => {};
 
-    callIfFunction(this.props.onChartReady, chart);
+  /**
+   * Chart event when *any* rendering+animation finishes
+   */
+  const handleChartFinished = (_props: any, chart: any) => {
+    activateZoomAreaSelect(chart);
   };
 
-  handleDataZoom = (evt, chart) => {
+  const handleDataZoom = (_evt: any, chart: any) => {
     const model = chart.getModel();
-    const {xAxis} = model.option;
-    const axis = xAxis[0];
+    const {startValue, endValue} = model._payload.batch[0];
 
     // Both of these values should not be null, but we include it just in case.
     // These values are null when the user uses the toolbox included in ECharts
     // to navigate back through zoom history, but we hide it below.
-    if (axis.rangeStart !== null && axis.rangeEnd !== null) {
-      const {
-        buckets,
-        location,
-        paramStart,
-        paramEnd,
-        minZoomWidth,
-        onHistoryPush,
-      } = this.props;
-      const {start} = buckets[axis.rangeStart];
-      const {end} = buckets[axis.rangeEnd];
+    if (startValue !== null && endValue !== null) {
+      const {start} = buckets[startValue]!;
+      const {end} = buckets[endValue]!;
 
       if (minZoomWidth === undefined || end - start > minZoomWidth) {
         const target = {
@@ -111,51 +107,40 @@ class BarChartZoom extends React.Component<Props> {
         if (onHistoryPush) {
           onHistoryPush(start, end);
         } else {
-          browserHistory.push(target);
+          navigate(target);
         }
       } else {
         // Dispatch the restore action here to stop ECharts from zooming
         chart.dispatchAction({type: 'restore'});
-        callIfFunction(this.props.onDataZoomCancelled);
       }
     } else {
       // Dispatch the restore action here to stop ECharts from zooming
       chart.dispatchAction({type: 'restore'});
-      callIfFunction(this.props.onDataZoomCancelled);
     }
-
-    callIfFunction(this.props.onDataZoom, evt, chart);
   };
 
-  render() {
-    const {children, xAxisIndex} = this.props;
-
-    const renderProps = {
-      onChartReady: this.handleChartReady,
-      dataZoom: DataZoomInside({xAxisIndex}),
-      // We must include data zoom in the toolbox for the zoom to work,
-      // but we do not want to show the toolbox components.
-      toolBox: ToolBox(
-        {},
-        {
-          dataZoom: {
-            title: {
-              zoom: '',
-              back: '',
-            },
-            iconStyle: {
-              borderWidth: 0,
-              color: 'transparent',
-              opacity: 0,
-            },
+  return children({
+    onChartReady: handleChartReady,
+    onFinished: handleChartFinished,
+    dataZoom: dataZoomInside({xAxisIndex}),
+    // We must include data zoom in the toolbox for the zoom to work,
+    // but we do not want to show the toolbox components.
+    toolBox: getToolBox(
+      {},
+      {
+        dataZoom: {
+          title: {
+            zoom: '',
+            back: '',
           },
-        }
-      ),
-      onDataZoom: this.handleDataZoom,
-    };
-
-    return children(renderProps);
-  }
+          iconStyle: {
+            borderWidth: 0,
+            color: 'transparent',
+            opacity: 0,
+          },
+        },
+      }
+    ),
+    onDataZoom: handleDataZoom,
+  });
 }
-
-export default BarChartZoom;

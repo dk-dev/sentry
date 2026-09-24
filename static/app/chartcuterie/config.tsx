@@ -8,8 +8,21 @@
  * into the configuration file loaded by the service.
  */
 
-import {discoverCharts} from './discover';
-import {ChartcuterieConfig, ChartType, RenderConfig, RenderDescriptor} from './types';
+import {lightTheme} from 'sentry/utils/theme/theme';
+
+import {makeDashboardsWidgetCharts} from './dashboardsWidget';
+import {makeDiscoverCharts} from './discover';
+import {makeHeatmapCharts} from './heatmaps';
+import {makeMetricAlertCharts} from './metricAlert';
+import {makeMetricDetectorCharts} from './metricDetector';
+import {makePerformanceCharts} from './performance';
+import {makeTimeseriesCharts} from './timeseries';
+import type {
+  ChartcuterieConfig,
+  ChartType,
+  RenderConfig,
+  RenderDescriptor,
+} from './types';
 
 /**
  * All registered style descriptors
@@ -30,6 +43,12 @@ const config: ChartcuterieConfig = {
 const register = (renderDescriptor: RenderDescriptor<ChartType>) =>
   renderConfig.set(renderDescriptor.key, renderDescriptor);
 
-discoverCharts.forEach(register);
+makeDiscoverCharts(lightTheme).forEach(register);
+makeTimeseriesCharts(lightTheme).forEach(register);
+makeDashboardsWidgetCharts(lightTheme).forEach(register);
+makeMetricAlertCharts(lightTheme).forEach(register);
+makeMetricDetectorCharts(lightTheme).forEach(register);
+makePerformanceCharts(lightTheme).forEach(register);
+makeHeatmapCharts(lightTheme).forEach(register);
 
 export default config;

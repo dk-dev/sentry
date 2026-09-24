@@ -1,246 +1,276 @@
-import React, {useCallback, useEffect, useRef, useState} from 'react';
+import {useCallback, useEffect, useRef, useState} from 'react';
+import {css} from '@emotion/react';
 import styled from '@emotion/styled';
 
-import {addErrorMessage, addSuccessMessage} from 'app/actionCreators/indicator';
-import TextOverflow from 'app/components/textOverflow';
-import {IconEdit} from 'app/icons/iconEdit';
-import space from 'app/styles/space';
-import {defined} from 'app/utils';
-import useKeypress from 'app/utils/useKeyPress';
-import useOnClickOutside from 'app/utils/useOnClickOutside';
-import Input from 'app/views/settings/components/forms/controls/input';
-import Field from 'app/views/settings/components/forms/field';
+import {Input} from '@sentry/scraps/input';
+
+import {addErrorMessage} from 'sentry/actionCreators/indicator';
+import {TextOverflow} from 'sentry/components/textOverflow';
+import {IconEdit} from 'sentry/icons/iconEdit';
+import {useOnClickOutside} from 'sentry/utils/useOnClickOutside';
 
 type Props = {
-  value: string;
   onChange: (value: string) => void;
-  name?: string;
+  value: string;
+  /**
+   * When true, clearing the input and blurring cancels the edit and restores
+   * the previous value instead of showing an error toast.
+   */
+  allowEmpty?: boolean;
+  'aria-label'?: string;
+  autoSelect?: boolean;
+  className?: string;
   errorMessage?: React.ReactNode;
-  successMessage?: React.ReactNode;
   isDisabled?: boolean;
+  maxLength?: number;
+  /**
+   * The placeholder text to display when the input is empty.
+   */
+  placeholder?: string;
+  /**
+   * "compact" removes fixed heights so the component inherits font-size and
+   * line-height from its context (e.g. when rendered inside a breadcrumb row).
+   */
+  variant?: 'compact';
 };
 
-function EditableText({
+export function EditableText({
   value,
   onChange,
-  name,
   errorMessage,
-  successMessage,
+  maxLength,
   isDisabled = false,
+  autoSelect = false,
+  className,
+  'aria-label': ariaLabel,
+  placeholder,
+  allowEmpty = false,
+  variant,
 }: Props) {
   const [isEditing, setIsEditing] = useState(false);
-  const [inputValue, setInputValue] = useState(value);
+  // Immediately reflect the last committed value while we wait for the parent prop update
+  const [optimisticValue, setOptimisticValue] = useState<string | null>(null);
+  // Current keystrokes while editing; cleared whenever editing ends
+  const [draftValue, setDraftValue] = useState<string | null>(null);
 
-  const isEmpty = !inputValue.trim();
+  const currentValue = optimisticValue ?? value;
+  const currentDraft = draftValue ?? currentValue;
+  const isDraftEmpty = !currentDraft.trim();
 
-  const inputWrapper = useRef<HTMLDivElement>(null);
-  const contentRef = useRef<HTMLDivElement>(null);
+  const innerWrapperRef = useRef<HTMLDivElement>(null);
+  const labelRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+  const previousValueRef = useRef(value);
 
-  const enter = useKeypress('Enter');
-  const esc = useKeypress('Escape');
-
-  // check to see if the user clicked outside of this component
-  useOnClickOutside(inputWrapper, () => {
-    if (isEditing) {
-      if (isEmpty) {
-        displayStatusMessage('error');
+  const showStatusMessage = useCallback(
+    (status: 'error' | 'success') => {
+      if (status === 'error') {
+        if (errorMessage) {
+          addErrorMessage(errorMessage);
+        }
         return;
       }
+    },
+    [errorMessage]
+  );
 
-      if (inputValue !== value) {
-        onChange(inputValue);
-        displayStatusMessage('success');
-      }
+  const exitEditing = useCallback(() => {
+    setIsEditing(false);
+  }, []);
 
-      setIsEditing(false);
+  const handleCancel = useCallback(() => {
+    setDraftValue(null);
+    exitEditing();
+  }, [exitEditing]);
+
+  const handleCommit = useCallback(() => {
+    if (isDraftEmpty) {
+      showStatusMessage('error');
+      return false;
     }
-  });
 
-  const onEnter = useCallback(() => {
-    if (enter) {
-      if (isEmpty) {
-        displayStatusMessage('error');
-        return;
-      }
-
-      if (inputValue !== value) {
-        onChange(inputValue);
-        displayStatusMessage('success');
-      }
-
-      setIsEditing(false);
+    if (currentDraft !== currentValue) {
+      onChange(currentDraft);
+      showStatusMessage('success');
     }
-  }, [enter, inputValue, onChange]);
 
-  const onEsc = useCallback(() => {
-    if (esc) {
-      setInputValue(value);
-      setIsEditing(false);
+    exitEditing();
+    setOptimisticValue(currentDraft);
+    setDraftValue(null);
+    return true;
+  }, [
+    currentDraft,
+    currentValue,
+    exitEditing,
+    isDraftEmpty,
+    onChange,
+    showStatusMessage,
+  ]);
+
+  const handleEmptyBlur = useCallback(() => {
+    if (allowEmpty) {
+      handleCancel();
+    } else {
+      showStatusMessage('error');
     }
-  }, [esc, value]);
+  }, [allowEmpty, handleCancel, showStatusMessage]);
 
+  // Close editing if the field becomes disabled (e.g. form revalidation)
   useEffect(() => {
-    if (value !== inputValue) {
-      setInputValue(value);
+    if (isDisabled) {
+      // oxlint-disable-next-line react/set-state-in-effect
+      handleCancel();
     }
-  }, [value]);
+  }, [handleCancel, isDisabled]);
 
-  // focus the cursor in the input field on edit start
+  // Reset our optimistic/draft state whenever the controlled value changes externally
   useEffect(() => {
-    if (isEditing) {
-      const inputElement = inputRef.current;
-      if (defined(inputElement)) {
-        inputElement.focus();
-      }
-    }
-  }, [isEditing]);
-
-  useEffect(() => {
-    if (isEditing) {
-      // if Enter is pressed, save the text and close the editor
-      onEnter();
-      // if Escape is pressed, revert the text and close the editor
-      onEsc();
-    }
-  }, [onEnter, onEsc, isEditing]); // watch the Enter and Escape key presses
-
-  function displayStatusMessage(status: 'error' | 'success') {
-    if (status === 'error') {
-      if (errorMessage) {
-        addErrorMessage(errorMessage);
-      }
+    if (previousValueRef.current === value) {
       return;
     }
 
-    if (successMessage) {
-      addSuccessMessage(successMessage);
+    previousValueRef.current = value;
+    setOptimisticValue(null);
+
+    if (isEditing) {
+      // oxlint-disable-next-line react/set-state-in-effect
+      setDraftValue(null);
+      exitEditing();
     }
-  }
+  }, [exitEditing, isEditing, value]);
 
-  function handleInputChange(event: React.ChangeEvent<HTMLInputElement>) {
-    setInputValue(event.target.value);
-  }
+  // Focus the input whenever we enter editing mode
+  useEffect(() => {
+    if (isEditing) {
+      inputRef.current?.focus();
+    }
+  }, [isEditing]);
 
-  function handleContentClick() {
+  const handleClickOutside = useCallback(() => {
+    if (!isEditing) {
+      return;
+    }
+
+    if (isDraftEmpty) {
+      handleEmptyBlur();
+      return;
+    }
+
+    handleCommit();
+  }, [handleCommit, handleEmptyBlur, isDraftEmpty, isEditing]);
+
+  useOnClickOutside(innerWrapperRef, handleClickOutside);
+
+  const handleInputChange = useCallback((event: React.ChangeEvent<HTMLInputElement>) => {
+    setDraftValue(event.target.value);
+  }, []);
+
+  const handleEditClick = useCallback(() => {
+    if (isDisabled) {
+      return;
+    }
+
+    setDraftValue(currentValue);
     setIsEditing(true);
-  }
+  }, [currentValue, isDisabled]);
+
+  const handleKeyDown = useCallback(
+    (event: React.KeyboardEvent<HTMLInputElement>) => {
+      if (event.key === 'Enter') {
+        event.preventDefault();
+        handleCommit();
+      } else if (event.key === 'Escape') {
+        event.preventDefault();
+        handleCancel();
+      }
+    },
+    [handleCancel, handleCommit]
+  );
+
+  const isCompact = variant === 'compact';
 
   return (
-    <Wrapper isDisabled={isDisabled}>
+    <Wrapper isDisabled={isDisabled} isEditing={isEditing} className={className}>
       {isEditing ? (
         <InputWrapper
-          ref={inputWrapper}
-          isEmpty={isEmpty}
+          ref={innerWrapperRef}
+          isEmpty={isDraftEmpty}
+          isCompact={isCompact}
           data-test-id="editable-text-input"
         >
-          <StyledField inline={false} flexibleControlStateSize stacked>
-            <StyledInput
-              name={name}
-              ref={inputRef}
-              value={inputValue}
-              onChange={handleInputChange}
-            />
-          </StyledField>
-          <InputLabel>{inputValue}</InputLabel>
+          <StyledInput
+            aria-label={ariaLabel}
+            ref={inputRef}
+            value={currentDraft}
+            onChange={handleInputChange}
+            onKeyDown={handleKeyDown}
+            onFocus={event => autoSelect && event.target.select()}
+            maxLength={maxLength}
+            placeholder={placeholder}
+            isCompact={isCompact}
+          />
+          <InputLabel>{currentDraft}</InputLabel>
         </InputWrapper>
       ) : (
-        <Content
-          onClick={isDisabled ? undefined : handleContentClick}
-          ref={contentRef}
+        <Label
+          onClick={isDisabled ? undefined : handleEditClick}
+          ref={labelRef}
+          isDisabled={isDisabled}
           data-test-id="editable-text-label"
         >
-          <Label>
-            <InnerLabel>{inputValue}</InnerLabel>
-          </Label>
-          <StyledIconEdit />
-        </Content>
+          <InnerLabel isCompact={isCompact}>{currentValue || placeholder}</InnerLabel>
+          {!isDisabled && <IconEdit />}
+        </Label>
       )}
     </Wrapper>
   );
 }
 
-export default EditableText;
-
-const Content = styled('div')`
-  height: 40px;
-  position: relative;
-  max-width: calc(100% - 22px);
-  padding-right: 22px;
+const Label = styled('div')<{isDisabled: boolean}>`
+  display: grid;
+  grid-auto-flow: column;
+  align-items: center;
+  gap: ${p => p.theme.space.md};
+  cursor: ${p => (p.isDisabled ? 'default' : 'pointer')};
 `;
 
-const Label = styled('div')`
-  display: inline-block;
-  border: 1px solid transparent;
-  border-radius: ${p => p.theme.borderRadius};
-  transition: border 150ms;
-  text-align: left;
-  padding: 0 10px;
-  height: 40px;
-  max-width: 100%;
-`;
-
-const InnerLabel = styled(TextOverflow)`
-  border-bottom: 1px dotted ${p => p.theme.gray200};
-  transition: border 150ms;
-  height: 39px;
-  line-height: 39px;
-`;
-
-const StyledIconEdit = styled(IconEdit)`
-  opacity: 0;
-  transition: opacity 150ms;
-  margin-left: ${space(0.75)};
-  height: 40px;
-  position: absolute;
-  right: 0;
-  cursor: pointer;
-`;
-
-const Wrapper = styled('div')<{isDisabled: boolean}>`
-  display: flex;
-  justify-content: flex-start;
-  height: 40px;
+const InnerLabel = styled(TextOverflow)<{isCompact: boolean}>`
+  border-top: 1px solid transparent;
+  border-bottom: ${p =>
+    p.isCompact ? 'none' : `1px dotted ${p.theme.tokens.border.primary}`};
   ${p =>
-    p.isDisabled
-      ? `
-          ${StyledIconEdit} {
-            cursor: default;
-          }
-
-          ${InnerLabel} {
-            border-bottom-color: transparent;
-          }
-        `
-      : `
-          :hover {
-            ${StyledIconEdit} {
-              opacity: 1;
-            }
-            ${Label} {
-              border-color: ${p.theme.gray300};
-            }
-            ${InnerLabel} {
-              border-bottom-color: transparent;
-            }
-          }
-        `}
+    !p.isCompact &&
+    css`
+      line-height: 38px;
+    `}
 `;
 
-const InputWrapper = styled('div')<{isEmpty: boolean}>`
-  position: relative;
-  max-width: 100%;
-  min-width: ${p => (p.isEmpty ? '100px' : '50px')};
+const InputWrapper = styled('div')<{isCompact: boolean; isEmpty: boolean}>`
+  display: inline-block;
+  background: ${p => p.theme.tokens.background.tertiary};
+  border-radius: ${p => p.theme.radius.md};
+  margin: -${p => p.theme.space.xs} -${p => p.theme.space.md};
+  padding: ${p => p.theme.space.xs} ${p => p.theme.space.md};
+  max-width: calc(100% + ${p => p.theme.space.xl});
+  /* Mirror InnerLabel's transparent top border so the baseline stays put on edit. */
+  border-top: ${p => (p.isCompact ? '1px solid transparent' : 'none')};
 `;
 
-const StyledField = styled(Field)`
-  width: 100%;
+const StyledInput = styled(Input)<{isCompact: boolean}>`
+  border: none !important;
+  background: transparent;
+  height: auto;
+  min-height: ${p => (p.isCompact ? 'auto' : '40px')};
   padding: 0;
-  position: absolute;
-  right: 0;
-`;
-
-const StyledInput = styled(Input)`
+  font-size: inherit;
+  ${p =>
+    p.isCompact &&
+    css`
+      /* Match TextOverflow's line-height so the baseline doesn't shift on edit. */
+      line-height: 1.2;
+      font-weight: inherit;
+      border-radius: 0 !important;
+    `}
   &,
   &:focus,
   &:active,
@@ -250,10 +280,20 @@ const StyledInput = styled(Input)`
 `;
 
 const InputLabel = styled('div')`
-  width: auto;
+  height: 0;
   opacity: 0;
-  padding: ${space(1.5)};
-  height: 40px;
-  position: relative;
-  z-index: -1;
+  white-space: pre;
+  padding: 0 ${p => p.theme.space.md};
+`;
+
+const Wrapper = styled('div')<{isDisabled: boolean; isEditing: boolean}>`
+  display: flex;
+
+  ${p =>
+    p.isDisabled &&
+    css`
+      ${InnerLabel} {
+        border-bottom-color: transparent;
+      }
+    `}
 `;

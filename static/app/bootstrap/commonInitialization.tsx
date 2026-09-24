@@ -1,19 +1,20 @@
-import 'focus-visible';
+import {MotionGlobalConfig} from 'framer-motion';
 
-import {NODE_ENV} from 'app/constants';
-import ConfigStore from 'app/stores/configStore';
-import {Config} from 'app/types';
-import {setupColorScheme} from 'app/utils/matchMedia';
+import {IS_ACCEPTANCE_TEST, NODE_ENV} from 'sentry/constants';
+import {ConfigStore} from 'sentry/stores/configStore';
+import type {Config} from 'sentry/types/system';
+import {installTrustedTypesPolicies} from 'sentry/utils/trustedTypes';
+
+if (IS_ACCEPTANCE_TEST || NODE_ENV === 'test') {
+  MotionGlobalConfig.skipAnimations = true;
+}
 
 export function commonInitialization(config: Config) {
+  installTrustedTypesPolicies();
+
   if (NODE_ENV === 'development') {
-    import(
-      /* webpackChunkName: "SilenceReactUnsafeWarnings" */ /* webpackMode: "eager" */ 'app/utils/silence-react-unsafe-warnings'
-    );
+    import(/* webpackMode: "eager" */ 'sentry/utils/silenceReactUnsafeWarnings');
   }
 
   ConfigStore.loadInitialData(config);
-
-  // setup darkmode + favicon
-  setupColorScheme();
 }

@@ -1,5 +1,5 @@
-import getCookie from 'app/utils/getCookie';
+import Cookies from 'js-cookie';
 
-export default function getCsrfToken() {
-  return getCookie(window.csrfCookieName ?? 'sc') ?? '';
+export function getCsrfToken() {
+  return Cookies.get(window.csrfCookieName ?? 'sc') ?? '';
 }

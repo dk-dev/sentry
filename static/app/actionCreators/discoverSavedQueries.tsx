@@ -1,26 +1,8 @@
-import {addErrorMessage} from 'app/actionCreators/indicator';
-import {Client} from 'app/api';
-import {t} from 'app/locale';
-import {NewQuery, SavedQuery} from 'app/types';
-
-export function fetchSavedQueries(
-  api: Client,
-  orgId: string,
-  query: string = ''
-): Promise<SavedQuery[]> {
-  const promise: Promise<SavedQuery[]> = api.requestPromise(
-    `/organizations/${orgId}/discover/saved/`,
-    {
-      method: 'GET',
-      query: {query: `version:2 ${query}`.trim()},
-    }
-  );
-
-  promise.catch(() => {
-    addErrorMessage(t('Unable to load saved queries'));
-  });
-  return promise;
-}
+import {addErrorMessage} from 'sentry/actionCreators/indicator';
+import {Client} from 'sentry/api';
+import {t} from 'sentry/locale';
+import type {NewQuery, SavedQuery} from 'sentry/types/organization';
+import {getApiUrl} from 'sentry/utils/api/getApiUrl';
 
 export function fetchSavedQuery(
   api: Client,
@@ -28,7 +10,9 @@ export function fetchSavedQuery(
   queryId: string
 ): Promise<SavedQuery> {
   const promise: Promise<SavedQuery> = api.requestPromise(
-    `/organizations/${orgId}/discover/saved/${queryId}/`,
+    getApiUrl('/organizations/$organizationIdOrSlug/discover/saved/$queryId/', {
+      path: {organizationIdOrSlug: orgId, queryId},
+    }),
     {
       method: 'GET',
     }
@@ -46,7 +30,9 @@ export function createSavedQuery(
   query: NewQuery
 ): Promise<SavedQuery> {
   const promise: Promise<SavedQuery> = api.requestPromise(
-    `/organizations/${orgId}/discover/saved/`,
+    getApiUrl('/organizations/$organizationIdOrSlug/discover/saved/', {
+      path: {organizationIdOrSlug: orgId},
+    }),
     {
       method: 'POST',
       data: query,
@@ -65,7 +51,9 @@ export function updateSavedQuery(
   query: NewQuery
 ): Promise<SavedQuery> {
   const promise: Promise<SavedQuery> = api.requestPromise(
-    `/organizations/${orgId}/discover/saved/${query.id}/`,
+    getApiUrl('/organizations/$organizationIdOrSlug/discover/saved/$queryId/', {
+      path: {organizationIdOrSlug: orgId, queryId: String(query.id)},
+    }),
     {
       method: 'PUT',
       data: query,
@@ -78,13 +66,33 @@ export function updateSavedQuery(
   return promise;
 }
 
+export function updateSavedQueryVisit(
+  orgId: string,
+  queryId: string | string[]
+): Promise<void> {
+  // Create a new client so the request is not cancelled
+  const api = new Client();
+  const promise = api.requestPromise(
+    getApiUrl('/organizations/$organizationIdOrSlug/discover/saved/$queryId/visit/', {
+      path: {organizationIdOrSlug: orgId, queryId: String(queryId)},
+    }),
+    {
+      method: 'POST',
+    }
+  );
+
+  return promise;
+}
+
 export function deleteSavedQuery(
   api: Client,
   orgId: string,
   queryId: string
 ): Promise<void> {
   const promise: Promise<void> = api.requestPromise(
-    `/organizations/${orgId}/discover/saved/${queryId}/`,
+    getApiUrl('/organizations/$organizationIdOrSlug/discover/saved/$queryId/', {
+      path: {organizationIdOrSlug: orgId, queryId},
+    }),
     {method: 'DELETE'}
   );
 

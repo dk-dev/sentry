@@ -1,7 +1,5 @@
 ---
-created: '2021-03-29T22:02:40.708868Z'
-creator: sentry
-source: tests/sentry/grouping/test_categorization.py
+source: tests/sentry/grouping/test_categorization.py::test_categorization
 ---
 
 
@@ -12,9 +10,9 @@ NullPointerException:_ (thread_id:_, crashed:_)
                     java.lang.reflect.Method  invoke category=indirection
                     java.lang.reflect.Method  invokeNative category=indirection
                   android.app.ActivityThread  main category=threadbase
-                           android.os.Looper  loop category=system
-                          android.os.Handler  dispatchMessage category=internals
-                          android.os.Handler  handleCallback category=internals
+                           android.os.Looper  loop category=threadbase
+                          android.os.Handler  dispatchMessage category=threadbase
+                          android.os.Handler  handleCallback category=threadbase
               android.view.View$PerformClick  run category=indirection
                            android.view.View  performClick category=ui
   com.lenovo.lsf.lenovoid.ui.KeyLoginActivit  onClick category=internals

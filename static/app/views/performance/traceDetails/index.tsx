@@ -1,161 +1,370 @@
-import React from 'react';
-import {Params} from 'react-router/lib/Router';
-import styled from '@emotion/styled';
-import {Location} from 'history';
+import {Fragment, useMemo} from 'react';
+import * as Sentry from '@sentry/react';
 
-import {Client} from 'app/api';
-import LightWeightNoProjectMessage from 'app/components/lightWeightNoProjectMessage';
-import {getParams} from 'app/components/organizations/globalSelectionHeader/getParams';
-import SentryDocumentTitle from 'app/components/sentryDocumentTitle';
-import {ALL_ACCESS_PROJECTS} from 'app/constants/globalSelectionHeader';
-import {t} from 'app/locale';
-import {PageContent} from 'app/styles/organization';
-import {Organization} from 'app/types';
-import EventView from 'app/utils/discover/eventView';
-import {TraceFullDetailedQuery} from 'app/utils/performance/quickTrace/traceFullQuery';
-import TraceMetaQuery from 'app/utils/performance/quickTrace/traceMetaQuery';
-import {TraceFullDetailed, TraceMeta} from 'app/utils/performance/quickTrace/types';
-import {decodeScalar} from 'app/utils/queryString';
-import withApi from 'app/utils/withApi';
-import withOrganization from 'app/utils/withOrganization';
+import {Alert} from '@sentry/scraps/alert';
+import {Button} from '@sentry/scraps/button';
+import {Stack, type FlexProps} from '@sentry/scraps/layout';
 
-import TraceDetailsContent from './content';
+import {NoProjectMessage} from 'sentry/components/noProjectMessage';
+import {SentryDocumentTitle} from 'sentry/components/sentryDocumentTitle';
+import {IconClose} from 'sentry/icons';
+import {t, tct} from 'sentry/locale';
+import type {Organization} from 'sentry/types/organization';
+import {useDismissAlert} from 'sentry/utils/useDismissAlert';
+import {useFeedbackForm} from 'sentry/utils/useFeedbackForm';
+import {useHasProjectAccess} from 'sentry/utils/useHasProjectAccess';
+import {useOrganization} from 'sentry/utils/useOrganization';
+import {useParams} from 'sentry/utils/useParams';
+import {ViewportConstrainedPage} from 'sentry/views/explore/components/viewportConstrainedPage';
+import {isLogsEnabled} from 'sentry/views/explore/logs/isLogsEnabled';
+import {canUseMetricsUI} from 'sentry/views/explore/metrics/metricsFlags';
+import {TraceAiTab} from 'sentry/views/performance/traceDetails/traceDrawer/tabs/traceAiTab';
+import {TraceProfiles} from 'sentry/views/performance/traceDetails/traceDrawer/tabs/traceProfiles';
+import {
+  TraceViewMetricsProviderWrapper,
+  TraceViewMetricsSection,
+} from 'sentry/views/performance/traceDetails/traceMetrics';
+import type {TraceTree} from 'sentry/views/performance/traceDetails/traceModels/traceTree';
+import {
+  TraceViewLogsPageDataProvider,
+  TraceViewLogsQueryParamsProvider,
+  TraceViewLogsSection,
+} from 'sentry/views/performance/traceDetails/traceOurlogs';
+import {TraceTabsAndVitals} from 'sentry/views/performance/traceDetails/traceTabsAndVitals';
+import {PartialTraceDataWarning} from 'sentry/views/performance/traceDetails/traceTypeWarnings/partialTraceDataWarning';
+import {TraceWaterfall} from 'sentry/views/performance/traceDetails/traceWaterfall';
+import {
+  TraceLayoutTabKeys,
+  useTraceLayoutTabs,
+} from 'sentry/views/performance/traceDetails/useTraceLayoutTabs';
+import {useLLMContext} from 'sentry/views/seerExplorer/contexts/llmContext';
+import {registerLLMContext} from 'sentry/views/seerExplorer/contexts/registerLLMContext';
 
-type Props = {
-  api: Client;
-  location: Location;
-  organization: Organization;
-  params: Params;
-};
+import {useTrace} from './traceApi/useTrace';
+import {useTraceMeta} from './traceApi/useTraceMeta';
+import {useTraceRootEvent} from './traceApi/useTraceRootEvent';
+import {useTraceTree} from './traceApi/useTraceTree';
+import {
+  DEFAULT_TRACE_VIEW_PREFERENCES,
+  getInitialTracePreferences,
+  TRACE_WATERFALL_TIME_COMPRESSION_FEATURE,
+} from './traceState/tracePreferences';
+import {TraceStateProvider} from './traceState/traceStateProvider';
+import {ErrorsOnlyWarnings} from './traceTypeWarnings/errorsOnlyWarnings';
+import {TraceMetaDataHeader} from './traceHeader';
+import {useTraceEventView} from './useTraceEventView';
+import {useTraceOverviewData} from './useTraceOverviewData';
+import {useTraceQueryParams} from './useTraceQueryParams';
+import {useTraceStateAnalytics} from './useTraceStateAnalytics';
 
-class TraceSummary extends React.Component<Props> {
-  getDocumentTitle(): string {
-    return [t('Trace Details'), t('Performance')].join(' - ');
-  }
-
-  getTraceSlug(): string {
-    const {traceSlug} = this.props.params;
-    return typeof traceSlug === 'string' ? traceSlug.trim() : '';
-  }
-
-  getDateSelection() {
-    const {location} = this.props;
-    const queryParams = getParams(location.query, {
-      allowAbsolutePageDatetime: true,
+function decodeTraceSlug(maybeSlug: string | undefined): string {
+  if (!maybeSlug || maybeSlug === 'null' || maybeSlug === 'undefined') {
+    Sentry.withScope(scope => {
+      scope.setFingerprint(['trace-null-slug']);
+      Sentry.captureMessage('Trace slug is empty');
     });
-    const start = decodeScalar(queryParams.start);
-    const end = decodeScalar(queryParams.end);
-    const statsPeriod = decodeScalar(queryParams.statsPeriod);
-    return {start, end, statsPeriod};
+
+    return '';
   }
 
-  getTraceEventView() {
-    const traceSlug = this.getTraceSlug();
-    const {start, end, statsPeriod} = this.getDateSelection();
-
-    return EventView.fromSavedQuery({
-      id: undefined,
-      name: `Events with Trace ID ${traceSlug}`,
-      fields: ['title', 'event.type', 'project', 'timestamp'],
-      orderby: '-timestamp',
-      query: `trace:${traceSlug}`,
-      projects: [ALL_ACCESS_PROJECTS],
-      version: 2,
-      start,
-      end,
-      range: statsPeriod,
-    });
-  }
-
-  renderContent() {
-    const {location, organization, params} = this.props;
-    const traceSlug = this.getTraceSlug();
-    const {start, end, statsPeriod} = this.getDateSelection();
-    const dateSelected = Boolean(statsPeriod || (start && end));
-
-    const content = ({
-      isLoading,
-      error,
-      traces,
-      meta,
-    }: {
-      isLoading: boolean;
-      error: string | null;
-      traces: TraceFullDetailed[] | null;
-      meta: TraceMeta | null;
-    }) => (
-      <TraceDetailsContent
-        location={location}
-        organization={organization}
-        params={params}
-        traceSlug={traceSlug}
-        traceEventView={this.getTraceEventView()}
-        dateSelected={dateSelected}
-        isLoading={isLoading}
-        error={error}
-        traces={traces}
-        meta={meta}
-      />
-    );
-
-    if (!dateSelected) {
-      return content({
-        isLoading: false,
-        error: 'date selection not specified',
-        traces: null,
-        meta: null,
-      });
-    }
-
-    return (
-      <TraceFullDetailedQuery
-        location={location}
-        orgSlug={organization.slug}
-        traceId={traceSlug}
-        start={start}
-        end={end}
-        statsPeriod={statsPeriod}
-      >
-        {traceResults => (
-          <TraceMetaQuery
-            location={location}
-            orgSlug={organization.slug}
-            traceId={traceSlug}
-            start={start}
-            end={end}
-            statsPeriod={statsPeriod}
-          >
-            {metaResults =>
-              content({
-                isLoading: traceResults.isLoading || metaResults.isLoading,
-                error: traceResults.error || metaResults.error,
-                traces: traceResults.traces,
-                meta: metaResults.meta,
-              })
-            }
-          </TraceMetaQuery>
-        )}
-      </TraceFullDetailedQuery>
-    );
-  }
-
-  render() {
-    const {organization} = this.props;
-
-    return (
-      <SentryDocumentTitle title={this.getDocumentTitle()} orgSlug={organization.slug}>
-        <StyledPageContent>
-          <LightWeightNoProjectMessage organization={organization}>
-            {this.renderContent()}
-          </LightWeightNoProjectMessage>
-        </StyledPageContent>
-      </SentryDocumentTitle>
-    );
-  }
+  return maybeSlug.trim();
 }
 
-export default withOrganization(withApi(TraceSummary));
+const TRACE_VIEW_PREFERENCES_KEY = 'trace-waterfall-preferences';
 
-const StyledPageContent = styled(PageContent)`
-  padding: 0;
-`;
+export default function TraceView() {
+  const organization = useOrganization();
+  const params = useParams<{traceSlug?: string}>();
+  const traceSlug = useMemo(() => decodeTraceSlug(params.traceSlug), [params.traceSlug]);
+  const enableCompressedTimeline = organization.features.includes(
+    TRACE_WATERFALL_TIME_COMPRESSION_FEATURE
+  );
+
+  const preferences = useMemo(
+    () =>
+      getInitialTracePreferences(
+        TRACE_VIEW_PREFERENCES_KEY,
+        DEFAULT_TRACE_VIEW_PREFERENCES,
+        'trace_view',
+        {enableCompressedTimeline}
+      ),
+    [enableCompressedTimeline]
+  );
+
+  return (
+    <TraceViewLogsQueryParamsProvider traceSlug={traceSlug}>
+      <TraceStateProvider
+        initialPreferences={preferences}
+        preferencesStorageKey={TRACE_VIEW_PREFERENCES_KEY}
+      >
+        <TraceViewImpl traceSlug={traceSlug} />
+      </TraceStateProvider>
+    </TraceViewLogsQueryParamsProvider>
+  );
+}
+
+function TraceViewImplInner({traceSlug}: {traceSlug: string}) {
+  const organization = useOrganization();
+  const logsEnabled = isLogsEnabled(organization);
+  const metricsEnabled = canUseMetricsUI(organization);
+  const queryParams = useTraceQueryParams();
+  const traceEventView = useTraceEventView(traceSlug, queryParams);
+  const meta = useTraceMeta({traceSlug, timestamp: queryParams.timestamp});
+
+  const trace = useTrace({
+    traceSlug,
+    timestamp: queryParams.timestamp,
+    additionalAttributes: [
+      'thread.id',
+      'tags[browser.performance.time_origin,number]',
+      'tags[performance.timeOrigin,number]',
+      'gen_ai.operation.type',
+      'http.response.status_code',
+      'span.status',
+    ],
+  });
+  const tree = useTraceTree({trace, replay: null});
+  const overview = useTraceOverviewData({
+    logsEnabled,
+    meta: meta.data,
+    metricsEnabled,
+    queryParams,
+    traceSlug,
+    tree,
+  });
+  useTraceStateAnalytics({
+    trace,
+    meta,
+    organization,
+    traceTreeSource: 'trace_view',
+    tree,
+  });
+
+  const rootEventResults = useTraceRootEvent({
+    tree,
+    logs: overview.logs.representative,
+    logsRoutingHint: overview.logs.routingHint,
+    timestamp: queryParams.timestamp,
+    traceId: traceSlug,
+  });
+
+  const tabsConfig = useTraceLayoutTabs({
+    isLoading:
+      meta.status === 'pending' || tree.type === 'loading' || overview.isTabLoading,
+    tree,
+    meta: meta.data,
+    logsEnabled,
+    metricsEnabled,
+    overview,
+  });
+  const {currentTab} = tabsConfig;
+  const isResolvingEmptyTraceTab = tree.type === 'empty' && tabsConfig.isLoading;
+
+  const traceNode = tree.root.children[0];
+  const traceErrors = useMemo(() => {
+    if (!traceNode) {
+      return [];
+    }
+
+    const errorsByEventId = new Map<string, TraceTree.TraceErrorIssue>();
+    for (const error of traceNode.errors) {
+      errorsByEventId.set(error.event_id, error);
+    }
+
+    return Array.from(errorsByEventId.values());
+  }, [traceNode]);
+
+  const traceStartMs = traceNode?.space[0] ?? 0;
+  const traceStartSeconds = traceStartMs > 0 ? traceStartMs / 1000 : 0;
+
+  // Push trace metadata into the LLM context tree for Seer Explorer.
+  useLLMContext({
+    contextHint:
+      'Sentry trace detail page. services lists the projects (services) involved in this trace. ' +
+      'You can get the trace waterfall or focus on a specific span, get event details or issue aggregate stats, ' +
+      'get log attributes or metric attributes by trace ID, view a profile flamegraph, ' +
+      'and search live telemetry for related spans/errors/logs/metrics.',
+    traceId: traceSlug,
+    activeTab: currentTab,
+    durationMs: tree.root.children[0]?.space?.[1],
+    nodeCount: tree.list.length,
+    services: Array.from(tree.projects.values()).map(p => p.slug),
+    errors: meta.data?.errorsCount,
+    performanceIssues: meta.data?.performanceIssuesCount,
+    spanCount: meta.data?.spansCount,
+    webVitals: tree.indicators.map(i => ({
+      type: i.type,
+      label: i.label,
+      value: i.measurement.value,
+      unit: i.measurement.unit,
+      poor: i.poor,
+    })),
+  });
+
+  const content = (
+    <ViewportConstrainedPage>
+      <TraceMetaDataHeader
+        rootEventResults={rootEventResults}
+        tree={tree}
+        metaResults={meta}
+        organization={organization}
+        overview={overview}
+        traceSlug={traceSlug}
+      />
+      <TraceInnerLayout>
+        <TraceWaterfallVersionBanner />
+        <TraceTabsAndVitals
+          tabsConfig={tabsConfig}
+          rootEventResults={rootEventResults}
+          tree={tree}
+        />
+        {isResolvingEmptyTraceTab ? null : currentTab === TraceLayoutTabKeys.WATERFALL ? (
+          <Fragment>
+            <ErrorsOnlyWarnings
+              tree={tree}
+              traceSlug={traceSlug}
+              organization={organization}
+            />
+            <PartialTraceDataWarning
+              timestamp={queryParams.timestamp}
+              logs={overview.logs.representative}
+              tree={tree}
+            />
+            <TraceWaterfall
+              tree={tree}
+              trace={trace}
+              meta={meta}
+              replay={null}
+              source="performance"
+              rootEventResults={rootEventResults}
+              traceSlug={traceSlug}
+              traceEventView={traceEventView}
+              organization={organization}
+              hideIfNoData={false}
+            />
+          </Fragment>
+        ) : currentTab === TraceLayoutTabKeys.PROFILES ? (
+          <TraceProfiles tree={tree} />
+        ) : currentTab === TraceLayoutTabKeys.LOGS ? (
+          <TraceViewLogsPageDataProvider>
+            <TraceViewLogsSection
+              errors={traceErrors}
+              fallbackTimestampSeconds={traceStartSeconds}
+            />
+          </TraceViewLogsPageDataProvider>
+        ) : currentTab === TraceLayoutTabKeys.METRICS ? (
+          <TraceViewMetricsProviderWrapper traceSlug={traceSlug}>
+            <TraceViewMetricsSection />
+          </TraceViewMetricsProviderWrapper>
+        ) : currentTab === TraceLayoutTabKeys.AI_SPANS ? (
+          <TraceAiTab traceSlug={traceSlug} />
+        ) : null}
+      </TraceInnerLayout>
+    </ViewportConstrainedPage>
+  );
+
+  const isInitialTraceLoading =
+    Boolean(traceSlug) &&
+    (meta.status === 'pending' || trace.status === 'pending' || tree.type === 'loading');
+
+  return (
+    <SentryDocumentTitle
+      title={`${t('Trace Details')} - ${traceSlug}`}
+      orgSlug={organization.slug}
+    >
+      <TraceProjectGuard
+        organization={organization}
+        suppressMessage={isInitialTraceLoading}
+      >
+        {content}
+      </TraceProjectGuard>
+    </SentryDocumentTitle>
+  );
+}
+
+const TraceViewImpl = registerLLMContext('trace', TraceViewImplInner);
+
+function TraceProjectGuard({
+  children,
+  organization,
+  suppressMessage,
+}: {
+  children: React.ReactNode;
+  organization: Organization;
+  suppressMessage: boolean;
+}) {
+  const {hasProjectAccess, projectsLoaded} = useHasProjectAccess();
+
+  if (suppressMessage || hasProjectAccess || !projectsLoaded) {
+    return <Fragment>{children}</Fragment>;
+  }
+
+  return <NoProjectMessage organization={organization}>{children}</NoProjectMessage>;
+}
+
+function TraceWaterfallVersionBanner() {
+  const organization = useOrganization();
+  const openForm = useFeedbackForm();
+  const {isDismissed, dismiss} = useDismissAlert({
+    key: 'trace-waterfall-version-message',
+  });
+
+  if (
+    !organization.features.includes('trace-waterfall-version-message') ||
+    isDismissed ||
+    !openForm
+  ) {
+    return null;
+  }
+
+  return (
+    <Alert
+      variant="info"
+      trailingItems={
+        <Alert.Button
+          variant="transparent"
+          icon={<IconClose size="sm" />}
+          onClick={dismiss}
+          aria-label={t('Dismiss')}
+        />
+      }
+    >
+      {tct(
+        "You're seeing a new version of the trace waterfall that shows the full distributed trace. We'd love your [feedback].",
+        {
+          feedback: (
+            <Button
+              variant="link"
+              onClick={() =>
+                openForm({
+                  tags: {
+                    'feedback.source': 'trace-waterfall-version-message',
+                    'feedback.owner': 'performance',
+                  },
+                })
+              }
+            >
+              {t('feedback')}
+            </Button>
+          ),
+        }
+      )}
+    </Alert>
+  );
+}
+
+function TraceInnerLayout(props: FlexProps) {
+  return (
+    <Stack
+      {...props}
+      background="primary"
+      gap="md"
+      paddingLeft="xl"
+      paddingRight="xl"
+      paddingTop="lg"
+      paddingBottom="lg"
+      flex="1"
+      overflowY="auto"
+    />
+  );
+}

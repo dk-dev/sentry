@@ -1,32 +1,22 @@
-import React from 'react';
 import styled from '@emotion/styled';
 
-import space from 'app/styles/space';
+import {CodeBlock} from '@sentry/scraps/code';
 
 type Props = {
   command: string;
 };
 
-const Terminal = ({command}: Props) => (
-  <Wrapper>
-    <Prompt>{'\u0024'}</Prompt>
-    {command}
-  </Wrapper>
-);
+export function Terminal({command}: Props) {
+  return <StyledCodeSnippet language="bash">{command}</StyledCodeSnippet>;
+}
 
-export default Terminal;
-
-const Wrapper = styled('div')`
-  background: ${p => p.theme.gray500};
-  padding: ${space(1.5)} ${space(3)};
-  font-family: ${p => p.theme.text.familyMono};
-  color: ${p => p.theme.white};
-  border-radius: ${p => p.theme.borderRadius};
-  display: grid;
-  grid-template-columns: max-content 1fr;
-  grid-gap: ${space(0.75)};
-`;
-
-const Prompt = styled('div')`
-  color: ${p => p.theme.gray300};
+const StyledCodeSnippet = styled(CodeBlock)`
+  padding-left: ${p => p.theme.space.xl};
+  &:before {
+    content: '\0024';
+    position: absolute;
+    padding-top: ${p => p.theme.space.md};
+    color: var(--prism-comment);
+    font-size: ${p => p.theme.font.size.sm};
+  }
 `;

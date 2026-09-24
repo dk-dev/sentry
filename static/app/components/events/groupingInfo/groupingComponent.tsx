@@ -1,11 +1,14 @@
-import React from 'react';
+import {Activity, useId, useState} from 'react';
+import {css} from '@emotion/react';
 import styled from '@emotion/styled';
 
-import space from 'app/styles/space';
-import {EventGroupComponent} from 'app/types';
+import {Button} from '@sentry/scraps/button';
 
-import GroupingComponentChildren from './groupingComponentChildren';
-import GroupingComponentStacktrace from './groupingComponentStacktrace';
+import {IconChevron} from 'sentry/icons';
+import type {EventGroupComponent} from 'sentry/types/event';
+
+import {GroupingComponentChildren} from './groupingComponentChildren';
+import {GroupingComponentStacktrace} from './groupingComponentStacktrace';
 import {shouldInlineComponentValue} from './utils';
 
 type Props = {
@@ -13,80 +16,100 @@ type Props = {
   showNonContributing: boolean;
 };
 
-const GroupingComponent = ({component, showNonContributing}: Props) => {
+export function GroupingComponent({component, showNonContributing}: Props) {
+  const contentId = useId();
   const shouldInlineValue = shouldInlineComponentValue(component);
-
   const GroupingComponentListItems =
     component.id === 'stacktrace'
       ? GroupingComponentStacktrace
       : GroupingComponentChildren;
 
+  const [folded, setFolded] = useState(false);
+  const canFold = !shouldInlineValue;
+
   return (
-    <GroupingComponentWrapper isContributing={component.contributes}>
-      <span>
-        {component.name || component.id}
-        {component.hint && <GroupingHint>{` (${component.hint})`}</GroupingHint>}
-      </span>
-
-      <GroupingComponentList isInline={shouldInlineValue}>
-        <GroupingComponentListItems
-          component={component}
-          showNonContributing={showNonContributing}
+    <CollapseButtonWrapper>
+      {canFold && (
+        <CollapseButton
+          folded={folded}
+          className="collapse-button"
+          variant="link"
+          icon={<IconChevron direction={folded ? 'right' : 'down'} legacySize="10px" />}
+          onClick={() => setFolded(!folded)}
+          aria-label={component.name || component.id}
+          aria-expanded={!folded}
+          aria-controls={contentId}
         />
-      </GroupingComponentList>
-    </GroupingComponentWrapper>
-  );
-};
+      )}
 
-const GroupingComponentList = styled('ul')<{isInline: boolean}>`
-  padding: 0;
-  margin: 0;
+      <GroupingComponentWrapper isContributing={component.contributes}>
+        <span>
+          {component.name || component.id}
+          {component.hint && <GroupingHint>{` (${component.hint})`}</GroupingHint>}
+        </span>
+
+        <Activity mode={folded ? 'hidden' : 'visible'}>
+          <GroupingComponentList
+            id={contentId}
+            isInline={shouldInlineValue}
+            hasFold={canFold}
+          >
+            <GroupingComponentListItems
+              component={component}
+              showNonContributing={showNonContributing}
+            />
+          </GroupingComponentList>
+        </Activity>
+      </GroupingComponentWrapper>
+    </CollapseButtonWrapper>
+  );
+}
+
+const CollapseButtonWrapper = styled('div')`
+  display: grid;
+  grid-template-columns: ${p => p.theme.space.lg} minmax(auto, max-content);
+  align-items: baseline;
+`;
+
+const CollapseButton = styled(Button)<{folded: boolean}>`
+  grid-column: 1;
+  border: none;
+  opacity: ${p => (p.folded ? 1 : 0.65)};
+  transition: opacity 0.2s ease;
+  align-self: ${p => (p.folded ? 'center' : 'baseline')};
+  color: ${p =>
+    p.folded
+      ? p.theme.tokens.interactive.link.accent.rest
+      : p.theme.tokens.content.secondary};
+
+  transform: ${p => (p.folded ? 'translateY(1px)' : 'translateY(2px)')};
+`;
+
+const GroupingComponentWrapper = styled('div')<{isContributing: boolean}>`
+  grid-column: 2;
+  color: ${p =>
+    p.isContributing ? p.theme.tokens.content.primary : p.theme.tokens.content.secondary};
+`;
+
+export const GroupingHint = styled('small')`
+  font-size: 0.8em;
+`;
+
+const GroupingComponentList = styled('ul')<{hasFold: boolean; isInline: boolean}>`
   list-style: none;
+  padding-left: 0;
+  padding-right: 0;
+  margin-left: -6px;
+  margin-right: 0;
+
   &,
   & > li {
     display: ${p => (p.isInline ? 'inline' : 'block')};
   }
-`;
-
-export const GroupingComponentListItem = styled('li')<{isCollapsable?: boolean}>`
-  padding: 0;
-  margin: ${space(0.25)} 0 ${space(0.25)} ${space(1.5)};
 
   ${p =>
-    p.isCollapsable &&
-    `
-    border-left: 1px solid ${p.theme.innerBorder};
-    margin: 0 0 -${space(0.25)} ${space(1)};
-    padding-left: ${space(0.5)};
-  `}
+    p.hasFold &&
+    css`
+      border-left: 1px solid ${p.theme.tokens.border.secondary};
+    `}
 `;
-
-export const GroupingValue = styled('code')<{valueType: string}>`
-  display: inline-block;
-  margin: ${space(0.25)} ${space(0.5)} ${space(0.25)} 0;
-  font-size: ${p => p.theme.fontSizeSmall};
-  padding: 0 ${space(0.25)};
-  background: rgba(112, 163, 214, 0.1);
-  color: #4e3fb4;
-
-  ${({valueType}) =>
-    (valueType === 'function' || valueType === 'symbol') &&
-    `
-    font-weight: bold;
-    color: #2c58a8;
-  `}
-`;
-
-const GroupingComponentWrapper = styled('div')<{isContributing: boolean}>`
-  color: ${p => (p.isContributing ? null : p.theme.gray200)};
-
-  ${GroupingValue}, button {
-    opacity: ${p => (p.isContributing ? 1 : 0.6)};
-  }
-`;
-
-const GroupingHint = styled('small')`
-  font-size: 0.8em;
-`;
-
-export default GroupingComponent;

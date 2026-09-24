@@ -1,47 +1,32 @@
-import {Repository, User} from 'app/types';
-import {IssueAlertRule} from 'app/types/alerts';
-import {IncidentRule} from 'app/views/settings/incidentRules/types';
+import type {User} from 'sentry/types/user';
+import type {MetricRule} from 'sentry/views/alerts/rules/metric/types';
 
-type Data = [number, {count: number}[]][];
+type Data = Array<[number, Array<{count: number}>]>;
 
 export type Incident = {
+  alertRule: MetricRule;
   dateClosed: string | null;
-  dateStarted: string;
-  dateDetected: string;
   dateCreated: string;
+  dateDetected: string;
+  dateStarted: string;
+  // Array of group ids
+  discoverQuery: string;
+  groups: string[];
+  hasSeen: boolean;
   id: string;
   identifier: string;
   isSubscribed: boolean;
-  groups: string[]; // Array of group ids
-  discoverQuery: string;
   organizationId: string;
-  projects: string[]; // Array of slugs
+  projects: string[];
+  // Array of slugs
   seenBy: User[];
   status: IncidentStatus;
   statusMethod: IncidentStatusMethod;
   title: string;
-  hasSeen: boolean;
-  alertRule: IncidentRule;
   activities?: ActivityType[];
 };
 
-export type IncidentStats = {
-  eventStats: {
-    data: Data;
-  };
-  totalEvents: number;
-  uniqueUsers: number;
-};
-
-export type IncidentSuspect = {
-  author: User;
-  dateCreated: string;
-  id: string;
-  message: string;
-  repository: Repository;
-};
-
-export type ActivityTypeDraft = {
+type ActivityTypeDraft = {
   comment: null | string;
   dateCreated: string;
   id: string;
@@ -50,17 +35,11 @@ export type ActivityTypeDraft = {
   user: User | null;
 };
 
-export type ActivityType = ActivityTypeDraft & {
-  eventStats?: {data: Data};
+type ActivityType = ActivityTypeDraft & {
   previousValue: string | null;
-  value: string | null;
+  value: string | null; // determines IncidentStatus of the activity (CRITICAL/WARNING/etc.)
+  eventStats?: {data: Data};
 };
-
-export enum IncidentType {
-  DETECTED,
-  CREATED,
-  TRIGGERED,
-}
 
 export enum IncidentActivityType {
   CREATED = 0,
@@ -77,19 +56,28 @@ export enum IncidentStatus {
   CRITICAL = 20,
 }
 
-export enum IncidentStatusMethod {
+enum IncidentStatusMethod {
   MANUAL = 1,
   RULE_UPDATED = 2,
   RULE_TRIGGERED = 3,
 }
 
-export enum AlertRuleStatus {
-  PENDING = 0,
-  SNAPSHOT = 4,
-  DISABLED = 5,
+export enum CombinedAlertType {
+  METRIC = 'alert_rule',
+  ISSUE = 'rule',
+  UPTIME = 'uptime',
+  CRONS = 'monitor',
 }
 
-export type CombinedMetricIssueAlerts = (IssueAlertRule | IncidentRule) & {
-  type: string;
-  latestIncident?: Incident | null;
+export type Anomaly = {
+  anomaly: {anomaly_score: number; anomaly_type: AnomalyType};
+  timestamp: number;
+  value: number;
 };
+
+export enum AnomalyType {
+  HIGH_CONFIDENCE = 'anomaly_higher_confidence',
+  LOW_CONFIDENCE = 'anomaly_lower_confidence',
+  NONE = 'none',
+  NO_DATA = 'no_data',
+}
